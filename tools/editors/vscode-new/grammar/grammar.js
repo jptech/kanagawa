@@ -25,7 +25,15 @@ module.exports = grammar({
     [$.type_specifier, $.call_expression],
     [$.type_specifier, $.template_instantiation],
     [$.type_specifier, $.primary_expression],
+    [$._simple_type_specifier, $.primary_expression],
+    [$._templated_type_specifier, $.template_instantiation],
     [$.type_specifier, $.qualified_identifier],
+    [$._simple_type_specifier, $.qualified_identifier],
+    [$._templated_type_specifier, $.qualified_identifier],
+    [$.template_instantiation, $.qualified_identifier],
+    [$._templated_type_specifier, $.template_instantiation, $.qualified_identifier],
+    [$.binary_expression, $.assignment_expression],
+    [$.binary_expression, $.assignment_expression, $.ternary_expression],
     [$.template_args, $.binary_expression],
     [$._template_arg_expression, $.expression],
     [$._template_arg_expression, $.primary_expression],
@@ -34,8 +42,6 @@ module.exports = grammar({
     [$.call_expression],
     [$.function_type],
     [$.array_type],
-    [$.while_statement],
-    [$.for_statement],
     
     // Attributed types can look like expressions initially
     [$.attributed_type, $.call_expression],
@@ -56,7 +62,7 @@ module.exports = grammar({
     // Type composition ambiguities
     [$.modified_type, $.array_type],
     [$.array_type, $.function_type],
-    [$.modified_type, $.for_statement],
+    [$.modified_type, $.range_for_statement],
     
     // Variable declarations vs expressions (e.g., "optional<T>[N] x" vs subscript)
     [$.variable_decl, $.expression_statement],
@@ -70,9 +76,14 @@ module.exports = grammar({
     // Declaration contexts
     [$.declaration, $.member_decl],
     [$.declaration, $.statement],
+    [$.declaration, $._statement_body],
     
     // static can be a modifier or start static_assert
     [$.decl_modifiers, $.func_modifiers, $.static_assert],
+
+    // Attribute categories share the same prefix
+    [$.attributes, $.memory_attributes],
+    [$.call_attributes, $.loop_attributes],
   ],
 
   rules: {
@@ -398,20 +409,36 @@ module.exports = grammar({
       'string',
       'bool',
       'float32',
-      seq('int', optional(choice(seq('<', $.expression, '>'), $.integer_suffix))),
-      seq('uint', optional(choice(seq('<', $.expression, '>'), $.integer_suffix))),
+      seq('int', optional(choice(
+        seq(token.immediate('<'), $._template_arg_expression, token.immediate('>')),
+        $.integer_suffix
+      ))),
+      seq('uint', optional(choice(
+        seq(token.immediate('<'), $._template_arg_expression, token.immediate('>')),
+        $.integer_suffix
+      ))),
     ),
 
     modified_type: $ => seq('const', $.type),
 
-    type_specifier: $ => prec.dynamic(20, prec.left(seq(
+    type_specifier: $ => choice(
+      $._simple_type_specifier,
+      $._templated_type_specifier
+    ),
+
+    _simple_type_specifier: $ => prec.dynamic(20, seq(
+      optional($.scope_qualifier),
+      $.identifier
+    )),
+
+    _templated_type_specifier: $ => prec.dynamic(20, prec.left(18, seq(
       optional($.scope_qualifier),
       $.identifier,
-      optional($.template_args)
+      $.template_args
     ))),
 
-    array_type: $ => prec.dynamic(15, prec.right(seq(
-      optional($.attributes), // Using general attributes instead of memory_attributes
+    array_type: $ => prec.dynamic(20, prec.right(18, seq(
+      optional($.memory_attributes),
       $.type,
       repeat1(seq(token.immediate('['), $.expression, ']'))
     ))),
@@ -434,7 +461,12 @@ module.exports = grammar({
 
     decltype_type: $ => seq('decltype', '(', $.expression, ')'),
 
-    scope_qualifier: $ => prec.left(repeat1(seq($.identifier, token.immediate('::')))),
+    scope_qualifier: $ => prec.left(repeat1(seq(
+      optional('template'),
+      $.identifier,
+      optional($.template_args),
+      token.immediate('::')
+    ))),
 
     integer_suffix: $ => /[iu]\d+/,
 
@@ -480,6 +512,32 @@ module.exports = grammar({
       ']]'
     ),
 
+    call_attributes: $ => seq(
+      '[[',
+      commaSep1(choice(
+        seq('call_rate', '(', $.expression, ')'),
+        seq('fifo_depth', '(', $.expression, ')'),
+        seq('transaction_size', '(', $.expression, ')')
+      )),
+      ']]'
+    ),
+
+    statement_attributes: $ => seq(
+      '[[',
+      commaSep1(seq('schedule', '(', $.expression, ')')),
+      ']]'
+    ),
+
+    loop_attributes: $ => seq(
+      '[[',
+      commaSep1(choice(
+        'unordered',
+        'reorder_by_looping',
+        seq('fifo_depth', '(', $.expression, ')')
+      )),
+      ']]'
+    ),
+
     // ============================================================================
     // Template Parameters & Arguments
     // ============================================================================
@@ -504,21 +562,27 @@ module.exports = grammar({
         $.identifier,
         optional(seq('=', $._template_arg_expression))
       ),
-      // Type name
+      // Typed non-type parameter
       seq(
         $.type,
         $.identifier,
         optional(seq('=', $._template_arg_expression))
       ),
-      // Template template parameter: template <typename> typename TT
+      // Template template parameter: template <typename> typename TT = template_id
       seq(
         'template',
         '<',
-        commaSep1($.template_param),
+        commaSep1($.template_param_kind),
         '>',
         'typename',
-        $.identifier
+        $.identifier,
+        optional(seq('=', $.type_specifier))
       )
+    ),
+
+    template_param_kind: $ => choice(
+      'typename',
+      $.type
     ),
 
     template_args: $ => seq(
@@ -559,16 +623,19 @@ module.exports = grammar({
     )), '}'),
 
     statement: $ => choice(
+      $.annotated_statement,
+      $._statement_body
+    ),
+
+    _statement_body: $ => choice(
       $.empty_statement,
       seq($.variable_decl, ';'),  // Explicitly allow variable declarations as statements
       $.expression_statement,
       $.block,
       $.if_statement,
       $.switch_statement,
-      $.for_statement,
-      $.while_statement,
+      $.range_for_statement,
       $.do_while_statement,
-      $.atomic_do_while_statement,
       $.atomic_statement,
       $.reorder_statement,
       $.barrier_statement,
@@ -578,6 +645,8 @@ module.exports = grammar({
       $.static_if,
       $.static_for,
     ),
+
+    annotated_statement: $ => seq($.statement_attributes, $._statement_body),
 
     empty_statement: $ => ';',
 
@@ -593,24 +662,7 @@ module.exports = grammar({
 
     reorder_statement: $ => seq('reorder', $.statement),
 
-    atomic_statement: $ => seq(
-      'atomic',
-      optional($.attributes),
-      $.statement
-    ),
-
-    // Critical: atomic do while is a SINGLE construct (higher precedence than atomic statement)
-    atomic_do_while_statement: $ => prec(1, seq(
-      'atomic',
-      optional($.attributes),
-      'do',
-      $.statement,
-      'while',
-      '(',
-      $.expression,
-      ')',
-      ';'
-    )),
+    atomic_statement: $ => seq('atomic', $.statement),
 
     if_statement: $ => prec.right(seq(
       'if',
@@ -644,43 +696,21 @@ module.exports = grammar({
       repeat($.statement)
     ),
 
-    for_statement: $ => seq(
-      optional($.attributes),
+    range_for_statement: $ => seq(
+      optional($.loop_attributes),
       'for',
       '(',
-      choice(
-        // Range-based for: for (const T i : expr)
-        seq(
-          'const',
-          $.type,
-          $.identifier,
-          ':',
-          $.expression
-        ),
-        // Traditional for: for (init; cond; update)
-        seq(
-          choice($.variable_decl, $.expression, $.empty_statement),
-          ';',
-          optional($.expression),
-          ';',
-          optional($.expression)
-        )
-      ),
-      ')',
-      $.statement
-    ),
-
-    while_statement: $ => seq(
-      optional($.attributes),
-      'while',
-      '(',
+      'const',
+      $.type,
+      $.identifier,
+      ':',
       $.expression,
       ')',
       $.statement
     ),
 
     do_while_statement: $ => seq(
-      optional($.attributes),
+      optional($.loop_attributes),
       'do',
       $.statement,
       'while',
@@ -730,7 +760,7 @@ module.exports = grammar({
       prec.left(12, seq($.expression, choice('+', '-'), $.expression)),
       
       // Precedence 11: Shift
-      prec.left(11, seq($.expression, choice('<<', '>>'), $.expression)),
+      prec.left(11, seq($.expression, choice('<<', alias(seq('>', token.immediate('>')), '>>')), $.expression)),
       
       // Precedence 10: Relational
       prec.left(10, seq($.expression, choice('<', '<=', '>', '>='), $.expression)),
@@ -787,7 +817,7 @@ module.exports = grammar({
       choice(
         '=',
         '+=', '-=', '*=', '/=', '%=',
-        '<<=', '>>=',
+        '<<=', alias(seq('>', token.immediate('>'), token.immediate('=')), '>>='),
         '&=', '|=', '^=',
         '&&=', '||=', '^^='
       ),
@@ -810,13 +840,13 @@ module.exports = grammar({
     member_expression: $ => prec.left(18, seq(
       $.expression,
       token.immediate('.'),
+      optional('template'),
       $.identifier,
-      // Support template member access: obj.template method<T>()
-      optional(seq(token.immediate('template'), $.template_args))
+      optional($.template_args)
     )),
 
     call_expression: $ => prec.left(18, seq(
-      optional($.attributes),
+      optional($.call_attributes),
       $.expression,
       $.argument_list
     )),
@@ -862,13 +892,16 @@ module.exports = grammar({
 
     template_instantiation: $ => prec.dynamic(-5, prec(18, seq(
       optional($.scope_qualifier),
+      optional('template'),
       $.identifier,
       $.template_args
     ))),
 
     qualified_identifier: $ => seq(
       $.scope_qualifier,
-      $.identifier
+      optional('template'),
+      $.identifier,
+      optional($.template_args)
     ),
 
     // ----------------------------------------------------------------------------
@@ -981,7 +1014,7 @@ module.exports = grammar({
       optional(token.immediate('=')),
       optional(seq(
         token.immediate(','),
-        optional(token.immediate(/[+-]?[0-9]+/))  // alignment
+        $.expression
       )),
       optional(seq(
         token.immediate(':'),
