@@ -231,7 +231,8 @@ module.exports = grammar({
     class_decl: $ => prec.right(seq(
       'class',
       field('name', $.identifier),
-      optional(seq('{', repeat($.member_decl), '}'))
+      optional(seq('{', repeat($.member_decl), '}')),
+      optional(';')
     )),
 
     class_template: $ => seq(
@@ -242,7 +243,8 @@ module.exports = grammar({
     struct_decl: $ => prec.right(seq(
       'struct',
       field('name', $.identifier),
-      optional(seq('{', repeat($.member_decl), '}'))
+      optional(seq('{', repeat($.member_decl), '}')),
+      optional(';')
     )),
 
     struct_template: $ => seq(
@@ -253,7 +255,8 @@ module.exports = grammar({
     union_decl: $ => prec.right(seq(
       'union',
       field('name', $.identifier),
-      optional(seq('{', repeat($.member_decl), '}'))
+      optional(seq('{', repeat($.member_decl), '}')),
+      optional(';')
     )),
 
     union_template: $ => seq(
@@ -282,7 +285,7 @@ module.exports = grammar({
     // Enums
     // ----------------------------------------------------------------------------
 
-    enum_decl: $ => seq(
+    enum_decl: $ => prec.right(seq(
       'enum',
       field('name', $.identifier),
       ':',
@@ -290,8 +293,9 @@ module.exports = grammar({
       '{',
       commaSep($.enum_constant),
       optional(','),
-      '}'
-    ),
+      '}',
+      optional(';')
+    )),
 
     enum_constant: $ => seq(
       field('name', $.identifier),
