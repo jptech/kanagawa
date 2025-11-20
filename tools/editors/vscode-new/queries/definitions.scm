@@ -50,8 +50,9 @@
 
 ; Member variables (inside classes/structs)
 (member_decl
-  (variable_decl
-    name: (identifier) @member.name)) @member
+  (declaration
+    (variable_decl
+      name: (identifier) @member.name))) @member
 
 ; Enum constants
 (enum_constant

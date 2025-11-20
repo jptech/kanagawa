@@ -18,7 +18,7 @@ module.exports = grammar({
     $.comment,
   ],
 
-  word: $ => $.identifier,
+  word: $ => $._word,
 
   conflicts: $ => [
     // Type vs expression ambiguities (common in C-like languages)
@@ -58,12 +58,21 @@ module.exports = grammar({
     [$.array_type, $.function_type],
     [$.modified_type, $.for_statement],
     
+    // Variable declarations vs expressions (e.g., "optional<T>[N] x" vs subscript)
+    [$.variable_decl, $.expression_statement],
+    [$.variable_decl, $.primary_expression],
+    [$.variable_decl],
+    [$.array_type, $.subscript_expression],
+    
     // Function types can appear in both type and expression contexts
     [$.type, $.primary_expression],
     
     // Declaration contexts
     [$.declaration, $.member_decl],
     [$.declaration, $.statement],
+    
+    // static can be a modifier or start static_assert
+    [$.decl_modifiers, $.func_modifiers, $.static_assert],
   ],
 
   rules: {
@@ -161,7 +170,7 @@ module.exports = grammar({
     // Variables
     // ----------------------------------------------------------------------------
 
-    variable_decl: $ => prec(1, seq(
+    variable_decl: $ => prec.dynamic(100, seq(
       optional($.attributes),
       optional(field('modifiers', $.decl_modifiers)),
       field('type', $.type),
@@ -337,8 +346,7 @@ module.exports = grammar({
     // ----------------------------------------------------------------------------
 
     static_assert: $ => seq(
-      'static',
-      /assert/,
+      token(prec(10, seq('static', /\s+/, 'assert'))),
       '(',
       $.expression,
       optional(seq(',', $.string_literal)),
@@ -396,19 +404,17 @@ module.exports = grammar({
 
     modified_type: $ => seq('const', $.type),
 
-    type_specifier: $ => prec.left(seq(
+    type_specifier: $ => prec.dynamic(20, prec.left(seq(
       optional($.scope_qualifier),
       $.identifier,
       optional($.template_args)
-    )),
+    ))),
 
-    array_type: $ => prec.right(seq(
+    array_type: $ => prec.dynamic(15, prec.right(seq(
       optional($.attributes), // Using general attributes instead of memory_attributes
       $.type,
-      '[',
-      $.expression,
-      ']'
-    )),
+      repeat1(seq(token.immediate('['), $.expression, ']'))
+    ))),
 
     function_type: $ => seq(
       optional($.attributes),
@@ -547,10 +553,14 @@ module.exports = grammar({
     // Statements
     // ============================================================================
 
-    block: $ => seq('{', repeat(choice($.statement, $.declaration)), '}'),
+    block: $ => seq('{', repeat(choice(
+      prec(1, $.declaration),
+      $.statement
+    )), '}'),
 
     statement: $ => choice(
       $.empty_statement,
+      seq($.variable_decl, ';'),  // Explicitly allow variable declarations as statements
       $.expression_statement,
       $.block,
       $.if_statement,
@@ -571,7 +581,7 @@ module.exports = grammar({
 
     empty_statement: $ => ';',
 
-    expression_statement: $ => seq($.expression, ';'),
+    expression_statement: $ => prec(-1, seq($.expression, ';')),
 
     return_statement: $ => seq('return', optional($.expression), ';'),
 
@@ -817,12 +827,12 @@ module.exports = grammar({
       ')'
     ),
 
-    subscript_expression: $ => prec.left(18, seq(
+    subscript_expression: $ => prec.dynamic(-10, prec.left(18, seq(
       $.expression,
       token.immediate('['),
       $.expression,
       ']'
-    )),
+    ))),
 
     // ----------------------------------------------------------------------------
     // Casts
@@ -844,18 +854,17 @@ module.exports = grammar({
       seq('concat', '(', commaSep1($.expression), ')'),
       seq('fan_out', '<', $.expression, '>', '(', $.expression, ')'),
       seq('lutmul', '(', $.expression, ',', $.expression, ')'),
-      seq(/assert/, '(', $.expression, ')'),
     ),
 
     // ----------------------------------------------------------------------------
     // Templates & Qualified Names
     // ----------------------------------------------------------------------------
 
-    template_instantiation: $ => prec(18, seq(
+    template_instantiation: $ => prec.dynamic(-5, prec(18, seq(
       optional($.scope_qualifier),
       $.identifier,
       $.template_args
-    )),
+    ))),
 
     qualified_identifier: $ => seq(
       $.scope_qualifier,
@@ -986,7 +995,9 @@ module.exports = grammar({
     // Identifiers
     // ============================================================================
 
-    identifier: $ => /[a-zA-Z_][a-zA-Z0-9_]*/,
+    _word: $ => /[a-zA-Z_][a-zA-Z0-9_]*/,
+    
+    identifier: $ => $._word,
   }
 });
 

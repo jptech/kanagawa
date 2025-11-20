@@ -17,6 +17,13 @@ export async function activate(context: vscode.ExtensionContext) {
     await service.init();
 
     const queryManager = new QueryManager(context);
+    
+    // Preload all queries
+    await Promise.all([
+        queryManager.loadQuery('highlights'),
+        queryManager.loadQuery('definitions'),
+        queryManager.loadQuery('outline')
+    ]);
 
     const indexer = new WorkspaceIndexer(service, queryManager);
     const diagnosticsProvider = new KanagawaDiagnosticsProvider(service);
