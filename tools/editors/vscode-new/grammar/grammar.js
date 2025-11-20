@@ -857,7 +857,7 @@ module.exports = grammar({
     )),
 
     argument_list: $ => seq(
-      token.immediate('('),
+      '(',
       commaSep($.expression),
       ')'
     ),
