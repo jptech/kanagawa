@@ -599,7 +599,7 @@ module.exports = grammar({
       $.member_expression,
       $.call_expression,
       $.subscript_expression,
-      $.cast_expression,
+      // $.cast_expression,
       // Binary expressions excluding comparison operators
       prec.left(13, seq($._template_arg_expression, choice('*', '/', '%'), $._template_arg_expression)),
       prec.left(12, seq($._template_arg_expression, choice('+', '-'), $._template_arg_expression)),
@@ -734,7 +734,7 @@ module.exports = grammar({
       $.member_expression,
       $.call_expression,
       $.subscript_expression,
-      $.cast_expression,
+      // $.cast_expression,
       $.lambda_expression,
       $.template_instantiation,
     ),
@@ -746,6 +746,7 @@ module.exports = grammar({
       $.initializer,
       $.function_type,
       seq('(', $.expression, ')'),
+      $.cast_operator,
     ),
 
     // ----------------------------------------------------------------------------
@@ -868,11 +869,9 @@ module.exports = grammar({
     // Casts
     // ----------------------------------------------------------------------------
 
-    cast_expression: $ => prec(18, choice(
-      seq('cast', optional(seq('<', $.type, '>')), '(', $.expression, ')'),
-      seq('static_cast', optional(seq('<', $.type, '>')), '(', $.expression, ')'),
-      seq('reinterpret_cast', optional(seq('<', $.type, '>')), '(', $.expression, ')'),
-      seq('checked_cast', optional(seq('<', $.type, '>')), '(', $.expression, ')'),
+    cast_operator: $ => prec.right(18, seq(
+      choice('cast', 'static_cast', 'reinterpret_cast', 'checked_cast'),
+      optional(seq('<', $.type, '>'))
     )),
 
     // ----------------------------------------------------------------------------
