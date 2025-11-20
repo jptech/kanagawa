@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+
+# Compiled output
+out/
+dist/
+
+# IDE specific files
+.vscode/
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Temporary files
+*.tmp
+.env.local
+
+# Build artifacts
+*.vsix
+
+# Tree-sitter generated files
+src/parser.c
+src/parser.h
+grammar/src/parser.c
+grammar/node-types.json
+grammar/grammar.json
+grammar/tree_sitter/
+
+# Rust build artifacts (tree-sitter compiler)
+grammar/target/
+grammar/Cargo.lock
+
+# Native module build artifacts
+grammar/bindings/
+grammar/*.obj
+grammar/*.lib
+grammar/*.exp

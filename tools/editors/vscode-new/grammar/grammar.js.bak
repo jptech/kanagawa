@@ -1,0 +1,1105 @@
+/**
+ * Kanagawa Tree-sitter Grammar
+ * 
+ * Complete grammar for the Kanagawa HLS language based on:
+ * - Haskell parser implementation (compiler/hs/lib/Language/Kanagawa/Parser.hs)
+ * - EBNF specification (overview.md)
+ * - Library code examples (library/*)
+ * - Grammar analysis (grammar-analysis.md)
+ */
+
+module.exports = grammar({
+  name: 'kanagawa',
+
+  extras: $ => [
+    /\s/,
+    $.comment,
+  ],
+
+  // Explicit word list for keyword matching
+  word: $ => $.identifier,
+
+  conflicts: $ => [
+    // Type vs expression ambiguities
+    [$.type_specifier, $._primary_expression],
+    [$.type_specifier, $.qualified_identifier],
+    [$._type, $._expression],
+    
+    // Template ambiguities
+    [$.template_args, $._expression],
+    [$.template_instantiation, $._type],
+    
+    // Declaration vs statement
+    [$.variable_decl, $._expression],
+    
+    // Attributes in various contexts
+    [$.attributed_type, $.function_definition],
+    [$.attributed_type, $.parameter],
+  ],
+
+  rules: {
+    source_file: $ => repeat(choice(
+      $.module_decl,
+      $._declaration
+    )),
+
+    // ========================================================================
+    // COMMENTS
+    // ========================================================================
+
+    comment: $ => token(choice(
+      // Documentation comments - must come before regular comments
+      seq('//|', /.*/),   // Pre-documentation comment
+      seq('//<', /.*/),   // Post-documentation comment
+      seq('//', /.*/),    // Regular single-line comment
+      // Multi-line comment (nestable in Haskell parser)
+      seq('/*', /[^*]*\*+([^/*][^*]*\*+)*/, '/')
+    )),
+
+    // ========================================================================
+    // MODULE SYSTEM
+    // ========================================================================
+
+    module_decl: $ => seq(
+      'module',
+      field('name', $.module_name),
+      optional(seq(
+        '{',
+        commaSep(choice(
+          $.identifier,
+          $.module_reference,
+          $.module_difference
+        )),
+        '}'
+      )),
+      repeat($._declaration)
+    ),
+
+    module_name: $ => choice(
+      '.cmdargs',
+      '.options',
+      sepBy1('.', $.module_identifier_part)
+    ),
+
+    module_identifier_part: $ => /[a-zA-Z_][a-zA-Z0-9_\-]*/,
+
+    module_reference: $ => seq('module', $.module_name),
+
+    module_difference: $ => seq(
+      'module',
+      field('include', $.module_name),
+      '\\',
+      field('exclude', $.module_name)
+    ),
+
+    // ========================================================================
+    // DECLARATIONS
+    // ========================================================================
+
+    _declaration: $ => choice(
+      $.import_decl,
+      $.global_variable,
+      $.static_if,
+      $.static_assert,
+      $.function_definition,
+      $.function_template,
+      $.class_decl,
+      $.class_template,
+      $.struct_decl,
+      $.struct_template,
+      $.union_decl,
+      $.union_template,
+      $.enum_decl,
+      $.alias_decl,
+      $.alias_template,
+      $.export_decl,
+      $.extern_decl
+    ),
+
+    import_decl: $ => seq(
+      'import',
+      field('path', $.module_name),
+      optional(seq('as', field('alias', $.identifier))),
+      optional(';')
+    ),
+
+    global_variable: $ => seq(
+      $.variable_decl,
+      ';'
+    ),
+
+    export_decl: $ => seq(
+      'export',
+      choice(
+        seq($._type, ';'),
+        $.class_decl
+      )
+    ),
+
+    extern_decl: $ => seq(
+      'extern',
+      choice(
+        seq($._type, ';'),
+        $.class_decl
+      )
+    ),
+
+    static_assert: $ => choice(
+      // Modern syntax: static assert
+      seq('static', 'assert', '(', $._expression, ')', ';'),
+      // Legacy syntax: static_assert
+      seq('static_assert', '(', $._expression, ')', ';')
+    ),
+
+    // ========================================================================
+    // VARIABLES
+    // ========================================================================
+
+    variable_decl: $ => seq(
+      optional($.attributes),
+      optional($.storage_class),
+      field('type', $._type),
+      field('name', $.identifier),
+      optional(seq('=', field('initializer', choice($._expression, $.initializer_list))))
+    ),
+
+    storage_class: $ => choice(
+      'static',
+      'extern',
+      'register',
+      'thread_local'
+    ),
+
+    // ========================================================================
+    // FUNCTIONS
+    // ========================================================================
+
+    function_definition: $ => seq(
+      optional($.attributes),
+      optional($.storage_class),
+      optional($.function_modifiers),
+      field('return_type', $._type),
+      field('name', $.identifier),
+      field('parameters', $.parameter_list),
+      choice($.block, ';')
+    ),
+
+    function_modifiers: $ => choice('inline', 'noinline'),
+
+    function_template: $ => seq(
+      'template',
+      '<',
+      commaSep1($.template_param),
+      '>',
+      $.function_definition
+    ),
+
+    parameter_list: $ => seq(
+      '(',
+      commaSep($.parameter),
+      ')'
+    ),
+
+    parameter: $ => seq(
+      optional($.attributes),
+      $._type,
+      optional($.identifier)
+    ),
+
+    // ========================================================================
+    // CLASSES
+    // ========================================================================
+
+    class_decl: $ => seq(
+      'class',
+      field('name', $.identifier),
+      optional(seq(
+        '{',
+        repeat($.member_decl),
+        '}'
+      ))
+    ),
+
+    class_template: $ => seq(
+      'template',
+      '<',
+      commaSep1($.template_param),
+      '>',
+      $.class_decl
+    ),
+
+    member_decl: $ => choice(
+      seq(choice('private', 'public', 'protected'), ':'),
+      $.static_if,
+      $.static_assert,
+      seq($.variable_decl, ';'),
+      $.function_definition,
+      $.function_template,
+      $.class_decl,
+      $.class_template,
+      $.struct_decl,
+      $.struct_template,
+      $.union_decl,
+      $.union_template,
+      $.enum_decl,
+      $.alias_decl,
+      $.alias_template,
+      $.default_initialization
+    ),
+
+    default_initialization: $ => seq(
+      'default',
+      '=',
+      $._expression,
+      ';'
+    ),
+
+    // ========================================================================
+    // STRUCTS
+    // ========================================================================
+
+    struct_decl: $ => seq(
+      'struct',
+      field('name', $.identifier),
+      optional(seq(
+        '{',
+        repeat(seq($.variable_decl, ';')),
+        '}'
+      ))
+    ),
+
+    struct_template: $ => seq(
+      'template',
+      '<',
+      commaSep1($.template_param),
+      '>',
+      $.struct_decl
+    ),
+
+    // ========================================================================
+    // UNIONS
+    // ========================================================================
+
+    union_decl: $ => seq(
+      'union',
+      field('name', $.identifier),
+      optional(seq(
+        '{',
+        repeat(seq($.variable_decl, ';')),
+        '}'
+      ))
+    ),
+
+    union_template: $ => seq(
+      'template',
+      '<',
+      commaSep1($.template_param),
+      '>',
+      $.union_decl
+    ),
+
+    // ========================================================================
+    // ENUMS
+    // ========================================================================
+
+    enum_decl: $ => seq(
+      'enum',
+      field('name', $.identifier),
+      ':',
+      field('base_type', $._type),
+      '{',
+      commaSep($.enum_constant),
+      optional(','),
+      '}'
+    ),
+
+    enum_constant: $ => seq(
+      $.identifier,
+      optional(seq('=', $._expression))
+    ),
+
+    // ========================================================================
+    // TYPE ALIASES
+    // ========================================================================
+
+    alias_decl: $ => seq(
+      'using',
+      field('name', $.identifier),
+      '=',
+      field('type', $._type),
+      ';'
+    ),
+
+    alias_template: $ => seq(
+      'template',
+      '<',
+      commaSep1($.template_param),
+      '>',
+      'using',
+      field('name', $.identifier),
+      '=',
+      field('type', $._type),
+      ';'
+    ),
+
+    // ========================================================================
+    // TYPES
+    // ========================================================================
+
+    _type: $ => choice(
+      $.primitive_type,
+      $.type_specifier,
+      $.array_type,
+      $.function_type,
+      $.const_type,
+      $.attributed_type,
+      $.typename_type,
+      $.decltype_type
+    ),
+
+    primitive_type: $ => choice(
+      'void',
+      'auto',
+      'string',
+      'bool',
+      'float32',
+      $.int_type,
+      $.uint_type
+    ),
+
+    int_type: $ => seq(
+      'int',
+      optional(choice(
+        seq('<', $._expression, '>'),
+        $.integer_suffix
+      ))
+    ),
+
+    uint_type: $ => seq(
+      'uint',
+      optional(choice(
+        seq('<', $._expression, '>'),
+        $.integer_suffix
+      ))
+    ),
+
+    type_specifier: $ => prec.dynamic(1, seq(
+      optional($.scope_qualifier),
+      $.identifier,
+      optional($.template_args)
+    )),
+
+    array_type: $ => prec(2, seq(
+      optional($.memory_attributes),
+      $._type,
+      '[',
+      $._expression,
+      ']'
+    )),
+
+    function_type: $ => seq(
+      optional($.attributes),
+      '(',
+      commaSep($.function_type_param),
+      ')',
+      '->',
+      $._type
+    ),
+
+    function_type_param: $ => seq(
+      optional($.attributes),
+      $._type,
+      optional($.identifier)
+    ),
+
+    const_type: $ => seq('const', $._type),
+
+    attributed_type: $ => seq($.attributes, $._type),
+
+    typename_type: $ => seq('typename', $.type_specifier),
+
+    decltype_type: $ => seq(
+      'decltype',
+      '(',
+      $._expression,
+      ')'
+    ),
+
+    // ========================================================================
+    // ATTRIBUTES
+    // ========================================================================
+
+    attributes: $ => seq(
+      '[[',
+      commaSep1($.attribute),
+      ']]'
+    ),
+
+    attribute: $ => choice(
+      // Flag attributes
+      'async',
+      'pipelined',
+      'unordered',
+      'pure',
+      'no_backpressure',
+      'reset',
+      'reorder_by_looping',
+      'last',
+      'end_transaction',
+      
+      // Attributes with arguments
+      seq('latency', '(', $._expression, ')'),
+      seq('thread_rate', '(', $._expression, ')'),
+      seq('schedule', '(', $._expression, ')'),
+      seq('name', '(', $.string_literal, ')'),
+      seq('fifo_depth', '(', $._expression, ')'),
+      seq('call_rate', '(', $._expression, ')'),
+      seq('transaction_size', '(', $._expression, ')'),
+      seq('max_threads', '(', $._expression, ')'),
+      
+      // Generic attribute with identifier and optional args
+      seq($.identifier, optional(seq('(', commaSep($._expression), ')')))
+    ),
+
+    memory_attributes: $ => seq(
+      '[[',
+      commaSep1(choice(
+        'Memory',
+        'NonReplicated',
+        'non_replicated',
+        'QuadPort',
+        'quad_port',
+        'DualPort',
+        'Initialize',
+        'BRAM',
+        'LUTRAM',
+        seq('Ecc', '(', $.identifier, ')')
+      )),
+      ']]'
+    ),
+
+    // ========================================================================
+    // TEMPLATES
+    // ========================================================================
+
+    template_param: $ => choice(
+      // typename T
+      seq('typename', $.identifier, optional(seq('=', $._type))),
+      // auto N
+      seq('auto', $.identifier, optional(seq('=', $._expression))),
+      // Type name
+      seq($._type, $.identifier, optional(seq('=', $._expression))),
+      // Template template parameter: template <typename> typename TT
+      $.template_template_param
+    ),
+
+    template_template_param: $ => seq(
+      'template',
+      '<',
+      commaSep1($.template_param_kind),
+      '>',
+      'typename',
+      $.identifier,
+      optional(seq('=', $.type_specifier))
+    ),
+
+    template_param_kind: $ => choice(
+      'typename',
+      'auto',
+      $._type
+    ),
+
+    template_args: $ => seq(
+      '<',
+      commaSep1(choice($._type, $._template_expression)),
+      '>'
+    ),
+
+    // Template expressions cannot have < > << >> at top level
+    _template_expression: $ => choice(
+      $.template_ternary,
+      $.template_binary,
+      $.unary_expression,
+      $._primary_expression
+    ),
+
+    template_ternary: $ => prec.right(2, seq(
+      $._template_expression,
+      '?',
+      $._template_expression,
+      ':',
+      $._template_expression
+    )),
+
+    template_binary: $ => choice(
+      // No comparison or shift operators
+      prec.left(13, seq($._template_expression, '*', $._template_expression)),
+      prec.left(13, seq($._template_expression, '/', $._template_expression)),
+      prec.left(13, seq($._template_expression, '%', $._template_expression)),
+      prec.left(12, seq($._template_expression, '+', $._template_expression)),
+      prec.left(12, seq($._template_expression, '-', $._template_expression)),
+      prec(9, seq($._template_expression, '==', $._template_expression)),
+      prec(9, seq($._template_expression, '!=', $._template_expression)),
+      prec.left(8, seq($._template_expression, '&', $._template_expression)),
+      prec.left(7, seq($._template_expression, '^', $._template_expression)),
+      prec.left(6, seq($._template_expression, '|', $._template_expression)),
+      prec.left(5, seq($._template_expression, '&&', $._template_expression)),
+      prec.left(4, seq($._template_expression, '^^', $._template_expression)),
+      prec.left(3, seq($._template_expression, '||', $._template_expression))
+    ),
+
+    // ========================================================================
+    // STATEMENTS
+    // ========================================================================
+
+    block: $ => seq(
+      '{',
+      repeat($._statement_or_decl),
+      '}'
+    ),
+
+    _statement_or_decl: $ => choice(
+      $._statement,
+      $._declaration
+    ),
+
+    _statement: $ => choice(
+      $.empty_statement,
+      $.expression_statement,
+      $.block,
+      $.if_statement,
+      $.switch_statement,
+      $.loop_statement,
+      $.atomic_do_while,
+      $.atomic_statement,
+      $.barrier_statement,
+      $.reorder_statement,
+      $.return_statement,
+      $.static_if,
+      $.static_for
+    ),
+
+    empty_statement: $ => ';',
+
+    expression_statement: $ => seq($._expression, ';'),
+
+    barrier_statement: $ => seq('barrier', ';'),
+
+    reorder_statement: $ => seq('reorder', $._statement),
+
+    atomic_statement: $ => seq(
+      'atomic',
+      optional($.attributes),
+      $._statement
+    ),
+
+    // Critical: atomic do while is a single construct
+    atomic_do_while: $ => seq(
+      'atomic',
+      optional($.attributes),
+      'do',
+      $._statement,
+      'while',
+      '(',
+      $._expression,
+      ')'
+    ),
+
+    return_statement: $ => seq(
+      'return',
+      optional($._expression),
+      ';'
+    ),
+
+    if_statement: $ => prec.right(seq(
+      'if',
+      '(',
+      $._expression,
+      ')',
+      $._statement,
+      optional(seq('else', $._statement))
+    )),
+
+    switch_statement: $ => seq(
+      'switch',
+      '(',
+      $._expression,
+      ')',
+      '{',
+      repeat(choice($.case_clause, $.default_clause)),
+      '}'
+    ),
+
+    case_clause: $ => seq(
+      'case',
+      $._expression,
+      ':',
+      repeat($._statement),
+      'break',
+      ';'
+    ),
+
+    default_clause: $ => seq(
+      'default',
+      ':',
+      repeat($._statement),
+      'break',
+      ';'
+    ),
+
+    loop_statement: $ => seq(
+      optional($.attributes),
+      choice(
+        $.range_for,
+        $.do_while,
+        $.while_loop,
+        $.for_loop
+      )
+    ),
+
+    range_for: $ => seq(
+      'for',
+      '(',
+      'const',
+      $._type,
+      $.identifier,
+      ':',
+      $._expression,
+      ')',
+      $._statement
+    ),
+
+    do_while: $ => seq(
+      'do',
+      $._statement,
+      'while',
+      '(',
+      $._expression,
+      ')'
+    ),
+
+    while_loop: $ => seq(
+      'while',
+      '(',
+      $._expression,
+      ')',
+      $._statement
+    ),
+
+    for_loop: $ => seq(
+      'for',
+      '(',
+      choice($.variable_decl, $._expression, $.empty_statement),
+      ';',
+      optional($._expression),
+      ';',
+      optional($._expression),
+      ')',
+      $._statement
+    ),
+
+    static_for: $ => seq(
+      'static',
+      'for',
+      '(',
+      'const',
+      $._type,
+      $.identifier,
+      ':',
+      $._expression,
+      ')',
+      $._statement_or_decl
+    ),
+
+    static_if: $ => prec.right(seq(
+      'static',
+      'if',
+      '(',
+      $._expression,
+      ')',
+      $._statement_or_decl,
+      optional(seq('else', $._statement_or_decl))
+    )),
+
+    // ========================================================================
+    // EXPRESSIONS
+    // ========================================================================
+
+    _expression: $ => choice(
+      $.assignment_expression,
+      $.ternary_expression,
+      $.binary_expression,
+      $.unary_expression,
+      $._primary_expression
+    ),
+
+    _primary_expression: $ => choice(
+      $.identifier,
+      $.qualified_identifier,
+      $.literal,
+      $.call_expression,
+      $.member_expression,
+      $.subscript_expression,
+      $.cast_expression,
+      $.lambda_expression,
+      $.initializer_list,
+      $.template_instantiation,
+      $.builtin_function,
+      $.parenthesized_expression,
+      $.inc_dec_expression
+    ),
+
+    parenthesized_expression: $ => seq('(', $._expression, ')'),
+
+    // Assignment operators
+    assignment_expression: $ => prec.right(1, seq(
+      $._expression,
+      choice(
+        '=',
+        '+=', '-=', '*=', '/=', '%=',
+        '<<=', '>>=',
+        '&=', '|=', '^=',
+        '&&=', '||=', '^^='
+      ),
+      $._expression
+    )),
+
+    // Ternary operator (precedence 2)
+    ternary_expression: $ => prec.right(2, seq(
+      $._expression,
+      '?',
+      $._expression,
+      ':',
+      $._expression
+    )),
+
+    // Binary operators with proper precedence (3-13)
+    binary_expression: $ => choice(
+      // Precedence 13: Multiplication, division, modulo
+      prec.left(13, seq($._expression, '*', $._expression)),
+      prec.left(13, seq($._expression, '/', $._expression)),
+      prec.left(13, seq($._expression, '%', $._expression)),
+      
+      // Precedence 12: Addition, subtraction
+      prec.left(12, seq($._expression, '+', $._expression)),
+      prec.left(12, seq($._expression, '-', $._expression)),
+      
+      // Precedence 11: Shift operators
+      prec.left(11, seq($._expression, '<<', $._expression)),
+      prec.left(11, seq($._expression, '>>', $._expression)),
+      
+      // Precedence 10: Comparison operators
+      prec(10, seq($._expression, '<', $._expression)),
+      prec(10, seq($._expression, '<=', $._expression)),
+      prec(10, seq($._expression, '>', $._expression)),
+      prec(10, seq($._expression, '>=', $._expression)),
+      
+      // Precedence 9: Equality operators
+      prec(9, seq($._expression, '==', $._expression)),
+      prec(9, seq($._expression, '!=', $._expression)),
+      
+      // Precedence 8: Bitwise AND
+      prec.left(8, seq($._expression, '&', $._expression)),
+      
+      // Precedence 7: Bitwise XOR
+      prec.left(7, seq($._expression, '^', $._expression)),
+      
+      // Precedence 6: Bitwise OR
+      prec.left(6, seq($._expression, '|', $._expression)),
+      
+      // Precedence 5: Logical AND
+      prec.left(5, seq($._expression, '&&', $._expression)),
+      
+      // Precedence 4: Logical XOR
+      prec.left(4, seq($._expression, '^^', $._expression)),
+      
+      // Precedence 3: Logical OR
+      prec.left(3, seq($._expression, '||', $._expression))
+    ),
+
+    // Unary operators (precedence 14-16)
+    unary_expression: $ => choice(
+      // Precedence 16: Negation
+      prec(16, seq('-', $._expression)),
+      
+      // Precedence 15: Logical/bitwise not
+      prec(15, seq('!', $._expression)),
+      prec(15, seq('~', $._expression)),
+      
+      // Precedence 14: Special operators
+      prec(14, seq('bitsizeof', choice($._expression, $._type))),
+      prec(14, seq('bytesizeof', choice($._expression, $._type))),
+      prec(14, seq('clog2', $._expression))
+    ),
+
+    inc_dec_expression: $ => choice(
+      prec(17, seq($._expression, '++')),
+      prec(17, seq($._expression, '--')),
+      prec(17, seq('++', $._expression)),
+      prec(17, seq('--', $._expression))
+    ),
+
+    call_expression: $ => prec(18, seq(
+      $._expression,
+      optional($.attributes),
+      '(',
+      commaSep($._expression),
+      ')'
+    )),
+
+    member_expression: $ => prec(18, seq(
+      $._expression,
+      '.',
+      $.identifier
+    )),
+
+    subscript_expression: $ => prec(18, seq(
+      $._expression,
+      '[',
+      $._expression,
+      ']'
+    )),
+
+    qualified_identifier: $ => seq(
+      $.scope_qualifier,
+      $.identifier
+    ),
+
+    scope_qualifier: $ => seq(
+      repeat1(seq($.identifier, '::')),
+    ),
+
+    template_instantiation: $ => prec(1, seq(
+      choice(
+        $.identifier,
+        seq($.scope_qualifier, $.identifier)
+      ),
+      $.template_args
+    )),
+
+    cast_expression: $ => seq(
+      choice('cast', 'static_cast', 'reinterpret_cast', 'checked_cast'),
+      '<',
+      $._type,
+      '>',
+      '(',
+      $._expression,
+      ')'
+    ),
+
+    lambda_expression: $ => seq(
+      '[',
+      commaSep($.capture),
+      ']',
+      optional(seq(
+        '(',
+        commaSep($.parameter),
+        ')'
+      )),
+      optional(seq('->', $._type)),
+      $.block
+    ),
+
+    capture: $ => choice(
+      $.identifier,
+      seq($.identifier, '=', $._expression)
+    ),
+
+    // Built-in functions
+    builtin_function: $ => choice(
+      $.mux_function,
+      $.concat_function,
+      $.fan_out_function,
+      $.lutmul_function,
+      $.offset_function
+    ),
+
+    mux_function: $ => seq(
+      'mux',
+      '(',
+      $._expression,
+      ',',
+      commaSep1($._expression),
+      ')'
+    ),
+
+    concat_function: $ => seq(
+      'concat',
+      '(',
+      commaSep1($._expression),
+      ')'
+    ),
+
+    fan_out_function: $ => seq(
+      'fan_out',
+      '<',
+      $._expression,
+      '>',
+      '(',
+      $._expression,
+      ')'
+    ),
+
+    lutmul_function: $ => seq(
+      'lutmul',
+      '(',
+      $._expression,
+      ',',
+      $._expression,
+      ')'
+    ),
+
+    offset_function: $ => seq(
+      choice('bitoffsetof', 'byteoffsetof'),
+      '(',
+      $._type,
+      ',',
+      $.identifier,
+      ')'
+    ),
+
+    // ========================================================================
+    // INITIALIZERS
+    // ========================================================================
+
+    initializer_list: $ => seq(
+      '{',
+      commaSep(choice(
+        $.positional_initializer,
+        $.designated_initializer
+      )),
+      optional(','),
+      '}'
+    ),
+
+    positional_initializer: $ => choice(
+      $._expression,
+      $.initializer_list
+    ),
+
+    designated_initializer: $ => seq(
+      '.',
+      field('field', $.identifier),
+      '=',
+      field('value', choice($._expression, $.initializer_list))
+    ),
+
+    // ========================================================================
+    // LITERALS
+    // ========================================================================
+
+    literal: $ => choice(
+      $.integer_literal,
+      $.float_literal,
+      $.boolean_literal,
+      $.string_literal
+    ),
+
+    integer_literal: $ => token(seq(
+      choice(
+        seq('0x', /[0-9a-fA-F][0-9a-fA-F_]*/),
+        seq('0o', /[0-7][0-7_]*/),
+        seq('0b', /[01][01_]*/),
+        /[0-9][0-9_]*/
+      ),
+      optional(seq(
+        optional('_'),
+        choice('i', 'u'),
+        /[0-9]+/
+      ))
+    )),
+
+    float_literal: $ => token(
+      seq(
+        /[0-9][0-9_]*/,
+        '.',
+        /[0-9][0-9_]*/,
+        optional(seq(
+          /[eE]/,
+          optional(/[+-]/),
+          /[0-9][0-9_]*/
+        ))
+      )
+    ),
+
+    boolean_literal: $ => choice('true', 'false'),
+
+    // String literals with interpolation support
+    string_literal: $ => seq(
+      '"',
+      repeat(choice(
+        $.string_segment,
+        $.interpolation,
+        $.escape_sequence
+      )),
+      '"'
+    ),
+
+    string_segment: $ => token.immediate(prec(1, /[^"{\\]+/)),
+
+    escape_sequence: $ => token.immediate(seq(
+      '\\',
+      choice(
+        /[nrt"\\]/,
+        /x[0-9a-fA-F]{2}/,
+        /u[0-9a-fA-F]{4}/,
+        /U[0-9a-fA-F]{8}/
+      )
+    )),
+
+    interpolation: $ => seq(
+      '{',
+      choice(
+        // {{ for literal {
+        token.immediate('{'),
+        // Actual interpolation
+        seq(
+          field('expression', $._expression),
+          optional(seq(token.immediate('='), optional(/\s*/))),
+          optional(seq(
+            token.immediate(','),
+            optional(/\s*/),
+            field('alignment', $._expression)
+          )),
+          optional(seq(
+            token.immediate(':'),
+            optional(/\s*/),
+            field('format', $.format_specifier)
+          ))
+        )
+      ),
+      '}'
+    ),
+
+    format_specifier: $ => seq(
+      choice('b', 'o', 'd', 'x', 'X'),
+      optional(field('precision', /[0-9]+/))
+    ),
+
+    // ========================================================================
+    // IDENTIFIERS
+    // ========================================================================
+
+    identifier: $ => /[a-zA-Z_][a-zA-Z0-9_]*/,
+
+    integer_suffix: $ => /[iu][0-9]+/,
+  }
+});
+
+/**
+ * Helper function for comma-separated lists
+ */
+function commaSep(rule) {
+  return optional(commaSep1(rule));
+}
+
+function commaSep1(rule) {
+  return seq(rule, repeat(seq(',', rule)));
+}
+
+/**
+ * Helper function for separator-based lists
+ */
+function sepBy1(sep, rule) {
+  return seq(rule, repeat(seq(sep, rule)));
+}
