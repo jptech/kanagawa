@@ -84,6 +84,15 @@ module.exports = grammar({
     // Attribute categories share the same prefix
     [$.attributes, $.memory_attributes],
     [$.call_attributes, $.loop_attributes],
+
+    [$.template_instantiation, $.binary_expression],
+    [$._templated_type_specifier, $.binary_expression],
+    [$._templated_type_specifier, $.primary_expression],
+    [$._simple_type_specifier, $._templated_type_specifier, $.primary_expression],
+    [$._simple_type_specifier, $._templated_type_specifier],
+    [$._simple_type_specifier, $._templated_type_specifier, $.qualified_identifier],
+    [$.scope_qualifier, $.primary_expression, $.template_instantiation],
+    [$.primary_expression, $.template_instantiation],
   ],
 
   rules: {
@@ -181,13 +190,13 @@ module.exports = grammar({
     // Variables
     // ----------------------------------------------------------------------------
 
-    variable_decl: $ => prec.dynamic(100, seq(
+    variable_decl: $ => seq(
       optional($.attributes),
       optional(field('modifiers', $.decl_modifiers)),
       field('type', $.type),
       field('name', $.identifier),
       optional(seq('=', field('initializer', choice($.expression, $.initializer))))
-    )),
+    ),
 
     decl_modifiers: $ => repeat1(choice('static', 'inline', 'noinline')),
 
@@ -361,7 +370,10 @@ module.exports = grammar({
     // ----------------------------------------------------------------------------
 
     static_assert: $ => seq(
-      token(prec(10, seq('static', /\s+/, 'assert'))),
+      choice(
+        token(prec(10, seq('static', /\s+/, 'assert'))),
+        'static_assert'
+      ),
       '(',
       $.expression,
       optional(seq(',', $.string_literal)),
@@ -430,21 +442,24 @@ module.exports = grammar({
       $._templated_type_specifier
     ),
 
-    _simple_type_specifier: $ => prec.dynamic(20, seq(
+    _simple_type_specifier: $ => seq(
       optional($.scope_qualifier),
       $.identifier
-    )),
+    ),
 
-    _templated_type_specifier: $ => prec.dynamic(20, prec.left(18, seq(
+    _templated_type_specifier: $ => prec.dynamic(1, seq(
       optional($.scope_qualifier),
       $.identifier,
-      $.template_args
-    ))),
+      choice(
+        seq(token.immediate('<'), commaSep1($._template_arg_expression), '>'),
+        $.template_args
+      )
+    )),
 
     array_type: $ => prec.dynamic(20, prec.right(18, seq(
       optional($.memory_attributes),
       $.type,
-      repeat1(seq(token.immediate('['), $.expression, ']'))
+      repeat1(seq('[', $.expression, ']'))
     ))),
 
     function_type: $ => seq(
@@ -468,7 +483,7 @@ module.exports = grammar({
     scope_qualifier: $ => prec.left(repeat1(seq(
       optional('template'),
       $.identifier,
-      optional($.template_args),
+      optional(seq(token.immediate('<'), commaSep1($._template_arg_expression), '>')),
       token.immediate('::')
     ))),
 
@@ -590,9 +605,9 @@ module.exports = grammar({
     ),
 
     template_args: $ => seq(
-      token.immediate('<'),
+      '<',
       commaSep1($._template_arg_expression),
-      token.immediate('>')
+      '>'
     ),
 
     // Special expression context that disallows < and > at top level to avoid ambiguity
@@ -654,7 +669,7 @@ module.exports = grammar({
 
     empty_statement: $ => ';',
 
-    expression_statement: $ => prec(-1, seq($.expression, ';')),
+    expression_statement: $ => seq($.expression, ';'),
 
     return_statement: $ => seq('return', optional($.expression), ';'),
 
@@ -743,7 +758,7 @@ module.exports = grammar({
       $.template_instantiation,
     ),
 
-    primary_expression: $ => choice(
+    primary_expression: $ => prec.dynamic(2, choice(
       $.identifier,
       $.qualified_identifier,
       $.literal,
@@ -751,7 +766,7 @@ module.exports = grammar({
       $.function_type,
       seq('(', $.expression, ')'),
       $.cast_operator,
-    ),
+    )),
 
     // ----------------------------------------------------------------------------
     // Binary & Unary Operations (with correct precedence)
@@ -768,7 +783,8 @@ module.exports = grammar({
       prec.left(11, seq($.expression, choice('<<', alias(seq('>', token.immediate('>')), '>>')), $.expression)),
       
       // Precedence 10: Relational
-      prec.left(10, seq($.expression, choice('<', '<=', '>', '>='), $.expression)),
+      // Precedence 10: Relational
+      prec.dynamic(1, prec.left(10, seq($.expression, choice('<', '<=', '>', '>='), $.expression))),
       
       // Precedence 9: Equality
       prec.left(9, seq($.expression, choice('==', '!='), $.expression)),
@@ -847,7 +863,10 @@ module.exports = grammar({
       token.immediate('.'),
       optional('template'),
       $.identifier,
-      optional($.template_args)
+      optional(choice(
+        seq(token.immediate('<'), commaSep1($._template_arg_expression), '>'),
+        $.template_args
+      ))
     )),
 
     call_expression: $ => prec.left(18, seq(
@@ -864,7 +883,7 @@ module.exports = grammar({
 
     subscript_expression: $ => prec.dynamic(-10, prec.left(18, seq(
       $.expression,
-      token.immediate('['),
+      '[',
       $.expression,
       ']'
     ))),
@@ -893,18 +912,20 @@ module.exports = grammar({
     // Templates & Qualified Names
     // ----------------------------------------------------------------------------
 
-    template_instantiation: $ => prec.dynamic(-5, prec(18, seq(
+    template_instantiation: $ => prec.dynamic(-1, seq(
       optional($.scope_qualifier),
       optional('template'),
       $.identifier,
-      $.template_args
-    ))),
+      token.immediate('<'),
+      commaSep1($._template_arg_expression),
+      '>'
+    )),
 
     qualified_identifier: $ => seq(
       $.scope_qualifier,
       optional('template'),
       $.identifier,
-      optional($.template_args)
+      optional(seq(token.immediate('<'), commaSep1($._template_arg_expression), '>'))
     ),
 
     // ----------------------------------------------------------------------------
@@ -970,9 +991,9 @@ module.exports = grammar({
 
     integer_literal: $ => token(seq(
       choice(
-        /0[bB][01](_?[01])*/,                    // Binary
-        /0[oO][0-7](_?[0-7])*/,                  // Octal
-        /0[xX][0-9a-fA-F](_?[0-9a-fA-F])*/,      // Hexadecimal
+        /0[bB]_?[01](_?[01])*/,                    // Binary
+        /0[oO]_?[0-7](_?[0-7])*/,                  // Octal
+        /0[xX]_?[0-9a-fA-F](_?[0-9a-fA-F])*/,      // Hexadecimal
         /[0-9](_?[0-9])*/                        // Decimal
       ),
       optional(seq(
@@ -1019,11 +1040,11 @@ module.exports = grammar({
         token.immediate(','),
         $.expression
       )),
-      optional(seq(
-        token.immediate(':'),
-        token.immediate(/[bodxX]/),               // format specifier
-        optional(token.immediate(/[0-9]+/))       // precision
-      )),
+      optional(token.immediate(seq(
+        ':',
+        /[bodxX]/,
+        optional(/[0-9]+/)
+      ))),
       token.immediate('}')
     ),
 
