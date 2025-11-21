@@ -43,7 +43,7 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.languages.registerDocumentSemanticTokensProvider('kanagawa', new KanagawaSemanticTokensProvider(service, queryManager), legend),
         vscode.languages.registerDocumentSymbolProvider('kanagawa', new KanagawaDocumentSymbolProvider(service, queryManager)),
         vscode.languages.registerFoldingRangeProvider('kanagawa', new KanagawaFoldingRangeProvider(service)),
-        vscode.languages.registerCompletionItemProvider('kanagawa', new KanagawaCompletionItemProvider(indexer), '.'),
+        vscode.languages.registerCompletionItemProvider('kanagawa', new KanagawaCompletionItemProvider(indexer, service), '.'),
         diagnosticsProvider
     );
 

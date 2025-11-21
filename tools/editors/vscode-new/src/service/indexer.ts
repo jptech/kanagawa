@@ -63,6 +63,8 @@ export class WorkspaceIndexer {
         'alias_template',
         'enum_template'
     ]);
+    private readonly typeInferenceCache: Map<string, Map<number, string>> = new Map();
+    private readonly memberCache: Map<string, SymbolInfo[]> = new Map();
 
     constructor(
         private service: TreeSitterService,
@@ -102,6 +104,7 @@ export class WorkspaceIndexer {
 
     async indexFile(uri: vscode.Uri, queryString?: string) {
         try {
+            this.clearDocumentCaches(uri);
             // console.log('Kanagawa: Indexing file:', uri.toString());
             const document = await vscode.workspace.openTextDocument(uri);
             const tree = this.service.parse(document);
@@ -123,6 +126,7 @@ export class WorkspaceIndexer {
             const context = this.collectDocumentContext(tree.rootNode);
             this.documentContexts.set(uri.toString(), context);
             this.addSymbols(symbols);
+            this.memberCache.clear();
         } catch (e) {
             console.error(`Failed to index ${uri.toString()}:`, e);
         }
@@ -327,6 +331,8 @@ export class WorkspaceIndexer {
             }
         }
         this.documentContexts.delete(target);
+        this.typeInferenceCache.delete(target);
+        this.memberCache.clear();
     }
 
     private isMethod(node: Parser.SyntaxNode): boolean {
@@ -624,15 +630,176 @@ export class WorkspaceIndexer {
     public async inferTypeFromExpression(document: vscode.TextDocument, expression?: Parser.SyntaxNode): Promise<string | undefined> {
         if (!expression) { return undefined; }
 
+        const docKey = document.uri.toString();
+        const cache = this.typeInferenceCache.get(docKey) ?? new Map<number, string>();
+        if (cache.has(expression.id)) {
+            const cached = cache.get(expression.id);
+            return cached && cached.length ? cached : undefined;
+        }
+
+        let inferred: string | undefined;
+
         if (expression.type === 'identifier') {
-            const symbols = await this.findSymbolsInDocument(document, expression.text);
-            const variable = symbols.find(sym => sym.category === 'variable' || sym.category === 'member');
-            if (variable?.typeHint) {
-                return variable.typeHint;
+            const local = this.findNearestLocalSymbol(document, expression);
+            if (local?.typeHint) {
+                inferred = local.typeHint;
+            } else {
+                const symbols = await this.findSymbolsInDocument(document, expression.text);
+                const variable = symbols.find(sym => sym.category === 'variable' || sym.category === 'member');
+                inferred = variable?.typeHint;
+            }
+        } else if (expression.type === 'member_expression') {
+            const objectNode = expression.namedChild(0);
+            const propertyNode = expression.namedChild(expression.namedChildCount - 1);
+            const objectType = await this.inferTypeFromExpression(document, objectNode ?? undefined);
+            if (objectType && propertyNode) {
+                const member = this.getMemberInfo(objectType, propertyNode.text);
+                inferred = member?.typeHint;
             }
         }
 
+        if (inferred) {
+            cache.set(expression.id, inferred);
+            this.typeInferenceCache.set(docKey, cache);
+            return inferred;
+        }
+
+        cache.set(expression.id, '');
+        this.typeInferenceCache.set(docKey, cache);
         return undefined;
+    }
+
+    public getMembersForType(typeName: string, options?: { includeMethods?: boolean; includeFields?: boolean }): SymbolInfo[] {
+        if (!typeName) { return []; }
+        const normalized = this.normalizeTypeName(typeName);
+        if (!normalized) { return []; }
+
+        if (this.memberCache.has(normalized)) {
+            return this.filterMembers(this.memberCache.get(normalized) ?? [], options);
+        }
+
+        const results: SymbolInfo[] = [];
+        const seen = new Set<string>();
+
+        for (const list of this.symbolIndex.values()) {
+            for (const sym of list) {
+                if (!sym.scopePath.length) { continue; }
+                const container = sym.scopePath[sym.scopePath.length - 1];
+                if (!container) { continue; }
+                if (this.normalizeTypeName(container) !== normalized) { continue; }
+
+                const key = `${sym.name}|${sym.uri.toString()}|${sym.range.start.line}|${sym.category}`;
+                if (seen.has(key)) { continue; }
+                seen.add(key);
+                results.push(sym);
+            }
+        }
+
+        results.sort((a, b) => {
+            if (a.category === b.category) {
+                return a.name.localeCompare(b.name);
+            }
+            if (a.category === 'method') { return -1; }
+            if (b.category === 'method') { return 1; }
+            return a.category.localeCompare(b.category);
+        });
+
+        this.memberCache.set(normalized, results.slice());
+        return this.filterMembers(results, options);
+    }
+
+    public collectVisibleLocals(
+        document: vscode.TextDocument,
+        position: vscode.Position,
+        tree: Parser.Tree
+    ): SymbolInfo[] {
+        const offset = document.offsetAt(position);
+        const seen = new Set<string>();
+        const locals: SymbolInfo[] = [];
+
+        const lookupPosition = {
+            row: position.line,
+            column: Math.max(0, position.character - 1)
+        };
+
+        let node: Parser.SyntaxNode | null = tree.rootNode.descendantForPosition(lookupPosition);
+        while (node) {
+            if (node.type === 'block' || node.type === 'compound_statement') {
+                this.collectDeclarationsInScope(document, node, offset, locals, seen);
+            } else if (node.type === 'function_definition') {
+                this.collectParametersFromFunction(document, node, locals, seen);
+            }
+            node = node.parent;
+        }
+
+        return locals;
+    }
+
+    private collectDeclarationsInScope(
+        document: vscode.TextDocument,
+        scopeNode: Parser.SyntaxNode,
+        limit: number,
+        locals: SymbolInfo[],
+        seen: Set<string>
+    ) {
+        for (let i = scopeNode.namedChildren.length - 1; i >= 0; i--) {
+            const child = scopeNode.namedChildren[i];
+            if (child.startIndex >= limit) { continue; }
+
+            if (child.type === 'variable_decl') {
+                const nameNode = child.childForFieldName('name');
+                if (!nameNode) { continue; }
+                const name = nameNode.text;
+                if (seen.has(name)) { continue; }
+                locals.push(this.buildLocalSymbolInfo(document, child, name));
+                seen.add(name);
+            } else if (
+                (child.type === 'block' || child.type === 'compound_statement') &&
+                child.startIndex < limit &&
+                child.endIndex >= limit
+            ) {
+                this.collectDeclarationsInScope(document, child, limit, locals, seen);
+            }
+        }
+    }
+
+    private collectParametersFromFunction(
+        document: vscode.TextDocument,
+        functionNode: Parser.SyntaxNode,
+        locals: SymbolInfo[],
+        seen: Set<string>
+    ) {
+        const params = functionNode.childForFieldName('parameters');
+        if (!params) { return; }
+
+        for (let i = params.namedChildren.length - 1; i >= 0; i--) {
+            const child = params.namedChildren[i];
+            if (child.type !== 'parameter') { continue; }
+            const nameNode = child.childForFieldName('name');
+            if (!nameNode) { continue; }
+            const name = nameNode.text;
+            if (seen.has(name)) { continue; }
+            locals.push(this.buildLocalSymbolInfo(document, child, name));
+            seen.add(name);
+        }
+    }
+
+    private filterMembers(source: SymbolInfo[], options?: { includeMethods?: boolean; includeFields?: boolean }): SymbolInfo[] {
+        const includeMethods = options?.includeMethods ?? true;
+        const includeFields = options?.includeFields ?? true;
+
+        return source.filter(sym =>
+            (includeMethods && sym.category === 'method') ||
+            (includeFields && sym.category === 'member')
+        );
+    }
+
+    private getMemberInfo(typeName: string, memberName: string): SymbolInfo | undefined {
+        const normalized = this.normalizeTypeName(typeName);
+        if (!normalized) { return undefined; }
+
+        const members = this.getMembersForType(normalized, { includeMethods: true, includeFields: true });
+        return members.find(sym => sym.name === memberName);
     }
 
     private scoreCandidates(list: SymbolInfo[], scopePath: string[], options?: ResolveOptions) {
@@ -724,6 +891,11 @@ export class WorkspaceIndexer {
             text = text.slice(dotSep + 1);
         }
         return text.replace(/\s+/g, '');
+    }
+
+    private clearDocumentCaches(uri: vscode.Uri) {
+        const key = uri.toString();
+        this.typeInferenceCache.delete(key);
     }
 
     private findDeclarationInScope(scopeNode: Parser.SyntaxNode, targetName: string, limit: number): Parser.SyntaxNode | undefined {
