@@ -51,18 +51,21 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.workspace.onDidChangeTextDocument((event: vscode.TextDocumentChangeEvent) => {
             if (event.document.languageId === 'kanagawa') {
+                // console.log('Kanagawa: Document changed:', event.document.uri.toString());
                 service.parse(event.document);
                 diagnosticsProvider.updateDiagnostics(event.document);
             }
         }),
         vscode.workspace.onDidOpenTextDocument((doc: vscode.TextDocument) => {
             if (doc.languageId === 'kanagawa') {
+                console.log('Kanagawa: Document opened:', doc.uri.toString());
                 service.parse(doc);
                 diagnosticsProvider.updateDiagnostics(doc);
             }
         }),
         vscode.workspace.onDidSaveTextDocument((doc: vscode.TextDocument) => {
             if (doc.languageId === 'kanagawa') {
+                console.log('Kanagawa: Document saved, updating index:', doc.uri.toString());
                 indexer.updateFile(doc.uri);
             }
         })
@@ -91,4 +94,6 @@ export async function activate(context: vscode.ExtensionContext) {
     );
 }
 
-export function deactivate() {}
+export function deactivate(): void {
+    console.log('Kanagawa "LSP-Lite" is deactivating.');
+}

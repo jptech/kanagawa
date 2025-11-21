@@ -1,0 +1,265 @@
+Warning: You have not configured any parser directories!
+Please run `tree-sitter init-config` and edit the resulting
+configuration file to indicate where we should look for
+language grammars.
+
+(source_file [0, 0] - [57, 57]
+  (comment [0, 0] - [0, 40])
+  (comment [1, 0] - [1, 35])
+  (module_decl [3, 0] - [27, 5]
+    name: (module_name [3, 7] - [3, 11]
+      (module_identifier_part [3, 7] - [3, 11]))
+    (module_exports [4, 4] - [27, 5]
+      (identifier [4, 6] - [4, 14])
+      (identifier [5, 6] - [5, 19])
+      (identifier [6, 6] - [6, 10])
+      (identifier [7, 6] - [7, 15])
+      (identifier [8, 6] - [8, 11])
+      (identifier [9, 6] - [9, 12])
+      (identifier [10, 6] - [10, 11])
+      (identifier [11, 6] - [11, 13])
+      (identifier [12, 6] - [12, 13])
+      (identifier [13, 6] - [13, 16])
+      (identifier [14, 6] - [14, 16])
+      (identifier [15, 6] - [15, 11])
+      (identifier [16, 6] - [16, 12])
+      (module_reference [17, 6] - [17, 21]
+        (module_name [17, 13] - [17, 21]))
+      (module_reference [18, 6] - [18, 24]
+        (module_name [18, 13] - [18, 24]
+          (module_identifier_part [18, 13] - [18, 17])
+          (module_identifier_part [18, 18] - [18, 24])))
+      (module_reference [19, 6] - [19, 26]
+        (module_name [19, 13] - [19, 26]
+          (module_identifier_part [19, 13] - [19, 20])
+          (module_identifier_part [19, 21] - [19, 26])))
+      (module_reference [20, 6] - [20, 25]
+        (module_name [20, 13] - [20, 25]
+          (module_identifier_part [20, 13] - [20, 20])
+          (module_identifier_part [20, 21] - [20, 25])))
+      (module_reference [21, 6] - [21, 25]
+        (module_name [21, 13] - [21, 25]
+          (module_identifier_part [21, 13] - [21, 20])
+          (module_identifier_part [21, 21] - [21, 25])))
+      (module_reference [22, 6] - [22, 25]
+        (module_name [22, 13] - [22, 25]
+          (module_identifier_part [22, 13] - [22, 17])
+          (module_identifier_part [22, 18] - [22, 25])))
+      (module_reference [23, 6] - [23, 24]
+        (module_name [23, 13] - [23, 24]
+          (module_identifier_part [23, 13] - [23, 17])
+          (module_identifier_part [23, 18] - [23, 24])))
+      (module_reference [24, 6] - [24, 24]
+        (module_name [24, 13] - [24, 24]
+          (module_identifier_part [24, 13] - [24, 18])
+          (module_identifier_part [24, 19] - [24, 24])))
+      (module_reference [25, 6] - [25, 25]
+        (module_name [25, 13] - [25, 25]
+          (module_identifier_part [25, 13] - [25, 21])
+          (module_identifier_part [25, 22] - [25, 25])))
+      (module_reference [26, 6] - [26, 24]
+        (module_name [26, 13] - [26, 24]
+          (module_identifier_part [26, 13] - [26, 17])
+          (module_identifier_part [26, 18] - [26, 24])))))
+  (import_decl [29, 0] - [29, 15]
+    path: (module_name [29, 7] - [29, 15]))
+  (import_decl [30, 0] - [30, 18]
+    path: (module_name [30, 7] - [30, 18]
+      (module_identifier_part [30, 7] - [30, 11])
+      (module_identifier_part [30, 12] - [30, 18])))
+  (import_decl [31, 0] - [31, 20]
+    path: (module_name [31, 7] - [31, 20]
+      (module_identifier_part [31, 7] - [31, 14])
+      (module_identifier_part [31, 15] - [31, 20])))
+  (import_decl [32, 0] - [32, 19]
+    path: (module_name [32, 7] - [32, 19]
+      (module_identifier_part [32, 7] - [32, 14])
+      (module_identifier_part [32, 15] - [32, 19])))
+  (import_decl [33, 0] - [33, 19]
+    path: (module_name [33, 7] - [33, 19]
+      (module_identifier_part [33, 7] - [33, 14])
+      (module_identifier_part [33, 15] - [33, 19])))
+  (import_decl [34, 0] - [34, 17]
+    path: (module_name [34, 7] - [34, 17]
+      (module_identifier_part [34, 7] - [34, 11])
+      (module_identifier_part [34, 12] - [34, 17])))
+  (import_decl [35, 0] - [35, 19]
+    path: (module_name [35, 7] - [35, 19]
+      (module_identifier_part [35, 7] - [35, 11])
+      (module_identifier_part [35, 12] - [35, 19])))
+  (import_decl [36, 0] - [36, 18]
+    path: (module_name [36, 7] - [36, 18]
+      (module_identifier_part [36, 7] - [36, 11])
+      (module_identifier_part [36, 12] - [36, 18])))
+  (import_decl [37, 0] - [37, 20]
+    path: (module_name [37, 7] - [37, 20]
+      (module_identifier_part [37, 7] - [37, 11])
+      (module_identifier_part [37, 12] - [37, 20])))
+  (import_decl [38, 0] - [38, 17]
+    path: (module_name [38, 7] - [38, 17]
+      (module_identifier_part [38, 7] - [38, 11])
+      (module_identifier_part [38, 12] - [38, 17])))
+  (import_decl [39, 0] - [39, 18]
+    path: (module_name [39, 7] - [39, 18]
+      (module_identifier_part [39, 7] - [39, 12])
+      (module_identifier_part [39, 13] - [39, 18])))
+  (import_decl [40, 0] - [40, 19]
+    path: (module_name [40, 7] - [40, 19]
+      (module_identifier_part [40, 7] - [40, 15])
+      (module_identifier_part [40, 16] - [40, 19])))
+  (import_decl [41, 0] - [41, 22]
+    path: (module_name [41, 7] - [41, 22]
+      (module_identifier_part [41, 7] - [41, 15])
+      (module_identifier_part [41, 16] - [41, 22])))
+  (import_decl [42, 0] - [42, 46]
+    path: (module_name [42, 7] - [42, 29]
+      (module_identifier_part [42, 7] - [42, 15])
+      (module_identifier_part [42, 16] - [42, 22])
+      (module_identifier_part [42, 23] - [42, 29]))
+    alias: (identifier [42, 33] - [42, 46]))
+  (import_decl [43, 0] - [43, 36]
+    path: (module_name [43, 7] - [43, 31]
+      (module_identifier_part [43, 7] - [43, 14])
+      (module_identifier_part [43, 15] - [43, 22])
+      (module_identifier_part [43, 23] - [43, 31]))
+    alias: (identifier [43, 35] - [43, 36]))
+  (import_decl [44, 0] - [44, 18]
+    path: (module_name [44, 7] - [44, 18]
+      (module_identifier_part [44, 7] - [44, 11])
+      (module_identifier_part [44, 12] - [44, 18])))
+  (import_decl [45, 0] - [45, 19]
+    path: (module_name [45, 7] - [45, 19]
+      (module_identifier_part [45, 7] - [45, 11])
+      (module_identifier_part [45, 12] - [45, 19])))
+  (import_decl [46, 0] - [46, 19]
+    path: (module_name [46, 7] - [46, 19]
+      (module_identifier_part [46, 7] - [46, 11])
+      (module_identifier_part [46, 12] - [46, 19])))
+  (comment [48, 0] - [48, 73])
+  (comment [49, 0] - [49, 76])
+  (comment [50, 0] - [50, 20])
+  (declaration [51, 0] - [51, 66]
+    (static_assert [51, 0] - [51, 66]
+      (expression [51, 15] - [51, 64]
+        (binary_expression [51, 15] - [51, 64]
+          (expression [51, 15] - [51, 31]
+            (call_expression [51, 15] - [51, 31]
+              (expression [51, 15] - [51, 23]
+                (primary_expression [51, 15] - [51, 23]
+                  (identifier [51, 15] - [51, 23])))
+              (argument_list [51, 23] - [51, 31]
+                (expression [51, 24] - [51, 30]
+                  (primary_expression [51, 24] - [51, 30]
+                    (qualified_identifier [51, 24] - [51, 30]
+                      (scope_qualifier [51, 24] - [51, 27]
+                        (identifier [51, 24] - [51, 25]))
+                      (identifier [51, 27] - [51, 30])))))))
+          (expression [51, 35] - [51, 64]
+            (primary_expression [51, 35] - [51, 64]
+              (function_type [51, 35] - [51, 64]
+                (parameter [51, 36] - [51, 43]
+                  type: (type [51, 36] - [51, 43]
+                    (primitive_type [51, 36] - [51, 43])))
+                (parameter [51, 45] - [51, 52]
+                  type: (type [51, 45] - [51, 52]
+                    (primitive_type [51, 45] - [51, 52])))
+                (type [51, 57] - [51, 64]
+                  (primitive_type [51, 57] - [51, 64])))))))))
+  (declaration [52, 0] - [52, 66]
+    (static_assert [52, 0] - [52, 66]
+      (expression [52, 15] - [52, 64]
+        (binary_expression [52, 15] - [52, 64]
+          (expression [52, 15] - [52, 31]
+            (call_expression [52, 15] - [52, 31]
+              (expression [52, 15] - [52, 23]
+                (primary_expression [52, 15] - [52, 23]
+                  (identifier [52, 15] - [52, 23])))
+              (argument_list [52, 23] - [52, 31]
+                (expression [52, 24] - [52, 30]
+                  (primary_expression [52, 24] - [52, 30]
+                    (qualified_identifier [52, 24] - [52, 30]
+                      (scope_qualifier [52, 24] - [52, 27]
+                        (identifier [52, 24] - [52, 25]))
+                      (identifier [52, 27] - [52, 30])))))))
+          (expression [52, 35] - [52, 64]
+            (primary_expression [52, 35] - [52, 64]
+              (function_type [52, 35] - [52, 64]
+                (parameter [52, 36] - [52, 43]
+                  type: (type [52, 36] - [52, 43]
+                    (primitive_type [52, 36] - [52, 43])))
+                (parameter [52, 45] - [52, 52]
+                  type: (type [52, 45] - [52, 52]
+                    (primitive_type [52, 45] - [52, 52])))
+                (type [52, 57] - [52, 64]
+                  (primitive_type [52, 57] - [52, 64])))))))))
+  (declaration [53, 0] - [53, 66]
+    (static_assert [53, 0] - [53, 66]
+      (expression [53, 15] - [53, 64]
+        (binary_expression [53, 15] - [53, 64]
+          (expression [53, 15] - [53, 31]
+            (call_expression [53, 15] - [53, 31]
+              (expression [53, 15] - [53, 23]
+                (primary_expression [53, 15] - [53, 23]
+                  (identifier [53, 15] - [53, 23])))
+              (argument_list [53, 23] - [53, 31]
+                (expression [53, 24] - [53, 30]
+                  (primary_expression [53, 24] - [53, 30]
+                    (qualified_identifier [53, 24] - [53, 30]
+                      (scope_qualifier [53, 24] - [53, 27]
+                        (identifier [53, 24] - [53, 25]))
+                      (identifier [53, 27] - [53, 30])))))))
+          (expression [53, 35] - [53, 64]
+            (primary_expression [53, 35] - [53, 64]
+              (function_type [53, 35] - [53, 64]
+                (parameter [53, 36] - [53, 43]
+                  type: (type [53, 36] - [53, 43]
+                    (primitive_type [53, 36] - [53, 43])))
+                (parameter [53, 45] - [53, 52]
+                  type: (type [53, 45] - [53, 52]
+                    (primitive_type [53, 45] - [53, 52])))
+                (type [53, 57] - [53, 64]
+                  (primitive_type [53, 57] - [53, 64])))))))))
+  (declaration [54, 0] - [54, 75]
+    (static_assert [54, 0] - [54, 75]
+      (expression [54, 15] - [54, 73]
+        (binary_expression [54, 15] - [54, 73]
+          (expression [54, 15] - [54, 31]
+            (call_expression [54, 15] - [54, 31]
+              (expression [54, 15] - [54, 23]
+                (primary_expression [54, 15] - [54, 23]
+                  (identifier [54, 15] - [54, 23])))
+              (argument_list [54, 23] - [54, 31]
+                (expression [54, 24] - [54, 30]
+                  (primary_expression [54, 24] - [54, 30]
+                    (qualified_identifier [54, 24] - [54, 30]
+                      (scope_qualifier [54, 24] - [54, 27]
+                        (identifier [54, 24] - [54, 25]))
+                      (identifier [54, 27] - [54, 30])))))))
+          (expression [54, 35] - [54, 73]
+            (primary_expression [54, 35] - [54, 73]
+              (function_type [54, 35] - [54, 73]
+                (parameter [54, 36] - [54, 43]
+                  type: (type [54, 36] - [54, 43]
+                    (primitive_type [54, 36] - [54, 43])))
+                (parameter [54, 45] - [54, 52]
+                  type: (type [54, 45] - [54, 52]
+                    (primitive_type [54, 45] - [54, 52])))
+                (parameter [54, 54] - [54, 61]
+                  type: (type [54, 54] - [54, 61]
+                    (primitive_type [54, 54] - [54, 61])))
+                (type [54, 66] - [54, 73]
+                  (primitive_type [54, 66] - [54, 73])))))))))
+  (comment [56, 0] - [56, 91])
+  (declaration [57, 0] - [57, 57]
+    (static_assert [57, 0] - [57, 57]
+      (expression [57, 15] - [57, 55]
+        (binary_expression [57, 15] - [57, 55]
+          (expression [57, 15] - [57, 22]
+            (primary_expression [57, 15] - [57, 22]
+              (identifier [57, 15] - [57, 22])))
+          (expression [57, 26] - [57, 55]
+            (primary_expression [57, 26] - [57, 55]
+              (qualified_identifier [57, 26] - [57, 55]
+                (scope_qualifier [57, 26] - [57, 41]
+                  (identifier [57, 26] - [57, 39]))
+                (identifier [57, 41] - [57, 55])))))))))

@@ -70,7 +70,7 @@ export class KanagawaDocumentSymbolProvider implements vscode.DocumentSymbolProv
                     break;
                     
                 // Name captures
-                case 'name':
+                case 'name': {
                     // Find the parent definition
                     let parent = node.parent;
                     while (parent) {
@@ -81,6 +81,7 @@ export class KanagawaDocumentSymbolProvider implements vscode.DocumentSymbolProv
                         parent = parent.parent;
                     }
                     break;
+                }
             }
         }
         

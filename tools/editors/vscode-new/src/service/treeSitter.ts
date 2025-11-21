@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as Parser from 'web-tree-sitter';
+import * as path from 'path';
 
 export class TreeSitterService {
     private parser: Parser | undefined;
@@ -10,20 +11,26 @@ export class TreeSitterService {
 
     async init() {
         try {
-            await Parser.init();
-            const wasmPath = vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'tree-sitter-kanagawa.wasm');
+            // Explicitly point to the runtime WASM in the dist folder
+            const runtimeWasmPath = path.join(this.context.extensionPath, 'dist', 'tree-sitter.wasm');
+            await Parser.init({
+                locateFile: () => runtimeWasmPath
+            });
+
+            const langWasmPath = vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'tree-sitter-kanagawa.wasm');
             
             // In a real extension, we need to handle the case where the file doesn't exist yet (during dev)
             // But assuming build process puts it there.
             // For web compatibility, we read file as bytes.
-            const bits = await vscode.workspace.fs.readFile(wasmPath);
+            const bits = await vscode.workspace.fs.readFile(langWasmPath);
             this.language = await Parser.Language.load(bits);
             
             this.parser = new Parser();
             this.parser.setLanguage(this.language);
+            console.log('Kanagawa: Tree-sitter initialized successfully.');
         } catch (e) {
             console.error('Failed to initialize TreeSitterService:', e);
-            vscode.window.showErrorMessage('Kanagawa: Failed to load Tree-sitter parser.');
+            vscode.window.showErrorMessage(`Kanagawa: Failed to load Tree-sitter parser: ${e}`);
         }
     }
 
@@ -40,7 +47,10 @@ export class TreeSitterService {
     }
 
     parse(document: vscode.TextDocument): Parser.Tree | undefined {
-        if (!this.parser) { return undefined; }
+        if (!this.parser) { 
+            console.warn('Kanagawa: Parser not initialized.');
+            return undefined; 
+        }
         
         const uri = document.uri.toString();
         const oldTree = this.trees.get(uri);
@@ -49,9 +59,14 @@ export class TreeSitterService {
         // based on content changes. For simplicity in this version, we re-parse.
         // To do incremental, we need to hook into onDidChangeTextDocument and map changes.
         
-        const newTree = this.parser.parse(document.getText(), oldTree);
-        this.trees.set(uri, newTree);
-        return newTree;
+        try {
+            const newTree = this.parser.parse(document.getText(), oldTree);
+            this.trees.set(uri, newTree);
+            return newTree;
+        } catch (e) {
+            console.error('Kanagawa: Parse failed:', e);
+            return undefined;
+        }
     }
 
     remove(document: vscode.TextDocument) {

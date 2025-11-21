@@ -26,12 +26,27 @@ export class KanagawaDefinitionProvider implements vscode.DefinitionProvider {
         }
 
         const name = node.text;
-        const symbols = this.indexer.getSymbols(name);
+        const results: vscode.Location[] = [];
+        const seen = new Set<string>();
 
-        if (symbols && symbols.length > 0) {
-            return symbols.map(s => new vscode.Location(s.uri, s.range));
+        const symbols = this.indexer.getSymbols(name) ?? [];
+        for (const sym of symbols) {
+            const key = `${sym.uri.toString()}#${sym.range.start.line}:${sym.range.start.character}`;
+            if (seen.has(key)) { continue; }
+            seen.add(key);
+            results.push(new vscode.Location(sym.uri, sym.range));
         }
 
-        return undefined;
+        if (results.length === 0) {
+            const locals = await this.indexer.findSymbolsInDocument(document, name);
+            for (const sym of locals) {
+                const key = `${sym.uri.toString()}#${sym.range.start.line}:${sym.range.start.character}`;
+                if (seen.has(key)) { continue; }
+                seen.add(key);
+                results.push(new vscode.Location(sym.uri, sym.range));
+            }
+        }
+
+        return results.length > 0 ? results : undefined;
     }
 }

@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { TreeSitterService } from '../service/treeSitter';
-import { WorkspaceIndexer } from '../service/indexer';
+import { WorkspaceIndexer, SymbolInfo } from '../service/indexer';
 
 export class KanagawaHoverProvider implements vscode.HoverProvider {
     constructor(
@@ -14,60 +14,131 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
         token: vscode.CancellationToken
     ): Promise<vscode.Hover | undefined> {
         const tree = this.service.getTree(document);
-        if (!tree) { return undefined; }
+        if (!tree) {
+            return undefined;
+        }
 
         const node = tree.rootNode.descendantForPosition({
             row: position.line,
             column: position.character
         });
 
-        if (!node) { return undefined; }
+        const identifier = this.resolveIdentifierNode(node);
+        if (!identifier) {
+            return undefined;
+        }
 
-        // We are interested in identifiers
-        if (node.type === 'identifier' || node.type === 'type_identifier') {
-            const name = node.text;
-            
-            // 1. Check local definitions (heuristic)
-            // (Not implemented in this lite version, skipping to global)
+        const hoverRange = new vscode.Range(
+            new vscode.Position(identifier.startPosition.row, identifier.startPosition.column),
+            new vscode.Position(identifier.endPosition.row, identifier.endPosition.column)
+        );
 
-            // 2. Check global index
-            const symbols = this.indexer.getSymbols(name);
-            if (symbols && symbols.length > 0) {
-                const contents: vscode.MarkdownString[] = [];
-                
-                for (const sym of symbols) {
-                    const md = new vscode.MarkdownString();
-                    md.appendCodeblock(`${sym.detail} ${sym.name}`, 'kanagawa');
-                    if (sym.docMarkdown) {
-                        md.appendMarkdown(`\n\n${sym.docMarkdown}`);
-                    }
-                    md.appendMarkdown(`\n\n*Defined in ${vscode.workspace.asRelativePath(sym.uri)}*`);
-                    contents.push(md);
-                }
-                
-                return new vscode.Hover(contents, new vscode.Range(
-                    position.line, node.startPosition.column,
-                    position.line, node.endPosition.column
-                ));
-            }
-            
-            // 3. Heuristic Type Resolution for 'auto'
-            // If we are hovering over a variable that was defined as auto
-            // We can try to find its definition node in the current file
-            if (node.parent?.type === 'variable_decl') {
-                 // It's the definition itself
-                 // Check if type is auto
-                 const typeNode = node.parent.childForFieldName('type');
-                 if (typeNode?.text === 'auto') {
-                     // Look at initializer
-                     const valueNode = node.parent.childForFieldName('value'); // Assuming grammar has value field or we find it
-                     // In grammar.js: optional(seq('=', $.expression))
-                     // We need to check children manually if field names aren't perfect
-                     // ...
-                 }
+        const name = identifier.text;
+        const markdowns: vscode.MarkdownString[] = [];
+        const seen = new Set<string>();
+
+        const globalSymbols = this.indexer.getSymbols(name) ?? [];
+        for (const sym of globalSymbols) {
+            this.appendSymbolMarkdown(sym, markdowns, seen);
+        }
+
+        if (markdowns.length === 0) {
+            const locals = await this.indexer.findSymbolsInDocument(document, name);
+            for (const sym of locals) {
+                this.appendSymbolMarkdown(sym, markdowns, seen);
             }
         }
 
+        if (markdowns.length > 0) {
+            return new vscode.Hover(markdowns, hoverRange);
+        }
+
+        const typeInfo = this.findLocalTypeInfo(document, identifier);
+        if (typeInfo) {
+            const md = new vscode.MarkdownString();
+            md.appendCodeblock(typeInfo.signature, 'kanagawa');
+            if (typeInfo.initializer) {
+                md.appendMarkdown(`\n\n**Initializer:** \`${typeInfo.initializer}\``);
+            }
+            return new vscode.Hover(md, hoverRange);
+        }
+
         return undefined;
+    }
+
+    private appendSymbolMarkdown(sym: SymbolInfo, bucket: vscode.MarkdownString[], seen: Set<string>) {
+        const key = `${sym.uri.toString()}#${sym.range.start.line}:${sym.range.start.character}`;
+        if (seen.has(key)) { return; }
+        seen.add(key);
+
+        const summary = (sym.signature ?? `${sym.detail ?? ''} ${sym.name}`.trim()).trim() || sym.name;
+        const md = new vscode.MarkdownString();
+        md.appendCodeblock(summary, 'kanagawa');
+        if (sym.docMarkdown) {
+            md.appendMarkdown(`\n\n${sym.docMarkdown}`);
+        }
+        const relative = vscode.workspace.asRelativePath(sym.uri, false);
+        md.appendMarkdown(`\n\n*Defined in ${relative}*`);
+        bucket.push(md);
+    }
+
+    private resolveIdentifierNode(node: any): any {
+        let current = node;
+        while (current) {
+            if (current.type === 'identifier' || current.type === 'type_identifier') {
+                return current;
+            }
+            if ((current.type === 'qualified_identifier' || current.type === 'template_instantiation') && current.namedChildCount > 0) {
+                current = current.namedChild(current.namedChildCount - 1);
+                continue;
+            }
+            if (current.type === 'module_name' && current.namedChildCount > 0) {
+                current = current.namedChild(current.namedChildCount - 1);
+                continue;
+            }
+            current = current.parent;
+        }
+        return null;
+    }
+
+    private findLocalTypeInfo(document: vscode.TextDocument, identifier: any): { signature: string; initializer?: string } | undefined {
+        let current = identifier?.parent;
+        while (current) {
+            if (current.type === 'variable_decl') {
+                const nameNode = current.childForFieldName('name');
+                if (nameNode === identifier) {
+                    const typeNode = current.childForFieldName('type');
+                    const initializerNode = current.childForFieldName('initializer');
+                    const typeText = this.getNodeText(document, typeNode);
+                    const initializerText = this.getNodeText(document, initializerNode)?.trim();
+                    const signatureParts = [] as string[];
+                    if (typeText) {
+                        signatureParts.push(typeText.trim());
+                    }
+                    signatureParts.push(identifier.text);
+                    return {
+                        signature: signatureParts.join(' '),
+                        initializer: initializerText
+                    };
+                }
+            } else if (current.type === 'parameter') {
+                const nameNode = current.childForFieldName('name');
+                if (nameNode === identifier) {
+                    const typeNode = current.childForFieldName('type');
+                    const typeText = this.getNodeText(document, typeNode)?.trim();
+                    const signature = typeText ? `${typeText} ${identifier.text}` : identifier.text;
+                    return { signature };
+                }
+            }
+            current = current.parent;
+        }
+        return undefined;
+    }
+
+    private getNodeText(document: vscode.TextDocument, node: any): string | undefined {
+        if (!node) { return undefined; }
+        const start = new vscode.Position(node.startPosition.row, node.startPosition.column);
+        const end = new vscode.Position(node.endPosition.row, node.endPosition.column);
+        return document.getText(new vscode.Range(start, end));
     }
 }

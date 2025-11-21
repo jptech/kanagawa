@@ -54,6 +54,10 @@
     (variable_decl
       name: (identifier) @member.name))) @member
 
+(member_decl
+  (variable_decl
+    name: (identifier) @member.name)) @member
+
 ; Enum constants
 (enum_constant
   name: (identifier) @constant.name) @constant

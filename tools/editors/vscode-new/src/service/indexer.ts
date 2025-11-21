@@ -2,7 +2,6 @@ import * as vscode from 'vscode';
 import * as Parser from 'web-tree-sitter';
 import { TreeSitterService } from './treeSitter';
 import { QueryManager } from './query';
-import * as path from 'path';
 
 export interface SymbolInfo {
     name: string;
@@ -11,6 +10,7 @@ export interface SymbolInfo {
     kind: vscode.SymbolKind;
     detail?: string;
     docMarkdown?: string;
+    signature?: string;
 }
 
 export class WorkspaceIndexer {
@@ -27,8 +27,13 @@ export class WorkspaceIndexer {
         this.isIndexing = true;
         this.symbolIndex.clear();
 
-        // Ensure query is loaded
-        await this.queryManager.loadQuery('definitions');
+        // Ensure query is loaded and cached inside the query manager
+        const queryString = await this.queryManager.loadQuery('definitions');
+        if (!queryString) {
+            console.error('Kanagawa: Unable to load definitions query.');
+            this.isIndexing = false;
+            return;
+        }
 
         const files = await vscode.workspace.findFiles('**/*.k', '**/node_modules/**');
         
@@ -36,7 +41,9 @@ export class WorkspaceIndexer {
         const chunkSize = 10;
         for (let i = 0; i < files.length; i += chunkSize) {
             const chunk = files.slice(i, i + chunkSize);
-            await Promise.all(chunk.map(uri => this.indexFile(uri)));
+            await Promise.all(chunk.map(async uri => {
+                await this.indexFile(uri, queryString);
+            }));
             // Yield to event loop
             await new Promise(resolve => setTimeout(resolve, 0));
         }
@@ -45,135 +52,27 @@ export class WorkspaceIndexer {
         console.log(`Kanagawa: Indexed ${this.symbolIndex.size} symbols from ${files.length} files.`);
     }
 
-    async indexFile(uri: vscode.Uri) {
+    async indexFile(uri: vscode.Uri, queryString?: string) {
         try {
+            // console.log('Kanagawa: Indexing file:', uri.toString());
             const document = await vscode.workspace.openTextDocument(uri);
             const tree = this.service.parse(document);
-            if (!tree) { return; }
-
-            const queryString = this.queryManager.getQuery('definitions');
-            if (!queryString) { return; }
-
-            const captures = this.service.query(tree.rootNode, queryString);
-            
-            // Build map of comment nodes for doc comment extraction
-            const comments: Parser.SyntaxNode[] = [];
-            for (const capture of captures) {
-                if (capture.name === 'doc.comment') {
-                    comments.push(capture.node);
-                }
+            if (!tree) { 
+                console.warn('Kanagawa: No tree for file:', uri.toString());
+                return; 
             }
 
-            // Process definition captures
-            const processedNodes = new Set<Parser.SyntaxNode>();
-            
-            for (const capture of captures) {
-                // Skip if we've already processed this node or if it's a comment
-                if (processedNodes.has(capture.node) || capture.name === 'doc.comment') {
-                    continue;
+            if (!queryString) {
+                const loaded = await this.queryManager.loadQuery('definitions');
+                if (!loaded) {
+                    console.error('Kanagawa: Definitions query not loaded.');
+                    return;
                 }
-                
-                const node = capture.node;
-                let kind = vscode.SymbolKind.Variable;
-                let detail = '';
-                let nameNode: Parser.SyntaxNode | null = null;
-                
-                // Determine the symbol type and extract the name node
-                switch (capture.name) {
-                    case 'module':
-                        kind = vscode.SymbolKind.Module;
-                        detail = 'module';
-                        nameNode = this.findCaptureByName(captures, 'module.name', node);
-                        break;
-                        
-                    case 'class':
-                        kind = vscode.SymbolKind.Class;
-                        detail = 'class';
-                        nameNode = this.findCaptureByName(captures, 'class.name', node);
-                        break;
-                        
-                    case 'struct':
-                        kind = vscode.SymbolKind.Struct;
-                        detail = 'struct';
-                        nameNode = this.findCaptureByName(captures, 'struct.name', node);
-                        break;
-                        
-                    case 'union':
-                        kind = vscode.SymbolKind.Struct;
-                        detail = 'union';
-                        nameNode = this.findCaptureByName(captures, 'union.name', node);
-                        break;
-                        
-                    case 'enum':
-                        kind = vscode.SymbolKind.Enum;
-                        detail = 'enum';
-                        nameNode = this.findCaptureByName(captures, 'enum.name', node);
-                        break;
-                        
-                    case 'function':
-                        kind = vscode.SymbolKind.Function;
-                        detail = 'function';
-                        nameNode = this.findCaptureByName(captures, 'function.name', node);
-                        break;
-                        
-                    case 'alias':
-                        kind = vscode.SymbolKind.TypeParameter;
-                        detail = 'type alias';
-                        nameNode = this.findCaptureByName(captures, 'alias.name', node);
-                        break;
-                        
-                    case 'variable':
-                        kind = vscode.SymbolKind.Variable;
-                        detail = 'variable';
-                        nameNode = this.findCaptureByName(captures, 'variable.name', node);
-                        break;
-                        
-                    case 'member':
-                        kind = vscode.SymbolKind.Field;
-                        detail = 'member';
-                        nameNode = this.findCaptureByName(captures, 'member.name', node);
-                        break;
-                        
-                    case 'constant':
-                        kind = vscode.SymbolKind.EnumMember;
-                        detail = 'constant';
-                        nameNode = this.findCaptureByName(captures, 'constant.name', node);
-                        break;
-                        
-                    default:
-                        continue;
-                }
-
-                if (!nameNode) {
-                    continue;
-                }
-
-                const name = nameNode.text;
-                const range = new vscode.Range(
-                    new vscode.Position(nameNode.startPosition.row, nameNode.startPosition.column),
-                    new vscode.Position(nameNode.endPosition.row, nameNode.endPosition.column)
-                );
-
-                // Find doc comments
-                const docMarkdown = this.findDocComment(node, comments);
-
-                const info: SymbolInfo = {
-                    name,
-                    uri,
-                    range,
-                    kind,
-                    detail,
-                    docMarkdown
-                };
-
-                if (!this.symbolIndex.has(name)) {
-                    this.symbolIndex.set(name, []);
-                }
-                this.symbolIndex.get(name)?.push(info);
-                
-                processedNodes.add(node);
+                queryString = loaded;
             }
 
+            const symbols = this.extractSymbols(document, tree, queryString, uri);
+            this.addSymbols(symbols);
         } catch (e) {
             console.error(`Failed to index ${uri.toString()}:`, e);
         }
@@ -182,7 +81,6 @@ export class WorkspaceIndexer {
     private findCaptureByName(captures: any[], name: string, parentNode: Parser.SyntaxNode): Parser.SyntaxNode | null {
         for (const capture of captures) {
             if (capture.name === name) {
-                // Check if this capture's node is a descendant of parentNode
                 let node = capture.node;
                 while (node) {
                     if (node === parentNode) {
@@ -195,38 +93,211 @@ export class WorkspaceIndexer {
         return null;
     }
 
-    private findDocComment(node: Parser.SyntaxNode, comments: Parser.SyntaxNode[]): string | undefined {
-        // Look for comments immediately before the node
-        const nodeStartLine = node.startPosition.row;
-        
-        // Filter comments that are strictly before and adjacent
-        // Simple heuristic: check lines immediately preceding
-        let docLines: string[] = [];
-        
-        // Reverse iterate comments to find the ones right before
-        for (let i = comments.length - 1; i >= 0; i--) {
-            const comment = comments[i];
-            const commentEndLine = comment.endPosition.row;
-            
-            // Check if comment is //| (pre-doc)
-            if (comment.text.startsWith('//|')) {
-                // Must be on line nodeStartLine - 1 (or connected to previous doc comment)
-                // For simplicity, let's just grab any //| that is close enough?
-                // Better: check if commentEndLine == nodeStartLine - 1 - (distance)
-                // But we need to handle multiple lines of comments.
-                
-                // Let's just check if it's within 5 lines above for now, 
-                // and strictly ordered.
-                if (commentEndLine < nodeStartLine && commentEndLine >= nodeStartLine - 5) {
-                     docLines.unshift(comment.text.substring(3).trim());
-                }
+    private extractSymbols(
+        document: vscode.TextDocument,
+        tree: Parser.Tree,
+        queryString: string,
+        uri: vscode.Uri
+    ): SymbolInfo[] {
+        const captures = this.service.query(tree.rootNode, queryString);
+        if (!captures.length) { return []; }
+
+        const { preDocs, postDocs } = this.prepareDocCommentMaps(captures);
+        const processedNodes = new Set<Parser.SyntaxNode>();
+        const symbols: SymbolInfo[] = [];
+
+        for (const capture of captures) {
+            if (capture.name === 'doc.comment') { continue; }
+            if (processedNodes.has(capture.node)) { continue; }
+
+            let kind = vscode.SymbolKind.Variable;
+            let label = '';
+            let nameCapture = '';
+
+            switch (capture.name) {
+                case 'module':
+                    kind = vscode.SymbolKind.Module;
+                    label = 'module';
+                    nameCapture = 'module.name';
+                    break;
+                case 'class':
+                    kind = vscode.SymbolKind.Class;
+                    label = 'class';
+                    nameCapture = 'class.name';
+                    break;
+                case 'struct':
+                    kind = vscode.SymbolKind.Struct;
+                    label = 'struct';
+                    nameCapture = 'struct.name';
+                    break;
+                case 'union':
+                    kind = vscode.SymbolKind.Struct;
+                    label = 'union';
+                    nameCapture = 'union.name';
+                    break;
+                case 'enum':
+                    kind = vscode.SymbolKind.Enum;
+                    label = 'enum';
+                    nameCapture = 'enum.name';
+                    break;
+                case 'function':
+                    kind = vscode.SymbolKind.Function;
+                    label = 'function';
+                    nameCapture = 'function.name';
+                    break;
+                case 'alias':
+                    kind = vscode.SymbolKind.TypeParameter;
+                    label = 'type alias';
+                    nameCapture = 'alias.name';
+                    break;
+                case 'variable':
+                    kind = vscode.SymbolKind.Variable;
+                    label = 'variable';
+                    nameCapture = 'variable.name';
+                    break;
+                case 'member':
+                    kind = vscode.SymbolKind.Field;
+                    label = 'member';
+                    nameCapture = 'member.name';
+                    break;
+                case 'constant':
+                    kind = vscode.SymbolKind.EnumMember;
+                    label = 'constant';
+                    nameCapture = 'constant.name';
+                    break;
+                default:
+                    continue;
+            }
+
+            const nameNode = this.findCaptureByName(captures, nameCapture, capture.node);
+            if (!nameNode) { continue; }
+
+            const range = new vscode.Range(
+                new vscode.Position(nameNode.startPosition.row, nameNode.startPosition.column),
+                new vscode.Position(nameNode.endPosition.row, nameNode.endPosition.column)
+            );
+
+            const docMarkdown = this.collectDocBlock(capture.node, preDocs, postDocs);
+            let signature = this.buildSignature(document, capture.name, capture.node, nameNode);
+            if (signature && signature.length > 180) {
+                signature = signature.slice(0, 177) + '…';
+            }
+
+            symbols.push({
+                name: nameNode.text,
+                uri,
+                range,
+                kind,
+                detail: label,
+                docMarkdown,
+                signature
+            });
+
+            processedNodes.add(capture.node);
+        }
+
+        return symbols;
+    }
+
+    private addSymbols(symbols: SymbolInfo[]) {
+        for (const info of symbols) {
+            const list = this.symbolIndex.get(info.name) ?? [];
+            list.push(info);
+            this.symbolIndex.set(info.name, list);
+        }
+    }
+
+    private removeSymbolsForUri(uri: vscode.Uri) {
+        const target = uri.toString();
+        for (const [key, list] of this.symbolIndex.entries()) {
+            const filtered = list.filter(entry => entry.uri.toString() !== target);
+            if (filtered.length === 0) {
+                this.symbolIndex.delete(key);
+            } else if (filtered.length !== list.length) {
+                this.symbolIndex.set(key, filtered);
             }
         }
-        
-        if (docLines.length > 0) {
-            return docLines.join('\n');
+    }
+
+    private prepareDocCommentMaps(captures: Parser.QueryCapture[]) {
+        const preDocs = new Map<number, string>();
+        const postDocs = new Map<number, string>();
+
+        for (const capture of captures) {
+            if (capture.name !== 'doc.comment') { continue; }
+            const text = capture.node.text;
+            if (text.startsWith('//|')) {
+                preDocs.set(capture.node.startPosition.row, this.cleanDocComment(text));
+            } else if (text.startsWith('//<')) {
+                postDocs.set(capture.node.startPosition.row, this.cleanDocComment(text));
+            }
         }
-        return undefined;
+
+        return { preDocs, postDocs };
+    }
+
+    private collectDocBlock(
+        node: Parser.SyntaxNode,
+        preDocs: Map<number, string>,
+        postDocs: Map<number, string>
+    ): string | undefined {
+        const lines: string[] = [];
+
+        let line = node.startPosition.row - 1;
+        while (preDocs.has(line)) {
+            lines.unshift(preDocs.get(line)!);
+            line--;
+        }
+
+        line = node.endPosition.row;
+        while (postDocs.has(line)) {
+            lines.push(postDocs.get(line)!);
+            line++;
+        }
+
+        if (!lines.length) { return undefined; }
+        return lines.join('\n');
+    }
+
+    private cleanDocComment(raw: string): string {
+        return raw.slice(3).trim();
+    }
+
+    private buildSignature(
+        document: vscode.TextDocument,
+        captureName: string,
+        defNode: Parser.SyntaxNode,
+        nameNode: Parser.SyntaxNode
+    ): string | undefined {
+        const start = new vscode.Position(defNode.startPosition.row, defNode.startPosition.column);
+        let end = new vscode.Position(nameNode.endPosition.row, nameNode.endPosition.column);
+
+        if (captureName === 'function') {
+            const params = defNode.childForFieldName('parameters');
+            if (params) {
+                end = new vscode.Position(params.endPosition.row, params.endPosition.column);
+            }
+        } else if (captureName === 'variable' || captureName === 'member') {
+            const initializer = defNode.childForFieldName('initializer');
+            if (initializer) {
+                end = new vscode.Position(initializer.endPosition.row, initializer.endPosition.column);
+            }
+        }
+
+        const text = document.getText(new vscode.Range(start, end)).trim();
+        if (!text) { return undefined; }
+        return text.replace(/\s+/g, ' ');
+    }
+
+    async findSymbolsInDocument(document: vscode.TextDocument, name: string): Promise<SymbolInfo[]> {
+        const tree = this.service.getTree(document) ?? this.service.parse(document);
+        if (!tree) { return []; }
+
+        const queryString = await this.queryManager.loadQuery('definitions');
+        if (!queryString) { return []; }
+
+        const symbols = this.extractSymbols(document, tree, queryString, document.uri);
+        return symbols.filter(sym => sym.name === name);
     }
 
     getSymbols(name: string): SymbolInfo[] | undefined {
@@ -241,23 +312,8 @@ export class WorkspaceIndexer {
         return all;
     }
     
-    updateFile(uri: vscode.Uri) {
-        // Remove old symbols for this file? 
-        // In a map<string, list>, it's hard to remove by URI without iterating everything.
-        // Optimization: Keep a separate Map<Uri, SymbolNames[]> to know what to remove.
-        // For LSP-Lite, we might just append and accept duplicates or filter them at lookup time.
-        // Let's do a full re-index of the file which is safer.
-        
-        // First, remove entries for this URI
-        for (const [key, list] of this.symbolIndex.entries()) {
-            const newList = list.filter(s => s.uri.toString() !== uri.toString());
-            if (newList.length === 0) {
-                this.symbolIndex.delete(key);
-            } else {
-                this.symbolIndex.set(key, newList);
-            }
-        }
-        
-        this.indexFile(uri);
+    async updateFile(uri: vscode.Uri) {
+        this.removeSymbolsForUri(uri);
+        await this.indexFile(uri);
     }
 }
