@@ -11,7 +11,11 @@
     "Programming Languages"
   ],
   "activationEvents": [
-    "onLanguage:kanagawa"
+    "onLanguage:kanagawa",
+    "onCommand:kanagawa.index.clear",
+    "onCommand:kanagawa.index.rebuild",
+    "onCommand:kanagawa.index.toggleVerbose",
+    "onCommand:kanagawa.index.showStats"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -26,6 +30,28 @@
           ".k"
         ],
         "configuration": "./language-configuration.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "kanagawa.index.clear",
+        "title": "Kanagawa: Clear Index",
+        "category": "Kanagawa"
+      },
+      {
+        "command": "kanagawa.index.rebuild",
+        "title": "Kanagawa: Rebuild Index",
+        "category": "Kanagawa"
+      },
+      {
+        "command": "kanagawa.index.toggleVerbose",
+        "title": "Kanagawa: Toggle Index Verbose Logging",
+        "category": "Kanagawa"
+      },
+      {
+        "command": "kanagawa.index.showStats",
+        "title": "Kanagawa: Show Index Stats",
+        "category": "Kanagawa"
       }
     ]
   },

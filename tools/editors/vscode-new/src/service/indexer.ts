@@ -55,6 +55,8 @@ export class WorkspaceIndexer {
     private symbolIndex: Map<string, SymbolInfo[]> = new Map();
     private isIndexing = false;
     private documentContexts: Map<string, DocumentContext> = new Map();
+        private verbose = false;
+        private recentlyIndexed = 0;
     private readonly templateWrappers = new Set<string>([
         'function_template',
         'class_template',
@@ -76,6 +78,8 @@ export class WorkspaceIndexer {
         this.isIndexing = true;
         this.symbolIndex.clear();
         this.documentContexts.clear();
+        this.memberCache.clear();
+        this.typeInferenceCache.clear();
 
         // Ensure query is loaded and cached inside the query manager
         const queryString = await this.queryManager.loadQuery('definitions');
@@ -100,10 +104,17 @@ export class WorkspaceIndexer {
         
         this.isIndexing = false;
         console.log(`Kanagawa: Indexed ${this.symbolIndex.size} symbols from ${files.length} files.`);
+            this.recentlyIndexed = 0;
+            if (this.verbose) {
+                console.log(`Kanagawa: Indexed ${this.symbolIndex.size} symbols from ${files.length} files.`);
+            }
     }
 
     async indexFile(uri: vscode.Uri, queryString?: string) {
         try {
+            if (this.verbose) {
+                console.log('Kanagawa: Indexing file:', uri.toString());
+            }
             this.clearDocumentCaches(uri);
             // console.log('Kanagawa: Indexing file:', uri.toString());
             const document = await vscode.workspace.openTextDocument(uri);
@@ -127,6 +138,7 @@ export class WorkspaceIndexer {
             this.documentContexts.set(uri.toString(), context);
             this.addSymbols(symbols);
             this.memberCache.clear();
+                    this.recentlyIndexed += symbols.length;
         } catch (e) {
             console.error(`Failed to index ${uri.toString()}:`, e);
         }
@@ -293,6 +305,34 @@ export class WorkspaceIndexer {
             list.push(info);
             this.symbolIndex.set(info.name, list);
         }
+    }
+
+    public clearIndex() {
+        this.symbolIndex.clear();
+        this.documentContexts.clear();
+        this.memberCache.clear();
+        this.typeInferenceCache.clear();
+        this.recentlyIndexed = 0;
+    }
+
+    public toggleVerbose() {
+        this.verbose = !this.verbose;
+        return this.verbose;
+    }
+
+    public getStats() {
+        const files = new Set<string>();
+        for (const list of this.symbolIndex.values()) {
+            for (const sym of list) {
+                files.add(sym.uri.toString());
+            }
+        }
+        return {
+            totalSymbols: this.symbolIndex.size,
+            uniqueFiles: files.size,
+            recentlyIndexed: this.recentlyIndexed,
+            verbose: this.verbose
+        };
     }
 
     private collectDocumentContext(root: Parser.SyntaxNode): DocumentContext {

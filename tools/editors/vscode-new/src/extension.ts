@@ -92,6 +92,39 @@ export async function activate(context: vscode.ExtensionContext) {
             }
         })
     );
+
+    const output = vscode.window.createOutputChannel('Kanagawa Index');
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('kanagawa.index.clear', async () => {
+            indexer.clearIndex();
+            vscode.window.showInformationMessage('Kanagawa index cleared.');
+        }),
+        vscode.commands.registerCommand('kanagawa.index.rebuild', async () => {
+            await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Window,
+                title: 'Rebuilding Kanagawa index...'
+            }, async () => {
+                indexer.clearIndex();
+                await indexer.scanWorkspace();
+            });
+            vscode.window.showInformationMessage('Kanagawa index rebuilt.');
+        }),
+        vscode.commands.registerCommand('kanagawa.index.toggleVerbose', () => {
+            const state = indexer.toggleVerbose();
+            vscode.window.showInformationMessage(`Kanagawa verbose indexing ${state ? 'enabled' : 'disabled'}.`);
+        }),
+        vscode.commands.registerCommand('kanagawa.index.showStats', () => {
+            const stats = indexer.getStats();
+            output.clear();
+            output.show(true);
+            output.appendLine('Kanagawa Index Statistics');
+            output.appendLine(`Total symbol names: ${stats.totalSymbols}`);
+            output.appendLine(`Files contributing symbols: ${stats.uniqueFiles}`);
+            output.appendLine(`Symbols added in last scan: ${stats.recentlyIndexed}`);
+            output.appendLine(`Verbose logging: ${stats.verbose ? 'on' : 'off'}`);
+        })
+    );
 }
 
 export function deactivate(): void {
