@@ -619,6 +619,7 @@ module.exports = grammar({
       $.call_expression,
       $.subscript_expression,
       // $.cast_expression,
+      $._template_arg_ternary_expression,
       // Binary expressions excluding comparison operators
       prec.left(13, seq($._template_arg_expression, choice('*', '/', '%'), $._template_arg_expression)),
       prec.left(12, seq($._template_arg_expression, choice('+', '-'), $._template_arg_expression)),
@@ -631,6 +632,14 @@ module.exports = grammar({
       prec.left(3, seq($._template_arg_expression, '||', $._template_arg_expression)),
       seq('(', $.expression, ')'),
     ),
+
+    _template_arg_ternary_expression: $ => prec.right(2, seq(
+      $._template_arg_expression,
+      '?',
+      $._template_arg_expression,
+      ':',
+      $._template_arg_expression
+    )),
 
     // ============================================================================
     // Statements
