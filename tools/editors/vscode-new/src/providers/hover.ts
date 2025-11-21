@@ -39,6 +39,12 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
 
         const scopePath = this.indexer.getScopePathForNode(identifier);
         const contextHint = await this.buildContextHint(document, identifier);
+
+        const localSymbol = this.indexer.findNearestLocalSymbol(document, identifier);
+        if (localSymbol) {
+            this.appendSymbolMarkdown(localSymbol, markdowns, seen);
+        }
+
         const scopedSymbols = this.indexer.resolveSymbols(name, scopePath, {
             uri: document.uri,
             context: contextHint,

@@ -32,6 +32,16 @@ export class KanagawaDefinitionProvider implements vscode.DefinitionProvider {
 
         const scopePath = this.indexer.getScopePathForNode(node);
         const contextHint = await this.buildContextHint(document, node);
+
+        const localSymbol = this.indexer.findNearestLocalSymbol(document, node);
+        if (localSymbol) {
+            const key = `${localSymbol.uri.toString()}#${localSymbol.range.start.line}:${localSymbol.range.start.character}`;
+            if (!seen.has(key)) {
+                seen.add(key);
+                results.push(new vscode.Location(localSymbol.uri, localSymbol.range));
+            }
+        }
+
         const matches = this.indexer.resolveSymbols(name, scopePath, {
             uri: document.uri,
             context: contextHint,

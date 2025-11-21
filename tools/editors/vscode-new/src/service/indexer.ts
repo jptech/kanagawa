@@ -471,6 +471,8 @@ export class WorkspaceIndexer {
             case 'union_decl':
             case 'enum_decl':
                 return this.extractNodeName(node);
+            case 'function_definition':
+                return this.extractNodeName(node);
             case 'class_template':
             case 'struct_template':
             case 'union_template':
@@ -501,6 +503,32 @@ export class WorkspaceIndexer {
 
     public getScopePathForNode(node: Parser.SyntaxNode): string[] {
         return this.collectScopePath(node.parent);
+    }
+
+    public findNearestLocalSymbol(document: vscode.TextDocument, identifier: Parser.SyntaxNode): SymbolInfo | undefined {
+        const targetName = identifier.text;
+        const limit = identifier.startIndex;
+
+        let current: Parser.SyntaxNode | null = identifier.parent;
+        while (current) {
+            if (current.type === 'block' || current.type === 'compound_statement') {
+                const decl = this.findDeclarationInScope(current, targetName, limit);
+                if (decl) {
+                    return this.buildLocalSymbolInfo(document, decl, targetName);
+                }
+            }
+
+            if (current.type === 'function_definition') {
+                const param = this.findParameterDeclaration(current, targetName);
+                if (param) {
+                    return this.buildLocalSymbolInfo(document, param, targetName);
+                }
+            }
+
+            current = current.parent;
+        }
+
+        return undefined;
     }
 
     public resolveSymbols(name: string, scopePath: string[], options?: ResolveOptions): SymbolInfo[] {
@@ -696,5 +724,92 @@ export class WorkspaceIndexer {
             text = text.slice(dotSep + 1);
         }
         return text.replace(/\s+/g, '');
+    }
+
+    private findDeclarationInScope(scopeNode: Parser.SyntaxNode, targetName: string, limit: number): Parser.SyntaxNode | undefined {
+        if (!scopeNode.namedChildren.length) { return undefined; }
+
+        let candidate: Parser.SyntaxNode | undefined;
+        for (const child of scopeNode.namedChildren) {
+            if (child.startIndex > limit) {
+                break;
+            }
+
+            const isBlock = child.type === 'block' || child.type === 'compound_statement';
+            const shouldDescend = !isBlock || (child.startIndex <= limit && child.endIndex >= limit);
+
+            if (shouldDescend) {
+                const match = this.matchDeclarationNode(child, targetName, limit);
+                if (match && (!candidate || match.startIndex > candidate.startIndex)) {
+                    candidate = match;
+                }
+
+                const nested = this.findDeclarationInScope(child, targetName, limit);
+                if (nested && (!candidate || nested.startIndex > candidate.startIndex)) {
+                    candidate = nested;
+                }
+            }
+        }
+
+        return candidate;
+    }
+
+    private findParameterDeclaration(functionNode: Parser.SyntaxNode, targetName: string): Parser.SyntaxNode | undefined {
+        const params = functionNode.childForFieldName('parameters');
+        if (!params) { return undefined; }
+
+        for (const child of params.namedChildren) {
+            if (child.type !== 'parameter') { continue; }
+            const nameNode = child.childForFieldName('name');
+            if (nameNode && nameNode.text === targetName) {
+                return child;
+            }
+        }
+
+        return undefined;
+    }
+
+    private matchDeclarationNode(node: Parser.SyntaxNode, targetName: string, limit: number): Parser.SyntaxNode | undefined {
+        if (node.type === 'variable_decl') {
+            const nameNode = node.childForFieldName('name');
+            if (nameNode && nameNode.text === targetName && node.startIndex < limit) {
+                return node;
+            }
+        }
+        return undefined;
+    }
+
+    private buildLocalSymbolInfo(document: vscode.TextDocument, declNode: Parser.SyntaxNode, name: string): SymbolInfo {
+        const nameNode = declNode.childForFieldName('name');
+        const range = nameNode
+            ? new vscode.Range(
+                new vscode.Position(nameNode.startPosition.row, nameNode.startPosition.column),
+                new vscode.Position(nameNode.endPosition.row, nameNode.endPosition.column)
+            )
+            : new vscode.Range(
+                new vscode.Position(declNode.startPosition.row, declNode.startPosition.column),
+                new vscode.Position(declNode.startPosition.row, declNode.startPosition.column)
+            );
+
+        const typeNode = this.findTypeNode(declNode);
+        const typeText = typeNode ? typeNode.text.trim() : undefined;
+        const signatureParts: string[] = [];
+        if (typeText) {
+            signatureParts.push(typeText.replace(/\s+/g, ' '));
+        }
+        signatureParts.push(name);
+
+        return {
+            name,
+            uri: document.uri,
+            range,
+            kind: vscode.SymbolKind.Variable,
+            detail: 'variable',
+            docMarkdown: undefined,
+            signature: signatureParts.join(' '),
+            scopePath: this.buildScopePath(declNode),
+            category: 'variable',
+            typeHint: typeText
+        };
     }
 }
