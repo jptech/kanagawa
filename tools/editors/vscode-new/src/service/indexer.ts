@@ -669,6 +669,27 @@ export class WorkspaceIndexer {
         return undefined;
     }
 
+    public async resolveMemberSymbol(
+        document: vscode.TextDocument,
+        identifier: Parser.SyntaxNode
+    ): Promise<SymbolInfo[] | undefined> {
+        const parent = identifier.parent;
+        if (!parent || parent.type !== 'member_expression') {
+            return undefined;
+        }
+
+        const receiverNode = parent.namedChild(0);
+        if (!receiverNode) { return undefined; }
+        const methodName = identifier.text;
+
+        const receiverType = await this.inferTypeFromExpression(document, receiverNode);
+        if (!receiverType) { return undefined; }
+
+        const members = this.getMembersForType(receiverType, { includeMethods: true, includeFields: false });
+        const matches = members.filter(sym => sym.name === methodName);
+        return matches.length ? matches : undefined;
+    }
+
     public getMembersForType(typeName: string, options?: { includeMethods?: boolean; includeFields?: boolean }): SymbolInfo[] {
         if (!typeName) { return []; }
         const normalized = this.normalizeTypeName(typeName);

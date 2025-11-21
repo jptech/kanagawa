@@ -45,6 +45,13 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
             this.appendSymbolMarkdown(localSymbol, markdowns, seen);
         }
 
+        const memberMatches = await this.indexer.resolveMemberSymbol(document, identifier);
+        if (memberMatches) {
+            for (const sym of memberMatches) {
+                this.appendSymbolMarkdown(sym, markdowns, seen);
+            }
+        }
+
         const scopedSymbols = this.indexer.resolveSymbols(name, scopePath, {
             uri: document.uri,
             context: contextHint,

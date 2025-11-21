@@ -42,6 +42,16 @@ export class KanagawaDefinitionProvider implements vscode.DefinitionProvider {
             }
         }
 
+        const memberMatches = await this.indexer.resolveMemberSymbol(document, node);
+        if (memberMatches) {
+            for (const sym of memberMatches) {
+                const key = `${sym.uri.toString()}#${sym.range.start.line}:${sym.range.start.character}`;
+                if (seen.has(key)) { continue; }
+                seen.add(key);
+                results.push(new vscode.Location(sym.uri, sym.range));
+            }
+        }
+
         const matches = this.indexer.resolveSymbols(name, scopePath, {
             uri: document.uri,
             context: contextHint,
