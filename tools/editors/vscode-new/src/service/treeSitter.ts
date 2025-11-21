@@ -47,20 +47,24 @@ export class TreeSitterService {
     }
 
     parse(document: vscode.TextDocument): Parser.Tree | undefined {
-        if (!this.parser) { 
+        if (!this.parser) {
             console.warn('Kanagawa: Parser not initialized.');
-            return undefined; 
+            return undefined;
         }
-        
+
         const uri = document.uri.toString();
-        const oldTree = this.trees.get(uri);
-        
-        // In a full implementation, we would use oldTree.edit() for incremental parsing
-        // based on content changes. For simplicity in this version, we re-parse.
-        // To do incremental, we need to hook into onDidChangeTextDocument and map changes.
-        
+        const previous = this.trees.get(uri);
+
         try {
-            const newTree = this.parser.parse(document.getText(), oldTree);
+            // Until we implement edit tracking, prefer a full reparse to guarantee
+            // the syntax tree reflects the latest document contents. This keeps
+            // diagnostics, hovers, and semantic tokens in sync on every change.
+            const newTree = this.parser.parse(document.getText());
+
+            if (previous) {
+                previous.delete();
+            }
+
             this.trees.set(uri, newTree);
             return newTree;
         } catch (e) {

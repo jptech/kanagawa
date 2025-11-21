@@ -78,16 +78,30 @@ export class WorkspaceIndexer {
         }
     }
     
-    private findCaptureByName(captures: any[], name: string, parentNode: Parser.SyntaxNode): Parser.SyntaxNode | null {
+    private findCaptureByName(
+        captures: Parser.QueryCapture[],
+        name: string,
+        parentNode: Parser.SyntaxNode
+    ): Parser.SyntaxNode | null {
         for (const capture of captures) {
-            if (capture.name === name) {
-                let node = capture.node;
-                while (node) {
-                    if (node === parentNode) {
-                        return capture.node;
-                    }
-                    node = node.parent;
+            if (capture.name !== name) { continue; }
+
+            // Fast path: check by range containment first. This avoids relying on
+            // object identity for SyntaxNode wrappers, which are not stable across
+            // repeated lookups when using the WASM bindings.
+            if (capture.node.startIndex >= parentNode.startIndex && capture.node.endIndex <= parentNode.endIndex) {
+                return capture.node;
+            }
+
+            // Fallback to ancestor walk for completeness (handles overlapping
+            // captures such as templates where the identifier is nested under a
+            // function definition which itself sits beneath the template node).
+            let node: Parser.SyntaxNode | null = capture.node;
+            while (node) {
+                if (node.id === parentNode.id) { // Compare by node id to avoid wrapper inequality
+                    return capture.node;
                 }
+                node = node.parent;
             }
         }
         return null;
@@ -103,12 +117,13 @@ export class WorkspaceIndexer {
         if (!captures.length) { return []; }
 
         const { preDocs, postDocs } = this.prepareDocCommentMaps(captures);
-        const processedNodes = new Set<Parser.SyntaxNode>();
+            const processedNodes = new Set<number>();
         const symbols: SymbolInfo[] = [];
 
         for (const capture of captures) {
             if (capture.name === 'doc.comment') { continue; }
-            if (processedNodes.has(capture.node)) { continue; }
+                const nodeId = capture.node.id;
+                if (processedNodes.has(nodeId)) { continue; }
 
             let kind = vscode.SymbolKind.Variable;
             let label = '';
@@ -193,7 +208,7 @@ export class WorkspaceIndexer {
                 signature
             });
 
-            processedNodes.add(capture.node);
+                processedNodes.add(nodeId);
         }
 
         return symbols;
