@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { TreeSitterService } from '../service/treeSitter';
-import { WorkspaceIndexer, SymbolInfo } from '../service/indexer';
+import { WorkspaceIndexer, SymbolInfo, SymbolContextHint } from '../service/indexer';
 
 export class KanagawaHoverProvider implements vscode.HoverProvider {
     constructor(
@@ -37,8 +37,14 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
         const markdowns: vscode.MarkdownString[] = [];
         const seen = new Set<string>();
 
-        const globalSymbols = this.indexer.getSymbols(name) ?? [];
-        for (const sym of globalSymbols) {
+        const scopePath = this.indexer.getScopePathForNode(identifier);
+        const contextHint = await this.buildContextHint(document, identifier);
+        const scopedSymbols = this.indexer.resolveSymbols(name, scopePath, {
+            uri: document.uri,
+            context: contextHint,
+            limit: 5
+        });
+        for (const sym of scopedSymbols) {
             this.appendSymbolMarkdown(sym, markdowns, seen);
         }
 
@@ -76,6 +82,9 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
         md.appendCodeblock(summary, 'kanagawa');
         if (sym.docMarkdown) {
             md.appendMarkdown(`\n\n${sym.docMarkdown}`);
+        }
+        if (sym.scopePath.length > 0) {
+            md.appendMarkdown(`\n\n**Scope:** ${sym.scopePath.join('::')}`);
         }
         const relative = vscode.workspace.asRelativePath(sym.uri, false);
         md.appendMarkdown(`\n\n*Defined in ${relative}*`);
@@ -140,5 +149,21 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
         const start = new vscode.Position(node.startPosition.row, node.startPosition.column);
         const end = new vscode.Position(node.endPosition.row, node.endPosition.column);
         return document.getText(new vscode.Range(start, end));
+    }
+
+    private async buildContextHint(document: vscode.TextDocument, identifier: any): Promise<SymbolContextHint> {
+        let current = identifier.parent;
+        while (current) {
+            if (current.type === 'member_expression' && current.namedChildCount >= 2) {
+                const propertyNode = current.namedChild(current.namedChildCount - 1);
+                if (propertyNode === identifier) {
+                    const receiverNode = current.namedChild(0);
+                    const receiverType = await this.indexer.inferTypeFromExpression(document, receiverNode ?? undefined);
+                    return { kind: 'method', receiverType };
+                }
+            }
+            current = current.parent;
+        }
+        return { kind: 'free' };
     }
 }

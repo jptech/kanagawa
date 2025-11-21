@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
+import * as Parser from 'web-tree-sitter';
 import { TreeSitterService } from '../service/treeSitter';
-import { WorkspaceIndexer } from '../service/indexer';
+import { WorkspaceIndexer, SymbolContextHint } from '../service/indexer';
 
 export class KanagawaDefinitionProvider implements vscode.DefinitionProvider {
     constructor(
@@ -29,8 +30,14 @@ export class KanagawaDefinitionProvider implements vscode.DefinitionProvider {
         const results: vscode.Location[] = [];
         const seen = new Set<string>();
 
-        const symbols = this.indexer.getSymbols(name) ?? [];
-        for (const sym of symbols) {
+        const scopePath = this.indexer.getScopePathForNode(node);
+        const contextHint = await this.buildContextHint(document, node);
+        const matches = this.indexer.resolveSymbols(name, scopePath, {
+            uri: document.uri,
+            context: contextHint,
+            limit: 5
+        });
+        for (const sym of matches) {
             const key = `${sym.uri.toString()}#${sym.range.start.line}:${sym.range.start.character}`;
             if (seen.has(key)) { continue; }
             seen.add(key);
@@ -48,5 +55,21 @@ export class KanagawaDefinitionProvider implements vscode.DefinitionProvider {
         }
 
         return results.length > 0 ? results : undefined;
+    }
+
+    private async buildContextHint(document: vscode.TextDocument, identifier: Parser.SyntaxNode): Promise<SymbolContextHint> {
+        let current = identifier.parent;
+        while (current) {
+            if (current.type === 'member_expression' && current.namedChildCount >= 2) {
+                const propertyNode = current.namedChild(current.namedChildCount - 1);
+                if (propertyNode === identifier) {
+                    const receiverNode = current.namedChild(0);
+                    const receiverType = await this.indexer.inferTypeFromExpression(document, receiverNode ?? undefined);
+                    return { kind: 'method', receiverType };
+                }
+            }
+            current = current.parent;
+        }
+        return { kind: 'free' };
     }
 }
