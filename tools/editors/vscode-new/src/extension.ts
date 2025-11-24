@@ -11,6 +11,7 @@ import { KanagawaFoldingRangeProvider } from './providers/folding';
 import { KanagawaCompletionItemProvider } from './providers/completion';
 import { KanagawaDiagnosticsProvider } from './providers/diagnostics';
 import { KanagawaTypePeekCodeLensProvider } from './providers/typePeek';
+import { KanagawaSignatureHelpProvider } from './providers/signatureHelp';
 import { OutlineFilterManager } from './service/outlineFilters';
 
 export async function activate(context: vscode.ExtensionContext) {
@@ -49,6 +50,7 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.languages.registerWorkspaceSymbolProvider(new KanagawaWorkspaceSymbolProvider(indexer, outlineFilters)),
         vscode.languages.registerFoldingRangeProvider('kanagawa', new KanagawaFoldingRangeProvider(service)),
         vscode.languages.registerCompletionItemProvider('kanagawa', new KanagawaCompletionItemProvider(indexer, service), '.'),
+        vscode.languages.registerSignatureHelpProvider('kanagawa', new KanagawaSignatureHelpProvider(service, indexer), '(', ',', ')'),
         vscode.languages.registerCodeLensProvider({ language: 'kanagawa' }, new KanagawaTypePeekCodeLensProvider(service, indexer)),
         diagnosticsProvider,
         outlineFilters
