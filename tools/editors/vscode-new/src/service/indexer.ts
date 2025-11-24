@@ -476,15 +476,10 @@ export class WorkspaceIndexer {
             line++;
         }
 
-        if (!lines.length) {
-            const fallback = this.collectLineCommentBlock(document, anchor);
-            if (fallback.length) {
-                return fallback.join('\n');
-            }
-        }
-
-        if (!lines.length) { return undefined; }
-        return lines.join('\n');
+        const fallback = lines.length ? [] : this.collectLineCommentBlock(document, anchor, preDocs, postDocs);
+        const merged = lines.length ? lines : fallback;
+        if (!merged.length) { return undefined; }
+        return merged.join('\n');
     }
 
     private cleanDocComment(raw: string): string {
@@ -1273,7 +1268,12 @@ export class WorkspaceIndexer {
         return parts.join('\n');
     }
 
-    private collectLineCommentBlock(document: vscode.TextDocument, anchor: Parser.SyntaxNode): string[] {
+    private collectLineCommentBlock(
+        document: vscode.TextDocument,
+        anchor: Parser.SyntaxNode,
+        preDocs: Map<number, string>,
+        postDocs: Map<number, string>
+    ): string[] {
         const result: string[] = [];
         let line = anchor.startPosition.row - 1;
 
@@ -1288,6 +1288,14 @@ export class WorkspaceIndexer {
                 result.unshift(content);
             }
             line--;
+        }
+
+        // Include doc comments captured via preDocs in case they weren't gathered
+        for (const [key, value] of preDocs.entries()) {
+            if (key >= anchor.startPosition.row) { break; }
+            if (key >= line && key < anchor.startPosition.row) {
+                result.unshift(value);
+            }
         }
 
         return result;
