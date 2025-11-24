@@ -1,7 +1,9 @@
 import * as vscode from 'vscode';
 import * as Parser from 'web-tree-sitter';
+import * as path from 'path';
 import { TreeSitterService } from './treeSitter';
 import { QueryManager } from './query';
+import { ImportConfigService, ImportConfiguration } from './importConfig';
 
 export type SymbolCategory =
     | 'module'
@@ -55,8 +57,8 @@ export class WorkspaceIndexer {
     private symbolIndex: Map<string, SymbolInfo[]> = new Map();
     private isIndexing = false;
     private documentContexts: Map<string, DocumentContext> = new Map();
-        private verbose = false;
-        private recentlyIndexed = 0;
+    private verbose = false;
+    private recentlyIndexed = 0;
     private readonly templateWrappers = new Set<string>([
         'function_template',
         'class_template',
@@ -68,20 +70,43 @@ export class WorkspaceIndexer {
     private readonly typeInferenceCache: Map<string, Map<number, string>> = new Map();
     private readonly memberCache: Map<string, SymbolInfo[]> = new Map();
     private readonly aliasMap: Map<string, { target: string; uri: string }> = new Map();
+    private readonly importConfig: ImportConfigService;
+    private pendingRescan = false;
 
     constructor(
         private service: TreeSitterService,
-        private queryManager: QueryManager
-    ) {}
+        private queryManager: QueryManager,
+        workspaceFolder?: vscode.WorkspaceFolder
+    ) {
+        this.importConfig = new ImportConfigService(workspaceFolder);
+    }
+
+    async init(context: vscode.ExtensionContext): Promise<void> {
+        await this.importConfig.init(context);
+        context.subscriptions.push(this.importConfig.onDidChange(() => {
+            this.memberCache.clear();
+            this.typeInferenceCache.clear();
+            this.handleImportConfigurationChanged();
+        }));
+    }
+
+    async getImportConfiguration(): Promise<ImportConfiguration> {
+        return this.importConfig.resolveImportConfiguration();
+    }
 
     async scanWorkspace() {
-        if (this.isIndexing) { return; }
+        if (this.isIndexing) {
+            this.pendingRescan = true;
+            return;
+        }
         this.isIndexing = true;
         this.symbolIndex.clear();
         this.documentContexts.clear();
         this.memberCache.clear();
         this.typeInferenceCache.clear();
         this.aliasMap.clear();
+
+        const importConfiguration = await this.importConfig.resolveImportConfiguration();
 
         // Ensure query is loaded and cached inside the query manager
         const queryString = await this.queryManager.loadQuery('definitions');
@@ -91,13 +116,13 @@ export class WorkspaceIndexer {
             return;
         }
 
-        const files = await vscode.workspace.findFiles('**/*.k', '**/node_modules/**');
+        const files = await this.collectSourceFiles(importConfiguration.importPaths);
         
         // Process in chunks to avoid blocking UI
         const chunkSize = 10;
         for (let i = 0; i < files.length; i += chunkSize) {
             const chunk = files.slice(i, i + chunkSize);
-            await Promise.all(chunk.map(async uri => {
+            await Promise.all(chunk.map(async (uri: vscode.Uri) => {
                 await this.indexFile(uri, queryString);
             }));
             // Yield to event loop
@@ -110,6 +135,11 @@ export class WorkspaceIndexer {
             if (this.verbose) {
                 console.log(`Kanagawa: Indexed ${this.symbolIndex.size} symbols from ${files.length} files.`);
             }
+
+        if (this.pendingRescan) {
+            this.pendingRescan = false;
+            void this.scanWorkspace();
+        }
     }
 
     async indexFile(uri: vscode.Uri, queryString?: string) {
@@ -648,6 +678,88 @@ export class WorkspaceIndexer {
         const filtered = scoredAll.filter(entry => entry.score > 0 && entry.score >= bestScore - 10);
         const preferred = (filtered.length > 0 ? filtered : scoredAll).map(entry => entry.info);
         return preferred.slice(0, limit);
+    }
+
+    private handleImportConfigurationChanged(): void {
+        if (this.isIndexing) {
+            this.pendingRescan = true;
+            return;
+        }
+        void this.scanWorkspace();
+    }
+
+    private async collectSourceFiles(extraPaths: string[]): Promise<vscode.Uri[]> {
+        const workspaceFiles = await vscode.workspace.findFiles('**/*.k', '**/node_modules/**');
+        const externalFiles = await this.collectExternalSourceFiles(extraPaths);
+        const uriMap = new Map<string, vscode.Uri>();
+        for (const uri of [...workspaceFiles, ...externalFiles]) {
+            const key = uri.toString();
+            if (!uriMap.has(key)) {
+                uriMap.set(key, uri);
+            }
+        }
+        return Array.from(uriMap.values());
+    }
+
+    private async collectExternalSourceFiles(paths: string[]): Promise<vscode.Uri[]> {
+        const results: vscode.Uri[] = [];
+        const visitedRoots = new Set<string>();
+        const visitedDirs = new Set<string>();
+
+        for (const raw of paths) {
+            if (!raw || !raw.trim()) { continue; }
+            const normalized = path.normalize(path.resolve(raw));
+            if (visitedRoots.has(normalized)) { continue; }
+            visitedRoots.add(normalized);
+
+            const rootUri = vscode.Uri.file(normalized);
+            await this.walkKanagawaDirectory(rootUri, results, visitedDirs);
+        }
+
+        return results;
+    }
+
+    private async walkKanagawaDirectory(
+        rootUri: vscode.Uri,
+        results: vscode.Uri[],
+        visitedDirs: Set<string>
+    ): Promise<void> {
+        const dirKey = rootUri.fsPath;
+        if (visitedDirs.has(dirKey)) { return; }
+        visitedDirs.add(dirKey);
+
+        let entries: [string, vscode.FileType][];
+        try {
+            entries = await vscode.workspace.fs.readDirectory(rootUri);
+        } catch {
+            return;
+        }
+
+        for (const [name, type] of entries) {
+            const entryUri = vscode.Uri.joinPath(rootUri, name);
+
+            if ((type & vscode.FileType.SymbolicLink) !== 0) { continue; }
+
+            if ((type & vscode.FileType.File) !== 0) {
+                if (name.endsWith('.k')) {
+                    results.push(entryUri);
+                }
+                continue;
+            }
+
+            if ((type & vscode.FileType.Directory) === 0) { continue; }
+
+            if (this.shouldSkipDirectory(name)) { continue; }
+            await this.walkKanagawaDirectory(entryUri, results, visitedDirs);
+        }
+    }
+
+    private shouldSkipDirectory(name: string): boolean {
+        const lower = name.toLowerCase();
+        if (lower === '.git' || lower === '.hg' || lower === '.svn' || lower === 'node_modules') { return true; }
+        if (lower === 'build' || lower === 'dist' || lower === 'out') { return true; }
+        if (name.startsWith('.') && name !== '.kanagawa') { return true; }
+        return false;
     }
 
     private computeScopeSimilarity(target: string[], candidate: string[]): number {

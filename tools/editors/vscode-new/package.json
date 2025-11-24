@@ -79,7 +79,7 @@
       }
     ],
     "configuration": {
-      "title": "Kanagawa Outline",
+      "title": "Kanagawa",
       "properties": {
         "kanagawa.outline.categoryFilter": {
           "type": "array",
@@ -107,6 +107,27 @@
           "type": "string",
           "default": "",
           "description": "Only show symbols whose module path starts with this prefix."
+        },
+        "kanagawa.compiler.importPaths": {
+          "type": "array",
+          "scope": "resource",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Additional search paths for Kanagawa imports. Relative paths are resolved against the workspace folder. Workspace kanagawa.config.json entries are merged first, followed by these settings.",
+          "tags": [
+            "kanagawa"
+          ]
+        },
+        "kanagawa.compiler.stdlibPath": {
+          "type": "string",
+          "scope": "resource",
+          "default": "",
+          "markdownDescription": "Optional override for the standard library location. Relative paths are resolved against the workspace folder. Values in these settings take precedence over workspace kanagawa.config.json entries.",
+          "tags": [
+            "kanagawa"
+          ]
         }
       }
     }

@@ -31,7 +31,9 @@ export async function activate(context: vscode.ExtensionContext) {
     ]);
 
     const outlineFilters = new OutlineFilterManager();
-    const indexer = new WorkspaceIndexer(service, queryManager);
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    const indexer = new WorkspaceIndexer(service, queryManager, workspaceFolder);
+    await indexer.init(context);
     const diagnosticsProvider = new KanagawaDiagnosticsProvider(service);
     
     // Initial scan
