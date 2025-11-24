@@ -461,25 +461,18 @@ export class WorkspaceIndexer {
         preDocs: Map<number, string>,
         postDocs: Map<number, string>
     ): string | undefined {
-        const lines: string[] = [];
         const anchor = this.getDocAnchorNode(node);
 
-        let line = anchor.startPosition.row - 1;
-        while (preDocs.has(line)) {
-            lines.unshift(preDocs.get(line)!);
-            line--;
-        }
+        const lines = this.collectLeadingDocLines(document, anchor, preDocs);
 
-        line = node.endPosition.row;
+        let line = node.endPosition.row;
         while (postDocs.has(line)) {
             lines.push(postDocs.get(line)!);
             line++;
         }
 
-        const fallback = lines.length ? [] : this.collectLineCommentBlock(document, anchor, preDocs, postDocs);
-        const merged = lines.length ? lines : fallback;
-        if (!merged.length) { return undefined; }
-        return merged.join('\n');
+        if (!lines.length) { return undefined; }
+        return lines.join('\n');
     }
 
     private cleanDocComment(raw: string): string {
@@ -873,11 +866,33 @@ export class WorkspaceIndexer {
                 row: symbol.range.start.line,
                 column: symbol.range.start.character
             });
-            const templateNode = this.findTemplateAncestor(node);
-            if (!templateNode) { return []; }
-            return this.getTemplateParameterSymbols(document, templateNode);
+
+            let templateNode = this.findTemplateAncestor(node);
+            while (templateNode) {
+                if (this.isTemplateWrapperApplicable(symbol.category, templateNode.type)) {
+                    return this.getTemplateParameterSymbols(document, templateNode);
+                }
+                templateNode = this.findTemplateAncestor(templateNode.parent);
+            }
+
+            return [];
         } catch {
             return [];
+        }
+    }
+
+    private isTemplateWrapperApplicable(category: SymbolCategory, wrapperType: string): boolean {
+        switch (category) {
+            case 'class':
+            case 'struct':
+            case 'union':
+            case 'alias':
+                return wrapperType === 'class_template' || wrapperType === 'struct_template' || wrapperType === 'union_template' || wrapperType === 'alias_template';
+            case 'function':
+            case 'method':
+                return wrapperType === 'function_template';
+            default:
+                return false;
         }
     }
 
@@ -1270,9 +1285,7 @@ export class WorkspaceIndexer {
 
     private collectLineCommentBlock(
         document: vscode.TextDocument,
-        anchor: Parser.SyntaxNode,
-        preDocs: Map<number, string>,
-        postDocs: Map<number, string>
+        anchor: Parser.SyntaxNode
     ): string[] {
         const result: string[] = [];
         let line = anchor.startPosition.row - 1;
@@ -1291,14 +1304,42 @@ export class WorkspaceIndexer {
         }
 
         // Include doc comments captured via preDocs in case they weren't gathered
-        for (const [key, value] of preDocs.entries()) {
-            if (key >= anchor.startPosition.row) { break; }
-            if (key >= line && key < anchor.startPosition.row) {
-                result.unshift(value);
+        return result;
+    }
+
+    private collectLeadingDocLines(
+        document: vscode.TextDocument,
+        anchor: Parser.SyntaxNode,
+        preDocs: Map<number, string>
+    ): string[] {
+        const result: string[] = [];
+        let line = anchor.startPosition.row - 1;
+
+        while (line >= 0) {
+            if (preDocs.has(line)) {
+                result.unshift(preDocs.get(line)!);
+                line--;
+                continue;
             }
+
+            const text = document.lineAt(line).text;
+            const trimmed = text.trim();
+            if (!trimmed.startsWith('//')) { break; }
+
+            if (trimmed.startsWith('//<')) { break; }
+
+            const content = trimmed.startsWith('//|')
+                ? this.cleanDocComment(trimmed)
+                : trimmed.replace(/^\/\/\s?/, '').trim();
+
+            if (content.length) {
+                result.unshift(content);
+            }
+
+            line--;
         }
 
-        return result;
+        return result.length ? result : this.collectLineCommentBlock(document, anchor);
     }
 
     private findTemplateParameterSymbol(

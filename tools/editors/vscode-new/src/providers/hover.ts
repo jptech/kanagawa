@@ -106,7 +106,7 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
             md.appendMarkdown(`\n\n${sym.docMarkdown}`);
         }
 
-            const templateParams = (sym.category === 'class' || sym.category === 'struct' || sym.category === 'union' || sym.category === 'alias')
+            const templateParams = (sym.category === 'class' || sym.category === 'struct' || sym.category === 'union' || sym.category === 'alias' || sym.category === 'function' || sym.category === 'method')
                 ? await this.indexer.getTemplateParametersForSymbol(sym)
                 : [];
             if (templateParams.length) {
