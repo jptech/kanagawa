@@ -6,10 +6,12 @@ import { KanagawaHoverProvider } from './providers/hover';
 import { KanagawaDefinitionProvider } from './providers/definition';
 import { KanagawaSemanticTokensProvider, legend } from './providers/semanticTokens';
 import { KanagawaDocumentSymbolProvider } from './providers/documentSymbol';
+import { KanagawaWorkspaceSymbolProvider } from './providers/workspaceSymbol';
 import { KanagawaFoldingRangeProvider } from './providers/folding';
 import { KanagawaCompletionItemProvider } from './providers/completion';
 import { KanagawaDiagnosticsProvider } from './providers/diagnostics';
 import { KanagawaTypePeekCodeLensProvider } from './providers/typePeek';
+import { OutlineFilterManager } from './service/outlineFilters';
 
 export async function activate(context: vscode.ExtensionContext) {
     console.log('Kanagawa "LSP-Lite" is activating...');
@@ -26,6 +28,7 @@ export async function activate(context: vscode.ExtensionContext) {
         queryManager.loadQuery('outline')
     ]);
 
+    const outlineFilters = new OutlineFilterManager();
     const indexer = new WorkspaceIndexer(service, queryManager);
     const diagnosticsProvider = new KanagawaDiagnosticsProvider(service);
     
@@ -42,11 +45,13 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.languages.registerHoverProvider('kanagawa', new KanagawaHoverProvider(service, indexer)),
         vscode.languages.registerDefinitionProvider('kanagawa', new KanagawaDefinitionProvider(service, indexer)),
         vscode.languages.registerDocumentSemanticTokensProvider('kanagawa', new KanagawaSemanticTokensProvider(service, queryManager), legend),
-        vscode.languages.registerDocumentSymbolProvider('kanagawa', new KanagawaDocumentSymbolProvider(service, queryManager)),
+        vscode.languages.registerDocumentSymbolProvider('kanagawa', new KanagawaDocumentSymbolProvider(service, queryManager, outlineFilters)),
+        vscode.languages.registerWorkspaceSymbolProvider(new KanagawaWorkspaceSymbolProvider(indexer, outlineFilters)),
         vscode.languages.registerFoldingRangeProvider('kanagawa', new KanagawaFoldingRangeProvider(service)),
         vscode.languages.registerCompletionItemProvider('kanagawa', new KanagawaCompletionItemProvider(indexer, service), '.'),
         vscode.languages.registerCodeLensProvider({ language: 'kanagawa' }, new KanagawaTypePeekCodeLensProvider(service, indexer)),
-        diagnosticsProvider
+        diagnosticsProvider,
+        outlineFilters
     );
 
     // Events
@@ -132,6 +137,42 @@ export async function activate(context: vscode.ExtensionContext) {
             typePeekOutput.show(true);
             typePeekOutput.appendLine(`Inferred type for ${info.name} (${info.document}:${info.line})`);
             typePeekOutput.appendLine(`    ${info.type}`);
+        }),
+        vscode.commands.registerCommand('kanagawa.outline.selectCategories', async () => {
+            const snapshot = outlineFilters.getFilters();
+            const options = outlineFilters.getCategoryOptions();
+            const picks = await vscode.window.showQuickPick(options.map(option => ({
+                label: option.label,
+                description: option.description,
+                picked: snapshot.categories.has(option.value),
+                option
+            })), {
+                canPickMany: true,
+                placeHolder: 'Select Kanagawa symbol categories to display in the outline (empty = all)'
+            });
+
+            if (!picks) { return; }
+
+            const selected = picks.map(pick => pick.option.value);
+            await outlineFilters.setCategories(selected);
+            vscode.commands.executeCommand('workbench.action.outline.toggleSortByPosition');
+            vscode.commands.executeCommand('workbench.action.outline.toggleSortByPosition');
+        }),
+        vscode.commands.registerCommand('kanagawa.outline.setModulePrefix', async () => {
+            const snapshot = outlineFilters.getFilters();
+            const value = await vscode.window.showInputBox({
+                prompt: 'Filter outline by module prefix (leave blank for all modules)',
+                value: snapshot.modulePrefix ?? ''
+            });
+            if (value === undefined) { return; }
+            await outlineFilters.setModulePrefix(value.trim() === '' ? undefined : value.trim());
+            vscode.commands.executeCommand('workbench.action.outline.toggleSortByPosition');
+            vscode.commands.executeCommand('workbench.action.outline.toggleSortByPosition');
+        }),
+        vscode.commands.registerCommand('kanagawa.outline.clearModulePrefix', async () => {
+            await outlineFilters.setModulePrefix(undefined);
+            vscode.commands.executeCommand('workbench.action.outline.toggleSortByPosition');
+            vscode.commands.executeCommand('workbench.action.outline.toggleSortByPosition');
         })
     );
 }

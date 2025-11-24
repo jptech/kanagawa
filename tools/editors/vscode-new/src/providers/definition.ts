@@ -50,6 +50,9 @@ export class KanagawaDefinitionProvider implements vscode.DefinitionProvider {
                 seen.add(key);
                 results.push(new vscode.Location(sym.uri, sym.range));
             }
+            if (results.length > 0) {
+                return results;
+            }
         }
 
         const matches = this.indexer.resolveSymbols(name, scopePath, {

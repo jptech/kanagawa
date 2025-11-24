@@ -586,6 +586,11 @@ export class WorkspaceIndexer {
 
         let current: Parser.SyntaxNode | null = identifier.parent;
         while (current) {
+            const templateSymbol = this.findTemplateParameterSymbol(document, current, targetName);
+            if (templateSymbol) {
+                return templateSymbol;
+            }
+
             if (current.type === 'block' || current.type === 'compound_statement') {
                 const decl = this.findDeclarationInScope(current, targetName, limit);
                 if (decl) {
@@ -594,6 +599,10 @@ export class WorkspaceIndexer {
             }
 
             if (current.type === 'function_definition') {
+                const templateMatch = this.findTemplateParameterSymbol(document, current.parent, targetName);
+                if (templateMatch) {
+                    return templateMatch;
+                }
                 const param = this.findParameterDeclaration(current, targetName);
                 if (param) {
                     return this.buildLocalSymbolInfo(document, param, targetName);
@@ -607,7 +616,19 @@ export class WorkspaceIndexer {
     }
 
     public resolveSymbols(name: string, scopePath: string[], options?: ResolveOptions): SymbolInfo[] {
-        const candidates = this.symbolIndex.get(name) ?? [];
+        let candidates = this.symbolIndex.get(name) ?? [];
+        if (candidates.length === 0) {
+            const normalized = this.normalizeTypeName(name);
+            if (normalized && normalized !== name) {
+                candidates = this.symbolIndex.get(normalized) ?? [];
+            }
+            if (candidates.length === 0 && normalized) {
+                const canonical = this.resolveAliasChain(normalized);
+                if (canonical && canonical !== normalized) {
+                    candidates = this.symbolIndex.get(canonical) ?? [];
+                }
+            }
+        }
         if (candidates.length === 0) { return []; }
 
         const limit = options?.limit ?? 5;
@@ -717,6 +738,9 @@ export class WorkspaceIndexer {
                 const variable = symbols.find(sym => sym.category === 'variable' || sym.category === 'member');
                 inferred = variable?.typeHint;
             }
+        } else if (expression.type === 'template_instantiation') {
+            const normalized = this.normalizeTypeName(expression.text);
+            inferred = normalized.length ? normalized : undefined;
         } else if (expression.type === 'member_expression') {
             const objectNode = expression.namedChild(0);
             const propertyNode = expression.namedChild(expression.namedChildCount - 1);
@@ -832,6 +856,7 @@ export class WorkspaceIndexer {
         const offset = document.offsetAt(position);
         const seen = new Set<string>();
         const locals: SymbolInfo[] = [];
+        const processedTemplates = new Set<number>();
 
         const lookupPosition = {
             row: position.line,
@@ -843,7 +868,26 @@ export class WorkspaceIndexer {
             if (node.type === 'block' || node.type === 'compound_statement') {
                 this.collectDeclarationsInScope(document, node, offset, locals, seen);
             } else if (node.type === 'function_definition') {
+                const templateNode = this.findTemplateAncestor(node);
+                if (templateNode && !processedTemplates.has(templateNode.id)) {
+                    for (const param of this.getTemplateParameterSymbols(document, templateNode)) {
+                        if (seen.has(param.name)) { continue; }
+                        locals.push(param);
+                        seen.add(param.name);
+                    }
+                    processedTemplates.add(templateNode.id);
+                }
                 this.collectParametersFromFunction(document, node, locals, seen);
+            }
+
+            const ancestorTemplate = this.findTemplateAncestor(node.parent);
+            if (ancestorTemplate && !processedTemplates.has(ancestorTemplate.id)) {
+                for (const param of this.getTemplateParameterSymbols(document, ancestorTemplate)) {
+                    if (seen.has(param.name)) { continue; }
+                    locals.push(param);
+                    seen.add(param.name);
+                }
+                processedTemplates.add(ancestorTemplate.id);
             }
             node = node.parent;
         }
@@ -1052,9 +1096,110 @@ export class WorkspaceIndexer {
                 return node.namedChild(node.namedChildCount - 1) ?? undefined;
             case 'member_expression':
                 return this.getMemberIdentifier(node);
+            case 'template_instantiation': {
+                const subject = node.namedChild(0);
+                return subject ? this.extractIdentifierFromExpression(subject) : undefined;
+            }
             default:
                 return undefined;
         }
+    }
+
+    private findTemplateAncestor(node: Parser.SyntaxNode | null): Parser.SyntaxNode | undefined {
+        let current: Parser.SyntaxNode | null = node;
+        while (current) {
+            if (this.templateWrappers.has(current.type)) {
+                return current;
+            }
+            current = current.parent;
+        }
+        return undefined;
+    }
+
+    private getTemplateParameterSymbols(document: vscode.TextDocument, templateNode: Parser.SyntaxNode): SymbolInfo[] {
+        const paramsNode = templateNode.namedChildren.find(child => child.type === 'template_params');
+        if (!paramsNode) { return []; }
+
+        const symbols: SymbolInfo[] = [];
+        for (const child of paramsNode.namedChildren) {
+            if (child.type !== 'template_param') { continue; }
+            const symbol = this.createTemplateParameterSymbol(document, templateNode, child);
+            if (symbol) {
+                symbols.push(symbol);
+            }
+        }
+        return symbols;
+    }
+
+    private createTemplateParameterSymbol(
+        document: vscode.TextDocument,
+        templateNode: Parser.SyntaxNode,
+        paramNode: Parser.SyntaxNode
+    ): SymbolInfo | undefined {
+        const nameNode = paramNode.namedChildren.find(child => child.type === 'identifier');
+        if (!nameNode) { return undefined; }
+
+        const firstChild = paramNode.child(0);
+        let category: SymbolCategory = 'constant';
+        let detail = 'template parameter';
+        let typeHint: string | undefined;
+
+        if (firstChild?.type === 'typename') {
+            category = 'alias';
+            detail = 'template type parameter';
+            typeHint = 'typename';
+        } else if (firstChild?.type === 'template') {
+            category = 'alias';
+            detail = 'template parameter';
+            typeHint = 'template';
+        } else {
+            if (firstChild?.type === 'auto') {
+                typeHint = 'auto';
+            }
+
+            for (const child of paramNode.namedChildren) {
+                if (child.id === nameNode.id) { break; }
+                if (child.type !== 'identifier') {
+                    typeHint = child.text.trim();
+                    break;
+                }
+            }
+        }
+
+        const range = new vscode.Range(
+            new vscode.Position(nameNode.startPosition.row, nameNode.startPosition.column),
+            new vscode.Position(nameNode.endPosition.row, nameNode.endPosition.column)
+        );
+
+        const signatureParts: string[] = [];
+        if (typeHint) {
+            signatureParts.push(typeHint.replace(/\s+/g, ' '));
+        }
+        signatureParts.push(nameNode.text);
+
+        return {
+            name: nameNode.text,
+            uri: document.uri,
+            range,
+            kind: category === 'alias' ? vscode.SymbolKind.TypeParameter : vscode.SymbolKind.Constant,
+            detail,
+            docMarkdown: undefined,
+            signature: signatureParts.join(' '),
+            scopePath: this.buildScopePath(templateNode),
+            category,
+            typeHint
+        };
+    }
+
+    private findTemplateParameterSymbol(
+        document: vscode.TextDocument,
+        start: Parser.SyntaxNode | null,
+        targetName: string
+    ): SymbolInfo | undefined {
+        const templateNode = this.findTemplateAncestor(start);
+        if (!templateNode) { return undefined; }
+        const symbols = this.getTemplateParameterSymbols(document, templateNode);
+        return symbols.find(symbol => symbol.name === targetName);
     }
 
     private clearDocumentCaches(uri: vscode.Uri) {

@@ -1,11 +1,15 @@
 import * as vscode from 'vscode';
+import * as Parser from 'web-tree-sitter';
 import { TreeSitterService } from '../service/treeSitter';
 import { QueryManager } from '../service/query';
+import { OutlineFilterManager, snapshotContainsCategory, snapshotMatchesPrefix } from '../service/outlineFilters';
+import { SymbolCategory } from '../service/indexer';
 
 export class KanagawaDocumentSymbolProvider implements vscode.DocumentSymbolProvider {
     constructor(
         private service: TreeSitterService,
-        private queryManager: QueryManager
+        private queryManager: QueryManager,
+        private filters: OutlineFilterManager
     ) {}
 
     async provideDocumentSymbols(
@@ -32,41 +36,41 @@ export class KanagawaDocumentSymbolProvider implements vscode.DocumentSymbolProv
         // To do nesting, we would need to check parent-child relationships.
 
         // Group captures by definition node
-        const definitionMap = new Map<any, { kind: vscode.SymbolKind, detail: string, nameNode?: any }>();
+        const definitionMap = new Map<any, { kind: vscode.SymbolKind; detail: string; category: SymbolCategory; nameNode?: any }>();
         
         for (const capture of captures) {
             const node = capture.node;
             
             switch (capture.name) {
                 case 'module':
-                    definitionMap.set(node, { kind: vscode.SymbolKind.Module, detail: 'module' });
+                    definitionMap.set(node, { kind: vscode.SymbolKind.Module, detail: 'module', category: 'module' });
                     break;
                 case 'class':
-                    definitionMap.set(node, { kind: vscode.SymbolKind.Class, detail: 'class' });
+                    definitionMap.set(node, { kind: vscode.SymbolKind.Class, detail: 'class', category: 'class' });
                     break;
                 case 'struct':
-                    definitionMap.set(node, { kind: vscode.SymbolKind.Struct, detail: 'struct' });
+                    definitionMap.set(node, { kind: vscode.SymbolKind.Struct, detail: 'struct', category: 'struct' });
                     break;
                 case 'union':
-                    definitionMap.set(node, { kind: vscode.SymbolKind.Struct, detail: 'union' });
+                    definitionMap.set(node, { kind: vscode.SymbolKind.Struct, detail: 'union', category: 'union' });
                     break;
                 case 'enum':
-                    definitionMap.set(node, { kind: vscode.SymbolKind.Enum, detail: 'enum' });
+                    definitionMap.set(node, { kind: vscode.SymbolKind.Enum, detail: 'enum', category: 'enum' });
                     break;
                 case 'function':
-                    definitionMap.set(node, { kind: vscode.SymbolKind.Function, detail: 'function' });
+                    definitionMap.set(node, { kind: vscode.SymbolKind.Function, detail: 'function', category: 'function' });
                     break;
                 case 'alias':
-                    definitionMap.set(node, { kind: vscode.SymbolKind.TypeParameter, detail: 'type' });
+                    definitionMap.set(node, { kind: vscode.SymbolKind.TypeParameter, detail: 'type', category: 'alias' });
                     break;
                 case 'variable':
-                    definitionMap.set(node, { kind: vscode.SymbolKind.Variable, detail: 'variable' });
+                    definitionMap.set(node, { kind: vscode.SymbolKind.Variable, detail: 'variable', category: 'variable' });
                     break;
                 case 'member':
-                    definitionMap.set(node, { kind: vscode.SymbolKind.Field, detail: 'field' });
+                    definitionMap.set(node, { kind: vscode.SymbolKind.Field, detail: 'field', category: 'member' });
                     break;
                 case 'constant':
-                    definitionMap.set(node, { kind: vscode.SymbolKind.EnumMember, detail: 'constant' });
+                    definitionMap.set(node, { kind: vscode.SymbolKind.EnumMember, detail: 'constant', category: 'constant' });
                     break;
                     
                 // Name captures
@@ -86,8 +90,19 @@ export class KanagawaDocumentSymbolProvider implements vscode.DocumentSymbolProv
         }
         
         // Create symbols from the definition map
+        const snapshot = this.filters.getFilters();
+
         for (const [defNode, info] of definitionMap.entries()) {
             if (!info.nameNode) { continue; }
+
+            if (!snapshotContainsCategory(snapshot, info.category)) {
+                continue;
+            }
+
+            const modulePath = this.computeModulePath(defNode);
+            if (!snapshotMatchesPrefix(snapshot, modulePath)) {
+                continue;
+            }
             
             const name = info.nameNode.text;
             const range = new vscode.Range(
@@ -109,5 +124,20 @@ export class KanagawaDocumentSymbolProvider implements vscode.DocumentSymbolProv
         }
 
         return symbols;
+    }
+
+    private computeModulePath(node: Parser.SyntaxNode): string | undefined {
+        const segments: string[] = [];
+        let current: Parser.SyntaxNode | null = node.parent;
+        while (current) {
+            if (current.type === 'module_decl') {
+                const nameNode = current.childForFieldName('name');
+                if (nameNode) {
+                    segments.unshift(nameNode.text);
+                }
+            }
+            current = current.parent;
+        }
+        return segments.length > 0 ? segments.join('.') : undefined;
     }
 }

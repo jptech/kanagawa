@@ -16,7 +16,10 @@
     "onCommand:kanagawa.index.rebuild",
     "onCommand:kanagawa.index.toggleVerbose",
     "onCommand:kanagawa.index.showStats",
-    "onCommand:kanagawa.typePeek.show"
+    "onCommand:kanagawa.typePeek.show",
+    "onCommand:kanagawa.outline.selectCategories",
+    "onCommand:kanagawa.outline.setModulePrefix",
+    "onCommand:kanagawa.outline.clearModulePrefix"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -58,8 +61,55 @@
         "command": "kanagawa.typePeek.show",
         "title": "Kanagawa: Show Inferred Type",
         "category": "Kanagawa"
+      },
+      {
+        "command": "kanagawa.outline.selectCategories",
+        "title": "Kanagawa: Select Outline Categories",
+        "category": "Kanagawa"
+      },
+      {
+        "command": "kanagawa.outline.setModulePrefix",
+        "title": "Kanagawa: Set Outline Module Prefix",
+        "category": "Kanagawa"
+      },
+      {
+        "command": "kanagawa.outline.clearModulePrefix",
+        "title": "Kanagawa: Clear Outline Module Prefix",
+        "category": "Kanagawa"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Kanagawa Outline",
+      "properties": {
+        "kanagawa.outline.categoryFilter": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "module",
+              "class",
+              "struct",
+              "union",
+              "enum",
+              "function",
+              "method",
+              "variable",
+              "member",
+              "constant",
+              "alias",
+              "other"
+            ]
+          },
+          "default": [],
+          "description": "Outline categories to display. Leave empty to show all categories."
+        },
+        "kanagawa.outline.modulePrefix": {
+          "type": "string",
+          "default": "",
+          "description": "Only show symbols whose module path starts with this prefix."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
