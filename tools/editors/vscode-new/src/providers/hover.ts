@@ -42,14 +42,14 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
 
         const localSymbol = this.indexer.findNearestLocalSymbol(document, identifier);
         if (localSymbol) {
-            this.appendSymbolMarkdown(localSymbol, markdowns, seen);
+            await this.appendSymbolMarkdown(document, localSymbol, markdowns, seen);
         }
 
         const memberMatches = await this.indexer.resolveMemberSymbol(document, identifier);
         let hasMemberMatch = false;
         if (memberMatches) {
             for (const sym of memberMatches) {
-                this.appendSymbolMarkdown(sym, markdowns, seen);
+                await this.appendSymbolMarkdown(document, sym, markdowns, seen);
                 hasMemberMatch = true;
             }
         }
@@ -61,14 +61,14 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
                 limit: 5
             });
             for (const sym of scopedSymbols) {
-                this.appendSymbolMarkdown(sym, markdowns, seen);
+                await this.appendSymbolMarkdown(document, sym, markdowns, seen);
             }
         }
 
         if (markdowns.length === 0) {
             const locals = await this.indexer.findSymbolsInDocument(document, name);
             for (const sym of locals) {
-                this.appendSymbolMarkdown(sym, markdowns, seen);
+                await this.appendSymbolMarkdown(document, sym, markdowns, seen);
             }
         }
 
@@ -89,7 +89,12 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
         return undefined;
     }
 
-    private appendSymbolMarkdown(sym: SymbolInfo, bucket: vscode.MarkdownString[], seen: Set<string>) {
+    private async appendSymbolMarkdown(
+        document: vscode.TextDocument,
+        sym: SymbolInfo,
+        bucket: vscode.MarkdownString[],
+        seen: Set<string>
+    ) {
         const key = `${sym.uri.toString()}#${sym.range.start.line}:${sym.range.start.character}`;
         if (seen.has(key)) { return; }
         seen.add(key);
@@ -100,6 +105,24 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
         if (sym.docMarkdown) {
             md.appendMarkdown(`\n\n${sym.docMarkdown}`);
         }
+
+            const templateParams = await this.indexer.getTemplateParametersForSymbol(sym);
+            if (templateParams.length) {
+                md.appendMarkdown(`\n\n**Template Parameters:**\n`);
+                for (const param of templateParams) {
+                    const label = param.signature ?? param.name;
+                    const doc = param.docMarkdown
+                        ? param.docMarkdown
+                            .split(/\r?\n/)
+                            .map(part => part.trim())
+                            .filter(part => part.length)
+                            .join(' ')
+                        : undefined;
+                    const line = doc ? `\`${label}\` — ${doc}` : `\`${label}\``;
+                    md.appendMarkdown(`\n${line}  `);
+                }
+            }
+
         if (sym.scopePath.length > 0) {
             md.appendMarkdown(`\n\n**Scope:** ${sym.scopePath.join('::')}`);
         }

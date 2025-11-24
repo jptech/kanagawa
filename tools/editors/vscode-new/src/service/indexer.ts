@@ -286,7 +286,7 @@ export class WorkspaceIndexer {
                 new vscode.Position(nameNode.endPosition.row, nameNode.endPosition.column)
             );
 
-            const docMarkdown = this.collectDocBlock(capture.node, preDocs, postDocs);
+            const docMarkdown = this.collectDocBlock(document, capture.node, preDocs, postDocs);
             let signature = this.buildSignature(document, capture.name, capture.node, nameNode);
             if (signature && signature.length > 180) {
                 signature = signature.slice(0, 177) + '…';
@@ -456,6 +456,7 @@ export class WorkspaceIndexer {
     }
 
     private collectDocBlock(
+        document: vscode.TextDocument,
         node: Parser.SyntaxNode,
         preDocs: Map<number, string>,
         postDocs: Map<number, string>
@@ -473,6 +474,13 @@ export class WorkspaceIndexer {
         while (postDocs.has(line)) {
             lines.push(postDocs.get(line)!);
             line++;
+        }
+
+        if (!lines.length) {
+            const fallback = this.collectLineCommentBlock(document, anchor);
+            if (fallback.length) {
+                return fallback.join('\n');
+            }
         }
 
         if (!lines.length) { return undefined; }
@@ -505,9 +513,10 @@ export class WorkspaceIndexer {
             }
         }
 
-        const text = document.getText(new vscode.Range(start, end)).trim();
-        if (!text) { return undefined; }
-        return text.replace(/\s+/g, ' ');
+        const rawText = document.getText(new vscode.Range(start, end));
+        const stripped = this.stripInlineDocComments(rawText).trim();
+        if (!stripped) { return undefined; }
+        return stripped.replace(/\s+/g, ' ');
     }
 
     private getDocAnchorNode(node: Parser.SyntaxNode): Parser.SyntaxNode {
@@ -711,6 +720,18 @@ export class WorkspaceIndexer {
         }
         return all;
     }
+
+    getIndexedUris(): vscode.Uri[] {
+        const uris: vscode.Uri[] = [];
+        for (const key of this.documentContexts.keys()) {
+            try {
+                uris.push(vscode.Uri.parse(key));
+            } catch (e) {
+                // ignore malformed entries
+            }
+        }
+        return uris;
+    }
     
     async updateFile(uri: vscode.Uri) {
         this.removeSymbolsForUri(uri);
@@ -846,6 +867,23 @@ export class WorkspaceIndexer {
 
         this.memberCache.set(canonical, results.slice());
         return this.filterMembers(results, options);
+    }
+
+    public async getTemplateParametersForSymbol(symbol: SymbolInfo): Promise<SymbolInfo[]> {
+        try {
+            const document = await vscode.workspace.openTextDocument(symbol.uri);
+            const tree = this.service.getTree(document) ?? this.service.parse(document);
+            if (!tree) { return []; }
+            const node = tree.rootNode.descendantForPosition({
+                row: symbol.range.start.line,
+                column: symbol.range.start.character
+            });
+            const templateNode = this.findTemplateAncestor(node);
+            if (!templateNode) { return []; }
+            return this.getTemplateParameterSymbols(document, templateNode);
+        } catch {
+            return [];
+        }
     }
 
     public collectVisibleLocals(
@@ -1170,12 +1208,13 @@ export class WorkspaceIndexer {
             new vscode.Position(nameNode.startPosition.row, nameNode.startPosition.column),
             new vscode.Position(nameNode.endPosition.row, nameNode.endPosition.column)
         );
-
         const signatureParts: string[] = [];
         if (typeHint) {
             signatureParts.push(typeHint.replace(/\s+/g, ' '));
         }
         signatureParts.push(nameNode.text);
+
+        const docComment = this.collectTemplateParameterDoc(document, paramNode);
 
         return {
             name: nameNode.text,
@@ -1183,12 +1222,75 @@ export class WorkspaceIndexer {
             range,
             kind: category === 'alias' ? vscode.SymbolKind.TypeParameter : vscode.SymbolKind.Constant,
             detail,
-            docMarkdown: undefined,
+            docMarkdown: docComment,
             signature: signatureParts.join(' '),
             scopePath: this.buildScopePath(templateNode),
             category,
             typeHint
         };
+    }
+
+    private getNodeText(document: vscode.TextDocument, node: Parser.SyntaxNode | null): string | undefined {
+        if (!node) { return undefined; }
+        const start = new vscode.Position(node.startPosition.row, node.startPosition.column);
+        const end = new vscode.Position(node.endPosition.row, node.endPosition.column);
+        return document.getText(new vscode.Range(start, end));
+    }
+
+    private stripInlineDocComments(text: string): string {
+        const lines = text.split(/\r?\n/);
+        const cleaned = lines.map(line => line.replace(/\/\/([|<]).*$/g, '').replace(/\s+$/u, ''));
+        return cleaned.join('\n');
+    }
+
+    private collectTemplateParameterDoc(document: vscode.TextDocument, paramNode: Parser.SyntaxNode): string | undefined {
+        const lineIndex = paramNode.endPosition.row;
+        if (lineIndex >= document.lineCount) { return undefined; }
+
+        const currentLine = document.lineAt(lineIndex).text;
+        const parts: string[] = [];
+        const inlineIndex = currentLine.indexOf('//<');
+        if (inlineIndex !== -1) {
+            const content = currentLine.slice(inlineIndex + 3).trim();
+            if (content.length) { parts.push(content); }
+        } else {
+            return undefined;
+        }
+
+        let nextLine = lineIndex + 1;
+        while (nextLine < document.lineCount) {
+            const text = document.lineAt(nextLine).text;
+            const trimmed = text.trim();
+            if (!trimmed.startsWith('//')) { break; }
+            const normalized = trimmed.replace(/^\/\/?<?\s?/, '').trim();
+            if (normalized.length) {
+                parts.push(normalized);
+            }
+            nextLine++;
+        }
+
+        if (!parts.length) { return undefined; }
+        return parts.join('\n');
+    }
+
+    private collectLineCommentBlock(document: vscode.TextDocument, anchor: Parser.SyntaxNode): string[] {
+        const result: string[] = [];
+        let line = anchor.startPosition.row - 1;
+
+        while (line >= 0) {
+            const text = document.lineAt(line).text;
+            const trimmed = text.trim();
+            if (!trimmed.startsWith('//') || trimmed.startsWith('//|') || trimmed.startsWith('//<')) {
+                break;
+            }
+            const content = trimmed.replace(/^\/\/\s?/, '').trim();
+            if (content.length) {
+                result.unshift(content);
+            }
+            line--;
+        }
+
+        return result;
     }
 
     private findTemplateParameterSymbol(

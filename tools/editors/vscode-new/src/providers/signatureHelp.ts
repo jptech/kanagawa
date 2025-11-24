@@ -39,13 +39,20 @@ export class KanagawaSignatureHelpProvider implements vscode.SignatureHelpProvid
         if (!candidates.length) { return undefined; }
 
         const signatureHelp = new vscode.SignatureHelp();
-        signatureHelp.signatures = candidates;
+        signatureHelp.signatures = candidates.map(entry => entry.signature);
         signatureHelp.activeSignature = 0;
-        if (signatureHelp.signatures.length > 0) {
+        if (candidates.length > 0) {
             const paramCount = signatureHelp.signatures[0].parameters.length;
             signatureHelp.activeParameter = paramCount === 0
                 ? 0
                 : Math.min(activeParameter, Math.max(0, paramCount - 1));
+        }
+
+        const primarySymbol = candidates[0]?.symbol;
+        const templateHint = primarySymbol ? await this.buildTemplateHint(document, callContext, primarySymbol) : undefined;
+        if (templateHint) {
+            signatureHelp.signatures.unshift(templateHint);
+            signatureHelp.activeSignature = 0;
         }
 
         return signatureHelp;
@@ -125,7 +132,7 @@ export class KanagawaSignatureHelpProvider implements vscode.SignatureHelpProvid
     private async resolveSignatures(
         document: vscode.TextDocument,
         callContext: CallContext
-    ): Promise<vscode.SignatureInformation[]> {
+    ): Promise<Array<{ symbol: SymbolInfo; signature: vscode.SignatureInformation }>> {
         const { callee } = callContext;
         let symbols: SymbolInfo[] = [];
 
@@ -157,7 +164,10 @@ export class KanagawaSignatureHelpProvider implements vscode.SignatureHelpProvid
             return [];
         }
 
-        return symbols.map(symbol => this.convertToSignatureInformation(symbol));
+        return symbols.map(symbol => ({
+            symbol,
+            signature: this.convertToSignatureInformation(symbol)
+        }));
     }
 
     private extractIdentifierNode(node: Parser.SyntaxNode): Parser.SyntaxNode | undefined {
@@ -235,5 +245,59 @@ export class KanagawaSignatureHelpProvider implements vscode.SignatureHelpProvid
         const start = new vscode.Position(node.startPosition.row, node.startPosition.column);
         const end = new vscode.Position(node.endPosition.row, node.endPosition.column);
         return document.getText(new vscode.Range(start, end));
+    }
+
+    private async buildTemplateHint(
+        document: vscode.TextDocument,
+        context: CallContext,
+        symbol: SymbolInfo
+    ): Promise<vscode.SignatureInformation | undefined> {
+        const templateParams: SymbolInfo[] = await this.indexer.getTemplateParametersForSymbol(symbol);
+        if (!templateParams.length) { return undefined; }
+
+        const argumentTexts = this.collectTemplateArgumentTexts(document, context.callExpression);
+        const labelParts = templateParams.map((param: SymbolInfo) => param.signature ?? param.name);
+        const label = `template< ${labelParts.join(', ')} >`;
+
+        const signature = new vscode.SignatureInformation(label, symbol.docMarkdown);
+        signature.parameters = templateParams.map((param: SymbolInfo, index: number) => {
+            const actual = argumentTexts[index];
+            const baseLabel = param.signature ?? param.name;
+            const composedLabel = actual ? `${baseLabel} = ${actual}` : baseLabel;
+            const info = new vscode.ParameterInformation(composedLabel.trim());
+            if (param.docMarkdown || actual) {
+                const md = new vscode.MarkdownString();
+                if (param.docMarkdown) {
+                    md.appendMarkdown(param.docMarkdown);
+                }
+                if (actual) {
+                    if (param.docMarkdown) { md.appendMarkdown('\n\n'); }
+                    md.appendMarkdown(`**Argument:** \`${actual}\``);
+                }
+                info.documentation = md;
+            }
+            return info;
+        });
+
+        return signature;
+    }
+
+    private collectTemplateArgumentTexts(document: vscode.TextDocument, callExpression: Parser.SyntaxNode): string[] {
+        const callee = this.getCalleeNode(callExpression);
+        if (!callee) { return []; }
+        const argsNode = this.findTemplateArgsRecursive(callee);
+        if (!argsNode) { return []; }
+        return argsNode.namedChildren
+            .filter(child => child.type !== ',')
+            .map(child => this.getNodeText(document, child)?.trim() ?? '');
+    }
+
+    private findTemplateArgsRecursive(node: Parser.SyntaxNode): Parser.SyntaxNode | undefined {
+        if (node.type === 'template_args') { return node; }
+        for (const child of node.namedChildren) {
+            const found = this.findTemplateArgsRecursive(child);
+            if (found) { return found; }
+        }
+        return undefined;
     }
 }

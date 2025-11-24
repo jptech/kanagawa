@@ -12,6 +12,7 @@ import { KanagawaCompletionItemProvider } from './providers/completion';
 import { KanagawaDiagnosticsProvider } from './providers/diagnostics';
 import { KanagawaTypePeekCodeLensProvider } from './providers/typePeek';
 import { KanagawaSignatureHelpProvider } from './providers/signatureHelp';
+import { KanagawaReferencesProvider, KanagawaCallHierarchyProvider } from './providers/references';
 import { OutlineFilterManager } from './service/outlineFilters';
 
 export async function activate(context: vscode.ExtensionContext) {
@@ -52,6 +53,8 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.languages.registerCompletionItemProvider('kanagawa', new KanagawaCompletionItemProvider(indexer, service), '.'),
         vscode.languages.registerSignatureHelpProvider('kanagawa', new KanagawaSignatureHelpProvider(service, indexer), '(', ',', ')'),
         vscode.languages.registerCodeLensProvider({ language: 'kanagawa' }, new KanagawaTypePeekCodeLensProvider(service, indexer)),
+        vscode.languages.registerReferenceProvider('kanagawa', new KanagawaReferencesProvider(service, indexer)),
+        vscode.languages.registerCallHierarchyProvider('kanagawa', new KanagawaCallHierarchyProvider(service, indexer)),
         diagnosticsProvider,
         outlineFilters
     );
