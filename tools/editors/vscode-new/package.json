@@ -15,7 +15,8 @@
     "onCommand:kanagawa.index.clear",
     "onCommand:kanagawa.index.rebuild",
     "onCommand:kanagawa.index.toggleVerbose",
-    "onCommand:kanagawa.index.showStats"
+    "onCommand:kanagawa.index.showStats",
+    "onCommand:kanagawa.typePeek.show"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -51,6 +52,11 @@
       {
         "command": "kanagawa.index.showStats",
         "title": "Kanagawa: Show Index Stats",
+        "category": "Kanagawa"
+      },
+      {
+        "command": "kanagawa.typePeek.show",
+        "title": "Kanagawa: Show Inferred Type",
         "category": "Kanagawa"
       }
     ]

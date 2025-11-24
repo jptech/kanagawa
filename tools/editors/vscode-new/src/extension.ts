@@ -9,6 +9,7 @@ import { KanagawaDocumentSymbolProvider } from './providers/documentSymbol';
 import { KanagawaFoldingRangeProvider } from './providers/folding';
 import { KanagawaCompletionItemProvider } from './providers/completion';
 import { KanagawaDiagnosticsProvider } from './providers/diagnostics';
+import { KanagawaTypePeekCodeLensProvider } from './providers/typePeek';
 
 export async function activate(context: vscode.ExtensionContext) {
     console.log('Kanagawa "LSP-Lite" is activating...');
@@ -44,6 +45,7 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.languages.registerDocumentSymbolProvider('kanagawa', new KanagawaDocumentSymbolProvider(service, queryManager)),
         vscode.languages.registerFoldingRangeProvider('kanagawa', new KanagawaFoldingRangeProvider(service)),
         vscode.languages.registerCompletionItemProvider('kanagawa', new KanagawaCompletionItemProvider(indexer, service), '.'),
+        vscode.languages.registerCodeLensProvider({ language: 'kanagawa' }, new KanagawaTypePeekCodeLensProvider(service, indexer)),
         diagnosticsProvider
     );
 
@@ -94,6 +96,7 @@ export async function activate(context: vscode.ExtensionContext) {
     );
 
     const output = vscode.window.createOutputChannel('Kanagawa Index');
+    const typePeekOutput = vscode.window.createOutputChannel('Kanagawa Type Peek');
 
     context.subscriptions.push(
         vscode.commands.registerCommand('kanagawa.index.clear', async () => {
@@ -123,6 +126,12 @@ export async function activate(context: vscode.ExtensionContext) {
             output.appendLine(`Files contributing symbols: ${stats.uniqueFiles}`);
             output.appendLine(`Symbols added in last scan: ${stats.recentlyIndexed}`);
             output.appendLine(`Verbose logging: ${stats.verbose ? 'on' : 'off'}`);
+        }),
+        vscode.commands.registerCommand('kanagawa.typePeek.show', (info?: { name: string; type: string; document: string; line: number }) => {
+            if (!info) { return; }
+            typePeekOutput.show(true);
+            typePeekOutput.appendLine(`Inferred type for ${info.name} (${info.document}:${info.line})`);
+            typePeekOutput.appendLine(`    ${info.type}`);
         })
     );
 }

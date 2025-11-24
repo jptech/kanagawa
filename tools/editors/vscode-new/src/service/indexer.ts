@@ -67,6 +67,7 @@ export class WorkspaceIndexer {
     ]);
     private readonly typeInferenceCache: Map<string, Map<number, string>> = new Map();
     private readonly memberCache: Map<string, SymbolInfo[]> = new Map();
+    private readonly aliasMap: Map<string, { target: string; uri: string }> = new Map();
 
     constructor(
         private service: TreeSitterService,
@@ -80,6 +81,7 @@ export class WorkspaceIndexer {
         this.documentContexts.clear();
         this.memberCache.clear();
         this.typeInferenceCache.clear();
+        this.aliasMap.clear();
 
         // Ensure query is loaded and cached inside the query manager
         const queryString = await this.queryManager.loadQuery('definitions');
@@ -233,12 +235,24 @@ export class WorkspaceIndexer {
                     label = 'function';
                     nameCapture = 'function.name';
                     category = this.isMethod(capture.node) ? 'method' : 'function';
+                    {
+                        const returnNode = capture.node.childForFieldName('return_type');
+                        if (returnNode) {
+                            typeHint = this.sanitizeTypeText(returnNode.text);
+                        }
+                    }
                     break;
                 case 'alias':
                     kind = vscode.SymbolKind.TypeParameter;
                     label = 'type alias';
                     nameCapture = 'alias.name';
                     category = 'alias';
+                    {
+                        const aliasTarget = this.extractAliasTarget(capture.node);
+                        if (aliasTarget) {
+                            typeHint = this.sanitizeTypeText(aliasTarget);
+                        }
+                    }
                     break;
                 case 'variable':
                     kind = vscode.SymbolKind.Variable;
@@ -278,6 +292,15 @@ export class WorkspaceIndexer {
                 signature = signature.slice(0, 177) + '…';
             }
 
+            if (category === 'alias' && typeHint) {
+                const aliasKey = this.normalizeTypeName(nameNode.text);
+                const targetNormalized = this.normalizeTypeName(typeHint);
+                if (aliasKey && targetNormalized) {
+                    const canonicalTarget = this.resolveAliasChain(targetNormalized);
+                    this.aliasMap.set(aliasKey, { target: canonicalTarget, uri: uri.toString() });
+                }
+            }
+
             const scopePath = this.buildScopePath(capture.node);
 
             symbols.push({
@@ -313,6 +336,7 @@ export class WorkspaceIndexer {
         this.memberCache.clear();
         this.typeInferenceCache.clear();
         this.recentlyIndexed = 0;
+        this.aliasMap.clear();
     }
 
     public toggleVerbose() {
@@ -373,6 +397,11 @@ export class WorkspaceIndexer {
         this.documentContexts.delete(target);
         this.typeInferenceCache.delete(target);
         this.memberCache.clear();
+        for (const [alias, record] of this.aliasMap.entries()) {
+            if (record.uri === target) {
+                this.aliasMap.delete(alias);
+            }
+        }
     }
 
     private isMethod(node: Parser.SyntaxNode): boolean {
@@ -696,6 +725,30 @@ export class WorkspaceIndexer {
                 const member = this.getMemberInfo(objectType, propertyNode.text);
                 inferred = member?.typeHint;
             }
+        } else if (expression.type === 'call_expression') {
+            const callee = this.getCallTarget(expression);
+            if (callee) {
+                if (callee.type === 'member_expression') {
+                    const propertyNode = this.getMemberIdentifier(callee);
+                    if (propertyNode) {
+                        const memberMatches = await this.resolveMemberSymbol(document, propertyNode);
+                        const match = memberMatches?.find((sym: SymbolInfo) => !!sym.typeHint);
+                        inferred = match?.typeHint;
+                    }
+                } else {
+                    const idNode = this.extractIdentifierFromExpression(callee);
+                    if (idNode) {
+                        const scopePath = this.getScopePathForNode(idNode);
+                        const candidates = this.resolveSymbols(idNode.text, scopePath, {
+                            uri: document.uri,
+                            context: { kind: 'free' },
+                            limit: 5
+                        });
+                        const match = candidates.find(candidate => !!candidate.typeHint);
+                        inferred = match?.typeHint;
+                    }
+                }
+            }
         }
 
         if (inferred) {
@@ -734,9 +787,10 @@ export class WorkspaceIndexer {
         if (!typeName) { return []; }
         const normalized = this.normalizeTypeName(typeName);
         if (!normalized) { return []; }
+        const canonical = this.resolveAliasChain(normalized);
 
-        if (this.memberCache.has(normalized)) {
-            return this.filterMembers(this.memberCache.get(normalized) ?? [], options);
+        if (this.memberCache.has(canonical)) {
+            return this.filterMembers(this.memberCache.get(canonical) ?? [], options);
         }
 
         const results: SymbolInfo[] = [];
@@ -747,7 +801,8 @@ export class WorkspaceIndexer {
                 if (!sym.scopePath.length) { continue; }
                 const container = sym.scopePath[sym.scopePath.length - 1];
                 if (!container) { continue; }
-                if (this.normalizeTypeName(container) !== normalized) { continue; }
+                const containerKey = this.resolveAliasChain(this.normalizeTypeName(container));
+                if (containerKey !== canonical) { continue; }
 
                 const key = `${sym.name}|${sym.uri.toString()}|${sym.range.start.line}|${sym.category}`;
                 if (seen.has(key)) { continue; }
@@ -765,7 +820,7 @@ export class WorkspaceIndexer {
             return a.category.localeCompare(b.category);
         });
 
-        this.memberCache.set(normalized, results.slice());
+        this.memberCache.set(canonical, results.slice());
         return this.filterMembers(results, options);
     }
 
@@ -952,6 +1007,54 @@ export class WorkspaceIndexer {
             text = text.slice(dotSep + 1);
         }
         return text.replace(/\s+/g, '');
+    }
+
+    private sanitizeTypeText(text?: string): string | undefined {
+        if (!text) { return undefined; }
+        return text.replace(/\s+/g, ' ').trim();
+    }
+
+    private extractAliasTarget(node: Parser.SyntaxNode): string | undefined {
+        const target = this.findTypeNode(node);
+        return target ? target.text.trim() : undefined;
+    }
+
+    private resolveAliasChain(typeName: string): string {
+        let current = typeName;
+        const visited = new Set<string>();
+        while (this.aliasMap.has(current) && !visited.has(current)) {
+            visited.add(current);
+            const entry = this.aliasMap.get(current);
+            if (!entry) { break; }
+            current = entry.target;
+        }
+        return current;
+    }
+
+    private getCallTarget(callExpression: Parser.SyntaxNode): Parser.SyntaxNode | undefined {
+        if (callExpression.type !== 'call_expression') { return undefined; }
+        return callExpression.namedChild(0) ?? undefined;
+    }
+
+    private getMemberIdentifier(memberExpression: Parser.SyntaxNode): Parser.SyntaxNode | undefined {
+        if (memberExpression.type !== 'member_expression') { return undefined; }
+        const count = memberExpression.namedChildCount;
+        if (count === 0) { return undefined; }
+        return memberExpression.namedChild(count - 1) ?? undefined;
+    }
+
+    private extractIdentifierFromExpression(node: Parser.SyntaxNode): Parser.SyntaxNode | undefined {
+        switch (node.type) {
+            case 'identifier':
+                return node;
+            case 'scoped_identifier':
+            case 'qualified_identifier':
+                return node.namedChild(node.namedChildCount - 1) ?? undefined;
+            case 'member_expression':
+                return this.getMemberIdentifier(node);
+            default:
+                return undefined;
+        }
     }
 
     private clearDocumentCaches(uri: vscode.Uri) {
