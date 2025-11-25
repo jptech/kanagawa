@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
 import * as Parser from 'web-tree-sitter';
-import { WorkspaceIndexer } from '../service/indexer';
+import { WorkspaceIndexer, SymbolInfo } from '../service/indexer';
 import { TreeSitterService } from '../service/treeSitter';
+import { extractModuleFromQualified } from '../utils/importUtils';
 
 // Kanagawa language keywords (from overview.md and grammar.js)
 const KEYWORDS = [
@@ -27,6 +28,19 @@ const KEYWORDS = [
     'cast', 'static_cast', 'reinterpret_cast', 'checked_cast',
 ];
 
+/**
+ * Sort text prefixes for completion tiers.
+ * Lower prefix = higher priority in the completion list.
+ */
+const SORT_PREFIX = {
+    LOCAL: '0_',          // Tier 1: Local variables/parameters
+    SAME_MODULE: '1_',    // Tier 2: Same-module symbols
+    IMPORTED: '2_',       // Tier 3: Imported symbols
+    KEYWORD: '3_',        // Tier 4: Language keywords
+    GLOBAL: '4_',         // Tier 5: Global symbols (no module)
+    INACCESSIBLE: '9_'    // Not shown by default, lowest priority
+} as const;
+
 export class KanagawaCompletionItemProvider implements vscode.CompletionItemProvider {
     constructor(
         private indexer: WorkspaceIndexer,
@@ -46,6 +60,7 @@ export class KanagawaCompletionItemProvider implements vscode.CompletionItemProv
         const lineText = document.lineAt(position.line).text;
         const prefix = lineText.slice(0, position.character);
 
+        // Member completions (after '.')
         if (prefix.endsWith('.')) {
             const memberItems = await this.provideMemberCompletions(document, position, tree, token);
             if (memberItems.length > 0) {
@@ -53,6 +68,7 @@ export class KanagawaCompletionItemProvider implements vscode.CompletionItemProv
             }
         }
 
+        // Static member completions (after '::')
         if (prefix.endsWith('::')) {
             const staticItems = await this.provideStaticMemberCompletions(document, position, tree, token, prefix);
             if (staticItems.length > 0) {
@@ -60,45 +76,142 @@ export class KanagawaCompletionItemProvider implements vscode.CompletionItemProv
             }
         }
 
-        const items: vscode.CompletionItem[] = [];
-
+        // General completions with tiered sorting
         const currentPrefix = this.extractWordPrefix(lineText, position.character);
+        const items = await this.provideGeneralCompletions(document, position, tree, currentPrefix);
 
+        return new vscode.CompletionList(items, false);
+    }
+
+    /**
+     * Provides general completions with tiered sorting:
+     * Tier 1: Locals → Tier 2: Same-module → Tier 3: Imported → Tier 4: Keywords
+     */
+    private async provideGeneralCompletions(
+        document: vscode.TextDocument,
+        position: vscode.Position,
+        tree: Parser.Tree,
+        currentPrefix: string
+    ): Promise<vscode.CompletionItem[]> {
+        const items: vscode.CompletionItem[] = [];
+        const seenNames = new Set<string>();
+
+        const resolvedImports = this.indexer.getResolvedImports(document.uri);
+
+        // Tier 1: Local variables and parameters (highest priority)
         const locals = this.indexer.collectVisibleLocals(document, position, tree);
         for (const local of locals) {
-            if (currentPrefix && !local.name.startsWith(currentPrefix)) { continue; }
+            if (currentPrefix && !local.name.startsWith(currentPrefix)) continue;
+            if (seenNames.has(local.name)) continue;
+            seenNames.add(local.name);
+
             const item = new vscode.CompletionItem(local.name, vscode.CompletionItemKind.Variable);
-            item.sortText = `0_${local.name}`;
-            if (local.typeHint) {
-                item.detail = local.typeHint;
-            }
+            item.sortText = SORT_PREFIX.LOCAL + local.name;
+            item.detail = local.typeHint ?? '(local)';
             items.push(item);
         }
 
+        // Tiers 2-5: Workspace symbols (filtered and tiered)
+        const symbols = this.indexer.getAllSymbols();
+        for (const sym of symbols) {
+            if (currentPrefix && !sym.name.startsWith(currentPrefix)) continue;
+            if (seenNames.has(sym.name)) continue;
+            seenNames.add(sym.name);
+
+            const tier = this.computeSymbolTier(sym, resolvedImports);
+
+            // Skip inaccessible symbols (unless typing qualified name)
+            if (tier === 'inaccessible' && !currentPrefix.includes('.')) {
+                continue;
+            }
+
+            const item = this.createSymbolCompletionItem(sym, tier);
+            items.push(item);
+        }
+
+        // Tier 4: Keywords
         for (const kw of KEYWORDS) {
-            if (currentPrefix && !kw.startsWith(currentPrefix)) { continue; }
+            if (currentPrefix && !kw.startsWith(currentPrefix)) continue;
+            if (seenNames.has(kw)) continue;
+            seenNames.add(kw);
+
             const keywordItem = new vscode.CompletionItem(kw, vscode.CompletionItemKind.Keyword);
-            keywordItem.sortText = `1_${kw}`;
+            keywordItem.sortText = SORT_PREFIX.KEYWORD + kw;
             items.push(keywordItem);
         }
 
-        const symbols = this.indexer.getAllSymbols();
-        const seen = new Set<string>();
-        for (const sym of symbols) {
-            if (currentPrefix && !sym.name.startsWith(currentPrefix)) { continue; }
-            if (seen.has(sym.name)) { continue; }
-            seen.add(sym.name);
+        return items;
+    }
 
-            const item = new vscode.CompletionItem(sym.name, this.mapSymbolKindToCompletionKind(sym.kind));
-            item.detail = sym.detail;
-            if (sym.docMarkdown) {
-                item.documentation = new vscode.MarkdownString(sym.docMarkdown);
-            }
-            item.sortText = `2_${sym.name}`;
-            items.push(item);
+    /**
+     * Determines the completion tier for a symbol based on accessibility.
+     */
+    private computeSymbolTier(
+        sym: SymbolInfo,
+        resolvedImports: ReturnType<typeof this.indexer.getResolvedImports> | undefined
+    ): 'same_module' | 'imported' | 'global' | 'inaccessible' {
+        const modulePath = extractModuleFromQualified(sym.qualifiedName);
+
+        // No module = global scope
+        if (!modulePath) {
+            return 'global';
         }
 
-        return new vscode.CompletionList(items, false);
+        if (!resolvedImports) {
+            return 'global'; // No import info, treat as accessible
+        }
+
+        // Same module = highest priority
+        if (modulePath === resolvedImports.currentModule) {
+            return 'same_module';
+        }
+
+        // Imported module
+        if (resolvedImports.importedModules.has(modulePath)) {
+            return 'imported';
+        }
+
+        // Not accessible
+        return 'inaccessible';
+    }
+
+    /**
+     * Creates a completion item for a workspace symbol with appropriate tier sorting.
+     */
+    private createSymbolCompletionItem(
+        sym: SymbolInfo,
+        tier: 'same_module' | 'imported' | 'global' | 'inaccessible'
+    ): vscode.CompletionItem {
+        const item = new vscode.CompletionItem(sym.name, this.mapSymbolKindToCompletionKind(sym.kind));
+        item.detail = sym.detail;
+
+        if (sym.docMarkdown) {
+            item.documentation = new vscode.MarkdownString(sym.docMarkdown);
+        }
+
+        // Set sort text based on tier
+        switch (tier) {
+            case 'same_module':
+                item.sortText = SORT_PREFIX.SAME_MODULE + sym.name;
+                break;
+            case 'imported':
+                item.sortText = SORT_PREFIX.IMPORTED + sym.name;
+                break;
+            case 'global':
+                item.sortText = SORT_PREFIX.GLOBAL + sym.name;
+                break;
+            case 'inaccessible':
+                item.sortText = SORT_PREFIX.INACCESSIBLE + sym.name;
+                // Add note that import is required
+                if (!item.detail) {
+                    item.detail = '(requires import)';
+                } else {
+                    item.detail = `${item.detail} (requires import)`;
+                }
+                break;
+        }
+
+        return item;
     }
 
     private mapSymbolKindToCompletionKind(kind: vscode.SymbolKind): vscode.CompletionItemKind {
@@ -185,8 +298,8 @@ export class KanagawaCompletionItemProvider implements vscode.CompletionItemProv
                 item.commitCharacters = ['.', ';'];
             }
 
-            // Encourage VS Code to prioritize member completions.
-            item.sortText = sym.category === 'method' ? `1_${sym.name}` : `2_${sym.name}`;
+            // Methods before fields in member completions
+            item.sortText = sym.category === 'method' ? `0_${sym.name}` : `1_${sym.name}`;
 
             items.push(item);
         }
@@ -241,7 +354,7 @@ export class KanagawaCompletionItemProvider implements vscode.CompletionItemProv
                 item.insertText = new vscode.SnippetString(`${sym.name}($0)`);
             }
 
-            item.sortText = sym.category === 'method' ? `1_${sym.name}` : `2_${sym.name}`;
+            item.sortText = sym.category === 'method' ? `0_${sym.name}` : `1_${sym.name}`;
             items.push(item);
         }
 
