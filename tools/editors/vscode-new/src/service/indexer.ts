@@ -9,6 +9,41 @@ import {
     sanitizeTypeText as sanitizeTypeTextUtil,
     lastSegment as lastSegmentUtil
 } from '../utils/typeUtils';
+import {
+    computeQualifiedName,
+    computeAccessibilityScore,
+    createResolutionResult,
+    ResolutionResult
+} from '../utils/symbolUtils';
+import {
+    ModuleExports,
+    ResolvedImports,
+    resolveImports,
+    filterByAccessibility,
+    extractModuleFromQualified
+} from '../utils/importUtils';
+import {
+    MemberResolutionOptions,
+    MemberResolutionResult,
+    getContainerFromMember,
+    filterDirectMembers,
+    filterMembersByOptions,
+    sortMembers,
+    findBestContainer,
+    extractTemplateBaseType
+} from '../utils/memberUtils';
+import {
+    TemplateType,
+    TemplateParameter,
+    TemplateInstantiation,
+    isTemplatedType,
+    parseTemplateType,
+    createInstantiation,
+    instantiateMethodSignature,
+    substituteParameters,
+    buildInstantiationKey,
+    parseTemplateParameters
+} from '../utils/templateUtils';
 
 export type SymbolCategory =
     | 'module'
@@ -47,6 +82,8 @@ export interface ResolveOptions {
 
 export interface SymbolInfo {
     name: string;
+    /** Fully qualified name in the form module::Container::name */
+    qualifiedName: string;
     uri: vscode.Uri;
     range: vscode.Range;
     kind: vscode.SymbolKind;
@@ -59,7 +96,14 @@ export interface SymbolInfo {
 }
 
 export class WorkspaceIndexer {
+    /** Primary index: name → SymbolInfo[] (for prefix matching, completions) */
     private symbolIndex: Map<string, SymbolInfo[]> = new Map();
+    /** Secondary index: qualifiedName → SymbolInfo (for exact resolution) */
+    private qualifiedIndex: Map<string, SymbolInfo> = new Map();
+    /** Module exports: modulePath → ModuleExports (for import-aware resolution) */
+    private moduleExports: Map<string, ModuleExports> = new Map();
+    /** Cached resolved imports per document */
+    private resolvedImportsCache: Map<string, ResolvedImports> = new Map();
     private isIndexing = false;
     private documentContexts: Map<string, DocumentContext> = new Map();
     private verbose = false;
@@ -75,6 +119,10 @@ export class WorkspaceIndexer {
     private readonly typeInferenceCache: Map<string, Map<number, string>> = new Map();
     private readonly memberCache: Map<string, SymbolInfo[]> = new Map();
     private readonly aliasMap: Map<string, { target: string; uri: string }> = new Map();
+    /** Cache for template instantiations: key → TemplateInstantiation */
+    private readonly templateInstantiationCache: Map<string, TemplateInstantiation> = new Map();
+    /** Cache for template parameters by type: baseType → TemplateParameter[] */
+    private readonly templateParameterCache: Map<string, TemplateParameter[]> = new Map();
     private readonly importConfig: ImportConfigService;
     private pendingRescan = false;
 
@@ -106,10 +154,14 @@ export class WorkspaceIndexer {
         }
         this.isIndexing = true;
         this.symbolIndex.clear();
+        this.qualifiedIndex.clear();
+        this.moduleExports.clear();
+        this.resolvedImportsCache.clear();
         this.documentContexts.clear();
         this.memberCache.clear();
         this.typeInferenceCache.clear();
         this.aliasMap.clear();
+        this.clearTemplateCaches();
 
         const importConfiguration = await this.importConfig.resolveImportConfiguration();
 
@@ -133,6 +185,9 @@ export class WorkspaceIndexer {
             // Yield to event loop
             await new Promise(resolve => setTimeout(resolve, 0));
         }
+        
+        // Build module exports index after all files are indexed
+        this.buildModuleExports();
         
         this.isIndexing = false;
         console.log(`Kanagawa: Indexed ${this.symbolIndex.size} symbols from ${files.length} files.`);
@@ -337,9 +392,11 @@ export class WorkspaceIndexer {
             }
 
             const scopePath = this.buildScopePath(capture.node);
+            const qualifiedName = computeQualifiedName(nameNode.text, scopePath);
 
             symbols.push({
                 name: nameNode.text,
+                qualifiedName,
                 uri,
                 range,
                 kind,
@@ -359,19 +416,103 @@ export class WorkspaceIndexer {
 
     private addSymbols(symbols: SymbolInfo[]) {
         for (const info of symbols) {
+            // Add to primary index (name → [symbols])
             const list = this.symbolIndex.get(info.name) ?? [];
             list.push(info);
             this.symbolIndex.set(info.name, list);
+            
+            // Add to qualified index (qualifiedName → symbol)
+            // Note: last-write-wins for duplicate qualified names in the same file
+            this.qualifiedIndex.set(info.qualifiedName, info);
         }
     }
 
     public clearIndex() {
         this.symbolIndex.clear();
+        this.qualifiedIndex.clear();
+        this.moduleExports.clear();
+        this.resolvedImportsCache.clear();
         this.documentContexts.clear();
         this.memberCache.clear();
         this.typeInferenceCache.clear();
         this.recentlyIndexed = 0;
         this.aliasMap.clear();
+        this.clearTemplateCaches();
+    }
+
+    /**
+     * Builds the module exports index from all indexed symbols.
+     * Called after indexing is complete.
+     */
+    private buildModuleExports(): void {
+        this.moduleExports.clear();
+        
+        for (const symbol of this.qualifiedIndex.values()) {
+            const modulePath = extractModuleFromQualified(symbol.qualifiedName);
+            if (!modulePath) {
+                continue; // Skip global symbols for module exports
+            }
+            
+            let exports = this.moduleExports.get(modulePath);
+            if (!exports) {
+                exports = {
+                    modulePath,
+                    exportedSymbols: new Set(),
+                    exportedNames: new Set()
+                };
+                this.moduleExports.set(modulePath, exports);
+            }
+            
+            exports.exportedSymbols.add(symbol.qualifiedName);
+            exports.exportedNames.add(symbol.name);
+        }
+        
+        if (this.verbose) {
+            console.log(`Kanagawa: Built exports for ${this.moduleExports.size} modules.`);
+        }
+    }
+
+    /**
+     * Gets or computes the resolved imports for a document.
+     */
+    public getResolvedImports(uri: vscode.Uri): ResolvedImports {
+        const key = uri.toString();
+        
+        // Check cache
+        const cached = this.resolvedImportsCache.get(key);
+        if (cached) {
+            return cached;
+        }
+        
+        // Get document context
+        const context = this.documentContexts.get(key);
+        if (!context) {
+            // Return empty resolved imports for unknown documents
+            return {
+                currentModule: undefined,
+                importedModules: new Set(),
+                aliasToModule: new Map(),
+                accessibleQualifiedNames: new Set()
+            };
+        }
+        
+        // Resolve imports
+        const resolved = resolveImports(
+            context.modulePath,
+            context.imports,
+            this.moduleExports
+        );
+        
+        // Cache and return
+        this.resolvedImportsCache.set(key, resolved);
+        return resolved;
+    }
+
+    /**
+     * Invalidates the resolved imports cache for a document.
+     */
+    private invalidateResolvedImports(uri: vscode.Uri): void {
+        this.resolvedImportsCache.delete(uri.toString());
     }
 
     public toggleVerbose() {
@@ -683,6 +824,176 @@ export class WorkspaceIndexer {
         const filtered = scoredAll.filter(entry => entry.score > 0 && entry.score >= bestScore - 10);
         const preferred = (filtered.length > 0 ? filtered : scoredAll).map(entry => entry.info);
         return preferred.slice(0, limit);
+    }
+
+    /**
+     * Resolve a symbol by its fully qualified name.
+     * Returns a single symbol with exact match, or undefined.
+     */
+    public resolveQualified(qualifiedName: string): SymbolInfo | undefined {
+        return this.qualifiedIndex.get(qualifiedName);
+    }
+
+    /**
+     * Resolve a symbol with full context awareness and confidence scoring.
+     * Returns a resolution result with the best match and alternatives.
+     * Uses import-aware filtering to prioritize accessible symbols.
+     */
+    public resolveWithContext(
+        name: string,
+        scopePath: string[],
+        options?: ResolveOptions
+    ): ResolutionResult<SymbolInfo> {
+        let candidates = this.symbolIndex.get(name) ?? [];
+        if (candidates.length === 0) {
+            return createResolutionResult<SymbolInfo>([], () => 0);
+        }
+
+        // Get resolved imports for import-aware filtering
+        const resolvedImports = options?.uri
+            ? this.getResolvedImports(options.uri)
+            : undefined;
+
+        // Filter by accessibility if we have import information
+        if (resolvedImports) {
+            const filtered = filterByAccessibility(candidates, resolvedImports, {
+                includeInaccessible: false
+            });
+            // Fall back to all candidates if nothing is accessible
+            if (filtered.length > 0) {
+                candidates = filtered;
+            }
+        }
+
+        // Score candidates with additional context bonuses
+        const scored = candidates.map(info => {
+            let score = 0;
+
+            // Import-based score
+            if (resolvedImports) {
+                const modulePath = extractModuleFromQualified(info.qualifiedName);
+                
+                // Same module = highest priority
+                if (modulePath && modulePath === resolvedImports.currentModule) {
+                    score += 100;
+                }
+                // Imported module
+                else if (modulePath && resolvedImports.importedModules.has(modulePath)) {
+                    score += 50;
+                }
+                // Global (no module)
+                else if (!modulePath) {
+                    score += 20;
+                }
+            } else {
+                // Legacy scoring when no import info
+                const documentModule = options?.uri
+                    ? this.documentContexts.get(options.uri.toString())?.modulePath
+                    : undefined;
+                const imports = options?.uri
+                    ? this.documentContexts.get(options.uri.toString())?.imports ?? []
+                    : [];
+                const symbolModule = info.scopePath.length > 0 && info.scopePath[0].includes('.')
+                    ? info.scopePath[0]
+                    : undefined;
+
+                score = computeAccessibilityScore(
+                    symbolModule,
+                    info.scopePath,
+                    documentModule,
+                    imports,
+                    scopePath
+                );
+            }
+
+            // Context hint bonuses
+            const hint = options?.context ?? { kind: 'unknown' };
+            if (hint.kind === 'method') {
+                if (info.category === 'method') {
+                    score += 20;
+                } else if (info.category === 'function') {
+                    score -= 10;
+                }
+                if (hint.receiverType) {
+                    const normalizedReceiver = this.normalizeTypeName(hint.receiverType);
+                    const containerName = info.scopePath[info.scopePath.length - 1];
+                    if (containerName && this.normalizeTypeName(containerName) === normalizedReceiver) {
+                        score += 35;
+                    }
+                }
+            } else if (hint.kind === 'free') {
+                if (info.category === 'method') {
+                    score -= 10;
+                }
+            }
+
+            // Same file bonus
+            if (options?.uri && info.uri.toString() === options.uri.toString()) {
+                score += 15;
+            }
+
+            // Exact scope match bonus
+            if (this.pathsEqual(info.scopePath, scopePath)) {
+                score += 200;
+            }
+
+            return { info, score };
+        });
+
+        // Sort by score descending
+        scored.sort((a, b) => b.score - a.score);
+
+        const sortedSymbols = scored.map(s => s.info);
+        const scoreGetter = (info: SymbolInfo) => {
+            const entry = scored.find(s => s.info === info);
+            return entry?.score ?? 0;
+        };
+
+        return createResolutionResult(sortedSymbols, scoreGetter);
+    }
+
+    /**
+     * Resolve symbols with import-aware filtering.
+     * Returns only symbols accessible from the given document.
+     */
+    public resolveAccessible(
+        name: string,
+        options?: ResolveOptions
+    ): SymbolInfo[] {
+        const candidates = this.symbolIndex.get(name) ?? [];
+        if (candidates.length === 0) {
+            return [];
+        }
+
+        if (!options?.uri) {
+            return candidates;
+        }
+
+        const resolvedImports = this.getResolvedImports(options.uri);
+        return filterByAccessibility(candidates, resolvedImports, {
+            includeInaccessible: false
+        });
+    }
+
+    /**
+     * Get symbol by qualified name, with fallback to best-effort resolution.
+     * Tries exact qualified match first, then falls back to scored resolution.
+     */
+    public getSymbol(
+        name: string,
+        scopePath: string[],
+        options?: ResolveOptions
+    ): SymbolInfo | undefined {
+        // Try exact qualified match first
+        const qualifiedName = computeQualifiedName(name, scopePath);
+        const exact = this.qualifiedIndex.get(qualifiedName);
+        if (exact) {
+            return exact;
+        }
+
+        // Fall back to scored resolution
+        const result = this.resolveWithContext(name, scopePath, options);
+        return result.primary;
     }
 
     private handleImportConfigurationChanged(): void {
@@ -1018,17 +1329,52 @@ export class WorkspaceIndexer {
             includeMethods: true,
             includeFields: true
         });
-        const matches = members.filter(sym => sym.name === memberName);
+        let matches = members.filter(sym => sym.name === memberName);
         
         // If in call context, prefer methods; otherwise prefer fields
         if (isCallContext && matches.length > 1) {
             const methods = matches.filter(sym => sym.category === 'method' || sym.category === 'function');
             if (methods.length > 0) {
-                return methods;
+                matches = methods;
+            }
+        }
+
+        if (matches.length === 0) {
+            return undefined;
+        }
+        
+        // Apply template instantiation if the receiver is a templated type
+        if (isTemplatedType(receiverType)) {
+            const instantiation = await this.getTemplateInstantiation(receiverType);
+            if (instantiation) {
+                // Return copies of symbols with instantiated signatures and typeHints
+                return matches.map(sym => {
+                    if (!sym.signature && !sym.typeHint) {
+                        return sym;
+                    }
+                    
+                    const instantiatedSignature = sym.signature 
+                        ? instantiateMethodSignature(sym.signature, instantiation)
+                        : undefined;
+                    const instantiatedTypeHint = sym.typeHint
+                        ? substituteParameters(sym.typeHint, instantiation.substitutions)
+                        : undefined;
+                    
+                    // Only return a new object if something changed
+                    if (instantiatedSignature === sym.signature && instantiatedTypeHint === sym.typeHint) {
+                        return sym;
+                    }
+                    
+                    return {
+                        ...sym,
+                        signature: instantiatedSignature ?? sym.signature,
+                        typeHint: instantiatedTypeHint ?? sym.typeHint
+                    };
+                });
             }
         }
         
-        return matches.length ? matches : undefined;
+        return matches;
     }
 
     public getMembersForType(typeName: string, options?: { includeMethods?: boolean; includeFields?: boolean }): SymbolInfo[] {
@@ -1070,6 +1416,272 @@ export class WorkspaceIndexer {
 
         this.memberCache.set(canonical, results.slice());
         return this.filterMembers(results, options);
+    }
+
+    /**
+     * Resolves members for a type with enhanced precision using qualified names.
+     * This is the preferred method for member lookup as it uses the qualified index.
+     */
+    public resolveMembersForType(
+        typeName: string,
+        options?: MemberResolutionOptions
+    ): MemberResolutionResult {
+        if (!typeName) {
+            return { members: [], containerType: typeName, isExactMatch: false };
+        }
+
+        // Handle template instantiations by extracting base type
+        const baseType = extractTemplateBaseType(typeName);
+        const normalized = this.normalizeTypeName(baseType);
+        if (!normalized) {
+            return { members: [], containerType: typeName, isExactMatch: false };
+        }
+
+        const canonical = this.resolveAliasChain(normalized);
+
+        // Try to find the container using the qualified index
+        const containerMatch = findBestContainer(canonical, this.qualifiedIndex);
+        
+        if (!containerMatch) {
+            // Fall back to legacy resolution
+            const legacyMembers = this.getMembersForType(typeName, {
+                includeMethods: options?.includeMethods,
+                includeFields: options?.includeFields
+            });
+            return {
+                members: filterMembersByOptions(legacyMembers, options ?? {}),
+                containerType: canonical,
+                isExactMatch: false
+            };
+        }
+
+        // Get direct members using qualified name prefix
+        const containerQualified = containerMatch.qualifiedName;
+        const members: SymbolInfo[] = [];
+        const prefix = containerQualified + '::';
+
+        for (const [qualifiedName, symbol] of this.qualifiedIndex) {
+            // Check if this symbol is a direct member of the container
+            const symbolContainer = getContainerFromMember(qualifiedName);
+            if (symbolContainer === containerQualified) {
+                members.push(symbol);
+            }
+        }
+
+        // Filter and sort
+        const filtered = filterMembersByOptions(members, options ?? {});
+        const sorted = sortMembers(filtered);
+
+        return {
+            members: sorted,
+            containerType: canonical,
+            containerQualified,
+            isExactMatch: containerMatch.score >= 100
+        };
+    }
+
+    /**
+     * Gets a specific member from a type by name.
+     * Returns the best match if multiple exist.
+     */
+    public getMemberByName(
+        typeName: string,
+        memberName: string,
+        options?: { preferMethod?: boolean }
+    ): SymbolInfo | undefined {
+        const result = this.resolveMembersForType(typeName, {
+            includeMethods: true,
+            includeFields: true,
+            includeConstants: true
+        });
+
+        const matches = result.members.filter(m => m.name === memberName);
+        
+        if (matches.length === 0) {
+            return undefined;
+        }
+        
+        if (matches.length === 1) {
+            return matches[0];
+        }
+
+        // Prefer methods if specified
+        if (options?.preferMethod) {
+            const method = matches.find(m => m.category === 'method');
+            if (method) {
+                return method;
+            }
+        }
+
+        // Return first match
+        return matches[0];
+    }
+
+    /**
+     * Gets the template instantiation for a type, creating it if necessary.
+     * For `FIFO<uint32, 32>`, returns instantiation with T→uint32, N→32 substitutions.
+     */
+    public async getTemplateInstantiation(typeName: string): Promise<TemplateInstantiation | undefined> {
+        const parsed = parseTemplateType(typeName);
+        if (!parsed) {
+            return undefined;
+        }
+
+        // Check cache first
+        const cacheKey = buildInstantiationKey(parsed.baseName, parsed.arguments);
+        const cached = this.templateInstantiationCache.get(cacheKey);
+        if (cached) {
+            return cached;
+        }
+
+        // Get template parameters for the base type
+        const parameters = await this.getTemplateParametersForType(parsed.baseName);
+        if (parameters.length === 0) {
+            return undefined;
+        }
+
+        // Create and cache the instantiation
+        const instantiation = createInstantiation(parsed.baseName, parameters, parsed.arguments);
+        this.templateInstantiationCache.set(cacheKey, instantiation);
+        return instantiation;
+    }
+
+    /**
+     * Gets template parameters for a type by looking up its definition.
+     * Uses the AST-based template parameter extraction for accuracy.
+     */
+    public async getTemplateParametersForType(baseType: string): Promise<TemplateParameter[]> {
+        // Check cache first
+        const cached = this.templateParameterCache.get(baseType);
+        if (cached) {
+            return cached;
+        }
+
+        // Look up the type symbol to find its template parameters
+        const symbols = this.symbolIndex.get(baseType) ?? [];
+        if (symbols.length === 0) {
+            return [];
+        }
+
+        // Find a class/struct symbol (templates are on classes, not methods)
+        const typeSymbol = symbols.find(s => 
+            s.category === 'class' || s.category === 'struct' || s.category === 'alias'
+        ) ?? symbols[0];
+
+        // Use the AST-based method to get accurate template parameters
+        const templateSymbols = await this.getTemplateParametersForSymbol(typeSymbol);
+        if (templateSymbols.length > 0) {
+            const params: TemplateParameter[] = templateSymbols.map(sym => ({
+                name: sym.name,
+                kind: sym.category === 'alias' ? 'type' as const : 'value' as const,
+                defaultValue: undefined, // Could extract from typeHint if needed
+                constraint: sym.typeHint
+            }));
+            this.templateParameterCache.set(baseType, params);
+            return params;
+        }
+
+        // Fallback: try to parse from the symbol's detail/signature
+        const templateParamMatch = typeSymbol.detail?.match(/<[^>]+>/);
+        if (templateParamMatch) {
+            const params = parseTemplateParameters(templateParamMatch[0]);
+            this.templateParameterCache.set(baseType, params);
+            return params;
+        }
+
+        return [];
+    }
+
+    /**
+     * Gets a member with instantiated signature for a templated type.
+     * For `FIFO<uint32, 32>.pop()`, returns member with signature `uint32 pop()`.
+     */
+    public async getInstantiatedMember(
+        typeName: string,
+        memberName: string,
+        options?: { preferMethod?: boolean }
+    ): Promise<{ symbol: SymbolInfo; instantiatedSignature?: string } | undefined> {
+        const member = this.getMemberByName(typeName, memberName, options);
+        if (!member) {
+            return undefined;
+        }
+
+        // If not a templated type, return as-is
+        if (!isTemplatedType(typeName)) {
+            return { symbol: member };
+        }
+
+        // Get instantiation and apply to signature
+        const instantiation = await this.getTemplateInstantiation(typeName);
+        if (!instantiation || !member.signature) {
+            return { symbol: member };
+        }
+
+        const instantiatedSignature = instantiateMethodSignature(member.signature, instantiation);
+        return {
+            symbol: member,
+            instantiatedSignature
+        };
+    }
+
+    /**
+     * Resolves members for a templated type with instantiated signatures.
+     * Extends resolveMembersForType with template substitution.
+     */
+    public async resolveInstantiatedMembers(
+        typeName: string,
+        options?: MemberResolutionOptions
+    ): Promise<MemberResolutionResult & { instantiation?: TemplateInstantiation }> {
+        const baseResult = this.resolveMembersForType(typeName, options);
+        
+        // If not templated, return base result
+        if (!isTemplatedType(typeName)) {
+            return baseResult;
+        }
+
+        const instantiation = await this.getTemplateInstantiation(typeName);
+        if (!instantiation) {
+            return baseResult;
+        }
+
+        // Create copies of members with instantiated signatures and typeHints
+        const instantiatedMembers = baseResult.members.map(member => {
+            if (!member.signature && !member.typeHint) {
+                return member;
+            }
+            
+            const instantiatedSignature = member.signature
+                ? instantiateMethodSignature(member.signature, instantiation)
+                : undefined;
+            const instantiatedTypeHint = member.typeHint
+                ? substituteParameters(member.typeHint, instantiation.substitutions)
+                : undefined;
+
+            // Only return a new object if something changed
+            if (instantiatedSignature === member.signature && instantiatedTypeHint === member.typeHint) {
+                return member;
+            }
+
+            return {
+                ...member,
+                signature: instantiatedSignature ?? member.signature,
+                typeHint: instantiatedTypeHint ?? member.typeHint
+            };
+        });
+
+        return {
+            ...baseResult,
+            members: instantiatedMembers,
+            instantiation
+        };
+    }
+
+    /**
+     * Clears template-related caches. Called when the index is rebuilt.
+     */
+    private clearTemplateCaches(): void {
+        this.templateInstantiationCache.clear();
+        this.templateParameterCache.clear();
     }
 
     public async getTemplateParametersForSymbol(symbol: SymbolInfo): Promise<SymbolInfo[]> {
@@ -1423,16 +2035,19 @@ export class WorkspaceIndexer {
         signatureParts.push(nameNode.text);
 
         const docComment = this.collectTemplateParameterDoc(document, paramNode);
+        const scopePath = this.buildScopePath(templateNode);
+        const qualifiedName = computeQualifiedName(nameNode.text, scopePath);
 
         return {
             name: nameNode.text,
+            qualifiedName,
             uri: document.uri,
             range,
             kind: category === 'alias' ? vscode.SymbolKind.TypeParameter : vscode.SymbolKind.Constant,
             detail,
             docMarkdown: docComment,
             signature: signatureParts.join(' '),
-            scopePath: this.buildScopePath(templateNode),
+            scopePath,
             category,
             typeHint
         };
@@ -1554,6 +2169,7 @@ export class WorkspaceIndexer {
     private clearDocumentCaches(uri: vscode.Uri) {
         const key = uri.toString();
         this.typeInferenceCache.delete(key);
+        this.invalidateResolvedImports(uri);
     }
 
     private findDeclarationInScope(scopeNode: Parser.SyntaxNode, targetName: string, limit: number): Parser.SyntaxNode | undefined {
@@ -1629,15 +2245,19 @@ export class WorkspaceIndexer {
         }
         signatureParts.push(name);
 
+        const scopePath = this.buildScopePath(declNode);
+        const qualifiedName = computeQualifiedName(name, scopePath);
+
         return {
             name,
+            qualifiedName,
             uri: document.uri,
             range,
             kind: vscode.SymbolKind.Variable,
             detail: 'variable',
             docMarkdown: undefined,
             signature: signatureParts.join(' '),
-            scopePath: this.buildScopePath(declNode),
+            scopePath,
             category: 'variable',
             typeHint: typeText
         };
