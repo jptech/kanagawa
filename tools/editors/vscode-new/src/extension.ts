@@ -74,14 +74,18 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.workspace.onDidChangeTextDocument((event: vscode.TextDocumentChangeEvent) => {
             if (event.document.languageId === 'kanagawa') {
                 const uri = event.document.uri.toString();
-                const contentChanges = event.contentChanges;
+                // Note: We intentionally do NOT pass contentChanges to parse() here.
+                // When debouncing, the contentChanges captured at event time become stale
+                // by the time the callback runs (the document has changed further).
+                // A full reparse with the current document text is more reliable.
+                // Incremental parsing is still used for non-debounced scenarios.
                 
                 // Debounce parsing and diagnostics to avoid excessive processing during rapid typing
                 parseDebouncer.debounce(uri, async () => {
                     // Verify document is still open (it could have been closed during the delay)
                     if (!event.document.isClosed) {
-                        // Use incremental parsing when content changes are available
-                        await service.parse(event.document, contentChanges);
+                        // Full reparse - document text is current, incremental changes are stale
+                        await service.parse(event.document);
                         await diagnosticsProvider.updateDiagnostics(event.document);
                     }
                 });

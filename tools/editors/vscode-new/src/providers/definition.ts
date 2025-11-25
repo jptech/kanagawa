@@ -45,14 +45,20 @@ export class KanagawaDefinitionProvider implements vscode.DefinitionProvider {
             return undefined;
         }
 
-        // Single exact/high confidence match → jump directly
-        if ((resolution.confidence === 'exact' || resolution.confidence === 'high') 
-            && resolution.all.length === 1) {
+        // For exact or high confidence, always jump directly to the primary (most likely) definition.
+        // This matches the behavior of hover, which shows the primary definition.
+        // Only show a picker when confidence is medium/low and there are multiple candidates.
+        if (resolution.confidence === 'exact' || resolution.confidence === 'high') {
             return new vscode.Location(resolution.primary.uri, resolution.primary.range);
         }
 
-        // Multiple matches → return all, VS Code will show picker with qualified names
-        return this.buildLocationArray(resolution.all);
+        // Medium/low confidence with multiple matches → return all, VS Code will show picker
+        if (resolution.all.length > 1) {
+            return this.buildLocationArray(resolution.all);
+        }
+
+        // Single match even at lower confidence → jump directly
+        return new vscode.Location(resolution.primary.uri, resolution.primary.range);
     }
 
     /**
