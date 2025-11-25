@@ -76,6 +76,26 @@
         "command": "kanagawa.outline.clearModulePrefix",
         "title": "Kanagawa: Clear Outline Module Prefix",
         "category": "Kanagawa"
+      },
+      {
+        "command": "kanagawa.perf.toggle",
+        "title": "Kanagawa: Toggle Performance Logging",
+        "category": "Kanagawa"
+      },
+      {
+        "command": "kanagawa.perf.showSummary",
+        "title": "Kanagawa: Show Performance Summary",
+        "category": "Kanagawa"
+      },
+      {
+        "command": "kanagawa.perf.clear",
+        "title": "Kanagawa: Clear Performance Stats",
+        "category": "Kanagawa"
+      },
+      {
+        "command": "kanagawa.perf.setThreshold",
+        "title": "Kanagawa: Set Slow Operation Threshold",
+        "category": "Kanagawa"
       }
     ],
     "configuration": {

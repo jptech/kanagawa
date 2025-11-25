@@ -16,9 +16,13 @@ import { KanagawaReferencesProvider, KanagawaCallHierarchyProvider } from './pro
 import { KanagawaRenameProvider } from './providers/rename';
 import { OutlineFilterManager } from './service/outlineFilters';
 import { KeyedDebouncer, DEBOUNCE_DELAYS } from './utils/debounce';
+import { perfLogger, PerfLogLevel } from './utils/perfLogger';
 
 export async function activate(context: vscode.ExtensionContext) {
     console.log('Kanagawa "LSP-Lite" is activating...');
+
+    // Initialize performance logger (off by default)
+    perfLogger.init(context);
 
     const service = new TreeSitterService(context);
     await service.init();
@@ -222,6 +226,43 @@ export async function activate(context: vscode.ExtensionContext) {
             await outlineFilters.setModulePrefix(undefined);
             vscode.commands.executeCommand('workbench.action.outline.toggleSortByPosition');
             vscode.commands.executeCommand('workbench.action.outline.toggleSortByPosition');
+        }),
+        // Performance logging commands
+        vscode.commands.registerCommand('kanagawa.perf.toggle', async () => {
+            const currentLevel = perfLogger.getLevel();
+            const options = [
+                { label: 'Off', description: 'Disable performance logging', level: PerfLogLevel.Off },
+                { label: 'Summary', description: 'Log only slow operations (>100ms)', level: PerfLogLevel.Summary },
+                { label: 'Verbose', description: 'Log all operations', level: PerfLogLevel.Verbose }
+            ];
+            const pick = await vscode.window.showQuickPick(options, {
+                placeHolder: `Current level: ${PerfLogLevel[currentLevel]}. Select new level:`
+            });
+            if (pick) {
+                perfLogger.setLevel(pick.level);
+                vscode.window.showInformationMessage(`Kanagawa performance logging: ${pick.label}`);
+            }
+        }),
+        vscode.commands.registerCommand('kanagawa.perf.showSummary', () => {
+            perfLogger.printSummary();
+        }),
+        vscode.commands.registerCommand('kanagawa.perf.clear', () => {
+            perfLogger.clearStats();
+            vscode.window.showInformationMessage('Kanagawa performance stats cleared.');
+        }),
+        vscode.commands.registerCommand('kanagawa.perf.setThreshold', async () => {
+            const value = await vscode.window.showInputBox({
+                prompt: 'Set slow operation threshold in milliseconds',
+                value: '100',
+                validateInput: (v) => {
+                    const n = parseInt(v, 10);
+                    return isNaN(n) || n < 0 ? 'Enter a positive number' : undefined;
+                }
+            });
+            if (value) {
+                perfLogger.setSlowThreshold(parseInt(value, 10));
+                vscode.window.showInformationMessage(`Kanagawa slow threshold set to ${value}ms`);
+            }
         })
     );
 }

@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as Parser from 'web-tree-sitter';
 import { TreeSitterService } from '../service/treeSitter';
+import { perfLogger, PerfOps } from '../utils/perfLogger';
 
 export class KanagawaDiagnosticsProvider {
     private collection: vscode.DiagnosticCollection;
@@ -13,14 +14,19 @@ export class KanagawaDiagnosticsProvider {
      * Updates diagnostics for a document by analyzing its parse tree.
      */
     async updateDiagnostics(document: vscode.TextDocument) {
-        const tree = this.service.getTree(document) ?? await this.service.parse(document);
-        if (!tree) { return; }
+        const endTiming = perfLogger.start(PerfOps.DIAGNOSTICS, document.uri.toString());
+        try {
+            const tree = this.service.getTree(document) ?? await this.service.parse(document);
+            if (!tree) { return; }
 
-        const diagnostics: vscode.Diagnostic[] = [];
+            const diagnostics: vscode.Diagnostic[] = [];
 
-        this.findErrors(document, tree.rootNode, diagnostics);
+            this.findErrors(document, tree.rootNode, diagnostics);
 
-        this.collection.set(document.uri, diagnostics);
+            this.collection.set(document.uri, diagnostics);
+        } finally {
+            endTiming();
+        }
     }
 
     /**

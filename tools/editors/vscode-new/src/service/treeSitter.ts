@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as Parser from 'web-tree-sitter';
 import * as path from 'path';
+import { perfLogger, PerfOps } from '../utils/perfLogger';
 
 /**
  * Cached query objects to avoid repeated parsing of query strings.
@@ -120,18 +121,22 @@ export class TreeSitterService {
             return undefined;
         }
 
+        const uri = document.uri.toString();
+        const isIncremental = contentChanges && contentChanges.length > 0;
+        const opName = isIncremental ? PerfOps.PARSE_INCREMENTAL : PerfOps.PARSE_FULL;
+        const endTiming = perfLogger.start(opName, uri);
+
         // Serialize parsing operations - Tree-sitter WASM cannot handle concurrent parsing
         await this.parseMutex.acquire();
         
-        const uri = document.uri.toString();
         const previous = this.trees.get(uri);
 
         try {
             let newTree: Parser.Tree;
 
             // Use incremental parsing if we have a previous tree and content changes
-            if (previous && contentChanges && contentChanges.length > 0) {
-                newTree = this.parseIncremental(document, previous, contentChanges);
+            if (previous && isIncremental) {
+                newTree = this.parseIncremental(document, previous, contentChanges!);
             } else {
                 // Full reparse - either no previous tree or no change information
                 newTree = this.parser.parse(document.getText());
@@ -150,6 +155,7 @@ export class TreeSitterService {
             return previous;
         } finally {
             this.parseMutex.release();
+            endTiming();
         }
     }
 
@@ -254,13 +260,15 @@ export class TreeSitterService {
     query(node: Parser.SyntaxNode, queryString: string): Parser.QueryCapture[] {
         if (!this.language) { return []; }
 
-        try {
-            const query = this.getOrCreateQuery(queryString);
-            return query.captures(node);
-        } catch (e) {
-            console.error('Kanagawa: Query failed:', e);
-            return [];
-        }
+        return perfLogger.measureSync(PerfOps.QUERY_EXECUTE, undefined, () => {
+            try {
+                const query = this.getOrCreateQuery(queryString);
+                return query.captures(node);
+            } catch (e) {
+                console.error('Kanagawa: Query failed:', e);
+                return [];
+            }
+        });
     }
 
     /**

@@ -4,6 +4,7 @@ import * as path from 'path';
 import { TreeSitterService } from './treeSitter';
 import { QueryManager } from './query';
 import { ImportConfigService, ImportConfiguration } from './importConfig';
+import { perfLogger, PerfOps } from '../utils/perfLogger';
 import {
     normalizeTypeName as normalizeTypeNameUtil,
     sanitizeTypeText as sanitizeTypeTextUtil,
@@ -175,6 +176,8 @@ export class WorkspaceIndexer {
             return;
         }
 
+        const endTiming = perfLogger.start(PerfOps.INDEX_SCAN, 'workspace');
+
         // Create a new cancellation source that combines external token with internal control
         this.indexingCancellation = new vscode.CancellationTokenSource();
         if (token) {
@@ -252,6 +255,7 @@ export class WorkspaceIndexer {
             this.isIndexing = false;
             this.indexingCancellation?.dispose();
             this.indexingCancellation = undefined;
+            endTiming();
         }
 
         // Trigger rescan outside of try/finally to avoid re-entrancy issues
@@ -261,6 +265,7 @@ export class WorkspaceIndexer {
     }
 
     async indexFile(uri: vscode.Uri, queryString?: string) {
+        const endTiming = perfLogger.start(PerfOps.INDEX_FILE, uri.toString());
         try {
             if (this.verbose) {
                 console.log('Kanagawa: Indexing file:', uri.toString());
@@ -293,6 +298,8 @@ export class WorkspaceIndexer {
             this.recentlyIndexed += symbols.length;
         } catch (e) {
             console.error(`Failed to index ${uri.toString()}:`, e);
+        } finally {
+            endTiming();
         }
     }
     

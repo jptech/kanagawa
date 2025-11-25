@@ -3,6 +3,7 @@ import * as Parser from 'web-tree-sitter';
 import { TreeSitterService } from '../service/treeSitter';
 import { WorkspaceIndexer, SymbolContextHint, SymbolInfo } from '../service/indexer';
 import { extractModuleFromQualified } from '../utils/importUtils';
+import { perfLogger, PerfOps } from '../utils/perfLogger';
 
 /**
  * Result of definition resolution with confidence scoring.
@@ -27,38 +28,43 @@ export class KanagawaDefinitionProvider implements vscode.DefinitionProvider {
         position: vscode.Position,
         token: vscode.CancellationToken
     ): Promise<vscode.Definition | undefined> {
-        const tree = this.service.getTree(document) ?? await this.service.parse(document);
-        if (!tree) { return undefined; }
+        const endTiming = perfLogger.start(PerfOps.DEFINITION, document.uri.toString());
+        try {
+            const tree = this.service.getTree(document) ?? await this.service.parse(document);
+            if (!tree) { return undefined; }
 
-        const node = tree.rootNode.descendantForPosition({
-            row: position.line,
-            column: position.character
-        });
+            const node = tree.rootNode.descendantForPosition({
+                row: position.line,
+                column: position.character
+            });
 
-        if (!node || (node.type !== 'identifier' && node.type !== 'type_identifier')) {
-            return undefined;
-        }
+            if (!node || (node.type !== 'identifier' && node.type !== 'type_identifier')) {
+                return undefined;
+            }
 
-        const resolution = await this.resolveDefinition(document, node);
+            const resolution = await this.resolveDefinition(document, node);
 
-        if (resolution.confidence === 'none' || !resolution.primary) {
-            return undefined;
-        }
+            if (resolution.confidence === 'none' || !resolution.primary) {
+                return undefined;
+            }
 
-        // For exact or high confidence, always jump directly to the primary (most likely) definition.
-        // This matches the behavior of hover, which shows the primary definition.
-        // Only show a picker when confidence is medium/low and there are multiple candidates.
-        if (resolution.confidence === 'exact' || resolution.confidence === 'high') {
+            // For exact or high confidence, always jump directly to the primary (most likely) definition.
+            // This matches the behavior of hover, which shows the primary definition.
+            // Only show a picker when confidence is medium/low and there are multiple candidates.
+            if (resolution.confidence === 'exact' || resolution.confidence === 'high') {
+                return new vscode.Location(resolution.primary.uri, resolution.primary.range);
+            }
+
+            // Medium/low confidence with multiple matches → return all, VS Code will show picker
+            if (resolution.all.length > 1) {
+                return this.buildLocationArray(resolution.all);
+            }
+
+            // Single match even at lower confidence → jump directly
             return new vscode.Location(resolution.primary.uri, resolution.primary.range);
+        } finally {
+            endTiming();
         }
-
-        // Medium/low confidence with multiple matches → return all, VS Code will show picker
-        if (resolution.all.length > 1) {
-            return this.buildLocationArray(resolution.all);
-        }
-
-        // Single match even at lower confidence → jump directly
-        return new vscode.Location(resolution.primary.uri, resolution.primary.range);
     }
 
     /**

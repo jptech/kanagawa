@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as Parser from 'web-tree-sitter';
 import { TreeSitterService } from '../service/treeSitter';
 import { QueryManager } from '../service/query';
+import { perfLogger, PerfOps } from '../utils/perfLogger';
 
 const TOKEN_TYPES = [
     'namespace',
@@ -52,9 +53,11 @@ export class KanagawaSemanticTokensProvider implements vscode.DocumentSemanticTo
         document: vscode.TextDocument,
         token: vscode.CancellationToken
     ): Promise<vscode.SemanticTokens | undefined> {
-        // Get existing tree or parse the document (parse is now async)
-        const tree = this.service.getTree(document) ?? await this.service.parse(document);
-        if (!tree) { return undefined; }
+        const endTiming = perfLogger.start(PerfOps.SEMANTIC_TOKENS, document.uri.toString());
+        try {
+            // Get existing tree or parse the document (parse is now async)
+            const tree = this.service.getTree(document) ?? await this.service.parse(document);
+            if (!tree) { return undefined; }
 
         const builder = new vscode.SemanticTokensBuilder(legend);
         
@@ -170,6 +173,9 @@ export class KanagawaSemanticTokensProvider implements vscode.DocumentSemanticTo
         }
 
         return builder.build();
+        } finally {
+            endTiming();
+        }
     }
 
     /**

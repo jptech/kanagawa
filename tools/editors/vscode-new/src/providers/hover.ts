@@ -4,6 +4,7 @@ import { TreeSitterService } from '../service/treeSitter';
 import { WorkspaceIndexer, SymbolInfo, SymbolContextHint } from '../service/indexer';
 import { extractModuleFromQualified } from '../utils/importUtils';
 import { getNodeText } from '../utils/nodeUtils';
+import { perfLogger, PerfOps } from '../utils/perfLogger';
 
 /**
  * Result of resolving hover candidates with confidence scoring.
@@ -30,52 +31,54 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
         position: vscode.Position,
         token: vscode.CancellationToken
     ): Promise<vscode.Hover | undefined> {
-        const tree = this.service.getTree(document) ?? await this.service.parse(document);
-        if (!tree) {
-            return undefined;
-        }
-
-        const node = tree.rootNode.descendantForPosition({
-            row: position.line,
-            column: position.character
-        });
-
-        const identifier = this.resolveIdentifierNode(node);
-        if (!identifier) {
-            return undefined;
-        }
-
-        const hoverRange = new vscode.Range(
-            new vscode.Position(identifier.startPosition.row, identifier.startPosition.column),
-            new vscode.Position(identifier.endPosition.row, identifier.endPosition.column)
-        );
-
-        // Try local variable/parameter first
-        const typeInfo = this.findLocalTypeInfo(document, identifier);
-        if (typeInfo) {
-            const md = new vscode.MarkdownString();
-            md.appendCodeblock(typeInfo.signature, 'kanagawa');
-            if (typeInfo.initializer) {
-                md.appendMarkdown(`\n\n**Initializer:** \`${typeInfo.initializer}\``);
+        return perfLogger.measure(PerfOps.HOVER, document.uri.toString(), async () => {
+            const tree = this.service.getTree(document) ?? await this.service.parse(document);
+            if (!tree) {
+                return undefined;
             }
-            return new vscode.Hover(md, hoverRange);
-        }
 
-        // Resolve with confidence scoring
-        const resolution = await this.resolveWithConfidence(document, identifier);
+            const node = tree.rootNode.descendantForPosition({
+                row: position.line,
+                column: position.character
+            });
 
-        if (resolution.confidence === 'none') {
+            const identifier = this.resolveIdentifierNode(node);
+            if (!identifier) {
+                return undefined;
+            }
+
+            const hoverRange = new vscode.Range(
+                new vscode.Position(identifier.startPosition.row, identifier.startPosition.column),
+                new vscode.Position(identifier.endPosition.row, identifier.endPosition.column)
+            );
+
+            // Try local variable/parameter first
+            const typeInfo = this.findLocalTypeInfo(document, identifier);
+            if (typeInfo) {
+                const md = new vscode.MarkdownString();
+                md.appendCodeblock(typeInfo.signature, 'kanagawa');
+                if (typeInfo.initializer) {
+                    md.appendMarkdown(`\n\n**Initializer:** \`${typeInfo.initializer}\``);
+                }
+                return new vscode.Hover(md, hoverRange);
+            }
+
+            // Resolve with confidence scoring
+            const resolution = await this.resolveWithConfidence(document, identifier);
+
+            if (resolution.confidence === 'none') {
+                return undefined;
+            }
+
+            // Build hover content based on confidence
+            const markdowns = await this.buildHoverContent(document, resolution);
+
+            if (markdowns.length > 0) {
+                return new vscode.Hover(markdowns, hoverRange);
+            }
+
             return undefined;
-        }
-
-        // Build hover content based on confidence
-        const markdowns = await this.buildHoverContent(document, resolution);
-
-        if (markdowns.length > 0) {
-            return new vscode.Hover(markdowns, hoverRange);
-        }
-
-        return undefined;
+        }); // end perfLogger.measure
     }
 
     /**
