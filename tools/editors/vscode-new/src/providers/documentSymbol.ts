@@ -16,7 +16,7 @@ export class KanagawaDocumentSymbolProvider implements vscode.DocumentSymbolProv
         document: vscode.TextDocument,
         token: vscode.CancellationToken
     ): Promise<vscode.DocumentSymbol[] | undefined> {
-        const tree = this.service.getTree(document);
+        const tree = this.service.getTree(document) ?? await this.service.parse(document);
         if (!tree) { return undefined; }
 
         let queryString = this.queryManager.getQuery('outline');
@@ -36,7 +36,7 @@ export class KanagawaDocumentSymbolProvider implements vscode.DocumentSymbolProv
         // To do nesting, we would need to check parent-child relationships.
 
         // Group captures by definition node
-        const definitionMap = new Map<any, { kind: vscode.SymbolKind; detail: string; category: SymbolCategory; nameNode?: any }>();
+        const definitionMap = new Map<Parser.SyntaxNode, { kind: vscode.SymbolKind; detail: string; category: SymbolCategory; nameNode?: Parser.SyntaxNode }>();
         
         for (const capture of captures) {
             const node = capture.node;

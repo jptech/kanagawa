@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as Parser from 'web-tree-sitter';
 import { TreeSitterService } from '../service/treeSitter';
 import { QueryManager } from '../service/query';
 
@@ -51,7 +52,8 @@ export class KanagawaSemanticTokensProvider implements vscode.DocumentSemanticTo
         document: vscode.TextDocument,
         token: vscode.CancellationToken
     ): Promise<vscode.SemanticTokens | undefined> {
-        const tree = this.service.getTree(document);
+        // Get existing tree or parse the document (parse is now async)
+        const tree = this.service.getTree(document) ?? await this.service.parse(document);
         if (!tree) { return undefined; }
 
         const builder = new vscode.SemanticTokensBuilder(legend);
@@ -61,9 +63,13 @@ export class KanagawaSemanticTokensProvider implements vscode.DocumentSemanticTo
             queryString = await this.queryManager.loadQuery('highlights');
         }
 
+        if (token.isCancellationRequested) { return undefined; }
+
         const captures = this.service.query(tree.rootNode, queryString);
 
         for (const capture of captures) {
+            if (token.isCancellationRequested) { return undefined; }
+            
             const node = capture.node;
             let type: string | undefined;
             let modifiers: string[] = [];
@@ -157,17 +163,84 @@ export class KanagawaSemanticTokensProvider implements vscode.DocumentSemanticTo
             }
 
             if (type) {
-                builder.push(
-                    new vscode.Range(
-                        new vscode.Position(node.startPosition.row, node.startPosition.column),
-                        new vscode.Position(node.endPosition.row, node.endPosition.column)
-                    ),
-                    type,
-                    modifiers
-                );
+                // VS Code requires semantic tokens to be single-line.
+                // Split multi-line tokens into per-line tokens.
+                this.pushToken(builder, document, node, type, modifiers);
             }
         }
 
         return builder.build();
+    }
+
+    /**
+     * Pushes a semantic token, handling multi-line nodes by splitting them
+     * into individual single-line tokens (VS Code API requirement).
+     */
+    private pushToken(
+        builder: vscode.SemanticTokensBuilder,
+        document: vscode.TextDocument,
+        node: Parser.SyntaxNode,
+        type: string,
+        modifiers: string[]
+    ): void {
+        const startLine = node.startPosition.row;
+        const endLine = node.endPosition.row;
+
+        if (startLine === endLine) {
+            // Single-line token - push directly
+            builder.push(
+                startLine,
+                node.startPosition.column,
+                node.endPosition.column - node.startPosition.column,
+                TOKEN_TYPES.indexOf(type),
+                this.encodeModifiers(modifiers)
+            );
+        } else {
+            // Multi-line token - split into per-line tokens
+            for (let line = startLine; line <= endLine; line++) {
+                const lineText = document.lineAt(line).text;
+                let startCol: number;
+                let length: number;
+
+                if (line === startLine) {
+                    // First line: from start column to end of line
+                    startCol = node.startPosition.column;
+                    length = lineText.length - startCol;
+                } else if (line === endLine) {
+                    // Last line: from start of line to end column
+                    startCol = 0;
+                    length = node.endPosition.column;
+                } else {
+                    // Middle lines: entire line
+                    startCol = 0;
+                    length = lineText.length;
+                }
+
+                // Skip empty tokens
+                if (length > 0) {
+                    builder.push(
+                        line,
+                        startCol,
+                        length,
+                        TOKEN_TYPES.indexOf(type),
+                        this.encodeModifiers(modifiers)
+                    );
+                }
+            }
+        }
+    }
+
+    /**
+     * Encodes modifier strings into a bitmask.
+     */
+    private encodeModifiers(modifiers: string[]): number {
+        let result = 0;
+        for (const modifier of modifiers) {
+            const index = TOKEN_MODIFIERS.indexOf(modifier);
+            if (index >= 0) {
+                result |= (1 << index);
+            }
+        }
+        return result;
     }
 }

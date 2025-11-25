@@ -99,6 +99,12 @@ export interface SymbolInfo {
     typeHint?: string;
 }
 
+/** Maximum depth for alias chain resolution to prevent infinite loops */
+const MAX_ALIAS_CHAIN_DEPTH = 50;
+
+/** Default chunk size for batch file processing during indexing */
+const INDEX_CHUNK_SIZE = 10;
+
 export class WorkspaceIndexer {
     /** Primary index: name → SymbolInfo[] (for prefix matching, completions) */
     private symbolIndex: Map<string, SymbolInfo[]> = new Map();
@@ -109,6 +115,8 @@ export class WorkspaceIndexer {
     /** Cached resolved imports per document */
     private resolvedImportsCache: Map<string, ResolvedImports> = new Map();
     private isIndexing = false;
+    /** Cancellation token for the current indexing operation */
+    private indexingCancellation: vscode.CancellationTokenSource | undefined;
     private documentContexts: Map<string, DocumentContext> = new Map();
     private verbose = false;
     private recentlyIndexed = 0;
@@ -122,6 +130,8 @@ export class WorkspaceIndexer {
     ]);
     private readonly typeInferenceCache: Map<string, Map<number, string>> = new Map();
     private readonly memberCache: Map<string, SymbolInfo[]> = new Map();
+    /** Reverse mapping: URI → Set of cache keys (type names) with members from that URI */
+    private readonly memberCacheByUri: Map<string, Set<string>> = new Map();
     private readonly aliasMap: Map<string, { target: string; uri: string }> = new Map();
     /** Cache for template instantiations: key → TemplateInstantiation */
     private readonly templateInstantiationCache: Map<string, TemplateInstantiation> = new Map();
@@ -151,57 +161,101 @@ export class WorkspaceIndexer {
         return this.importConfig.resolveImportConfiguration();
     }
 
-    async scanWorkspace() {
+    /**
+     * Scans the workspace and indexes all Kanagawa source files.
+     * Uses chunked processing with cancellation support to avoid blocking the UI.
+     * 
+     * @param token Optional cancellation token to abort the scan early
+     */
+    async scanWorkspace(token?: vscode.CancellationToken) {
         if (this.isIndexing) {
             this.pendingRescan = true;
+            // Cancel any in-progress indexing if a new scan is requested
+            this.indexingCancellation?.cancel();
             return;
         }
+
+        // Create a new cancellation source that combines external token with internal control
+        this.indexingCancellation = new vscode.CancellationTokenSource();
+        if (token) {
+            token.onCancellationRequested(() => this.indexingCancellation?.cancel());
+        }
+        const effectiveToken = this.indexingCancellation.token;
+
         this.isIndexing = true;
-        this.symbolIndex.clear();
-        this.qualifiedIndex.clear();
-        this.moduleExports.clear();
-        this.resolvedImportsCache.clear();
-        this.documentContexts.clear();
-        this.memberCache.clear();
-        this.typeInferenceCache.clear();
-        this.aliasMap.clear();
-        this.clearTemplateCaches();
+        let shouldRescan = false;
 
-        const importConfiguration = await this.importConfig.resolveImportConfiguration();
+        try {
+            // Clear all indices before starting fresh scan
+            this.symbolIndex.clear();
+            this.qualifiedIndex.clear();
+            this.moduleExports.clear();
+            this.resolvedImportsCache.clear();
+            this.documentContexts.clear();
+            this.memberCache.clear();
+            this.typeInferenceCache.clear();
+            this.aliasMap.clear();
+            this.clearTemplateCaches();
 
-        // Ensure query is loaded and cached inside the query manager
-        const queryString = await this.queryManager.loadQuery('definitions');
-        if (!queryString) {
-            console.error('Kanagawa: Unable to load definitions query.');
-            this.isIndexing = false;
-            return;
-        }
+            if (effectiveToken.isCancellationRequested) { return; }
 
-        const files = await this.collectSourceFiles(importConfiguration.importPaths);
-        
-        // Process in chunks to avoid blocking UI
-        const chunkSize = 10;
-        for (let i = 0; i < files.length; i += chunkSize) {
-            const chunk = files.slice(i, i + chunkSize);
-            await Promise.all(chunk.map(async (uri: vscode.Uri) => {
-                await this.indexFile(uri, queryString);
-            }));
-            // Yield to event loop
-            await new Promise(resolve => setTimeout(resolve, 0));
-        }
-        
-        // Build module exports index after all files are indexed
-        this.buildModuleExports();
-        
-        this.isIndexing = false;
-        console.log(`Kanagawa: Indexed ${this.symbolIndex.size} symbols from ${files.length} files.`);
-            this.recentlyIndexed = 0;
-            if (this.verbose) {
-                console.log(`Kanagawa: Indexed ${this.symbolIndex.size} symbols from ${files.length} files.`);
+            const importConfiguration = await this.importConfig.resolveImportConfiguration();
+
+            // Ensure query is loaded and cached inside the query manager
+            const queryString = await this.queryManager.loadQuery('definitions');
+            if (!queryString) {
+                console.error('Kanagawa: Unable to load definitions query.');
+                return;
             }
 
-        if (this.pendingRescan) {
+            if (effectiveToken.isCancellationRequested) { return; }
+
+            const files = await this.collectSourceFiles(importConfiguration.importPaths);
+            
+            // Process in chunks to avoid blocking UI, with cancellation checks
+            for (let i = 0; i < files.length; i += INDEX_CHUNK_SIZE) {
+                if (effectiveToken.isCancellationRequested) {
+                    console.log('Kanagawa: Workspace scan cancelled.');
+                    return;
+                }
+
+                const chunk = files.slice(i, i + INDEX_CHUNK_SIZE);
+                await Promise.all(chunk.map(async (uri: vscode.Uri) => {
+                    if (!effectiveToken.isCancellationRequested) {
+                        await this.indexFile(uri, queryString);
+                    }
+                }));
+                
+                // Yield to event loop to keep UI responsive
+                await new Promise(resolve => setTimeout(resolve, 0));
+            }
+            
+            if (effectiveToken.isCancellationRequested) { return; }
+
+            // Build module exports index after all files are indexed
+            this.buildModuleExports();
+            
+            this.recentlyIndexed = 0;
+            console.log(`Kanagawa: Indexed ${this.symbolIndex.size} symbols from ${files.length} files.`);
+            if (this.verbose) {
+                console.log(`Kanagawa: Indexed ${this.symbolIndex.size} symbol names from ${files.length} files.`);
+            }
+
+            // Check if a rescan was requested while we were indexing
+            shouldRescan = this.pendingRescan;
             this.pendingRescan = false;
+
+        } catch (e) {
+            console.error('Kanagawa: Error during workspace scan:', e);
+        } finally {
+            // Always reset indexing state, even on error
+            this.isIndexing = false;
+            this.indexingCancellation?.dispose();
+            this.indexingCancellation = undefined;
+        }
+
+        // Trigger rescan outside of try/finally to avoid re-entrancy issues
+        if (shouldRescan) {
             void this.scanWorkspace();
         }
     }
@@ -214,7 +268,7 @@ export class WorkspaceIndexer {
             this.clearDocumentCaches(uri);
             // console.log('Kanagawa: Indexing file:', uri.toString());
             const document = await vscode.workspace.openTextDocument(uri);
-            const tree = this.service.parse(document);
+            const tree = await this.service.parse(document);
             if (!tree) { 
                 console.warn('Kanagawa: No tree for file:', uri.toString());
                 return; 
@@ -233,8 +287,10 @@ export class WorkspaceIndexer {
             const context = this.collectDocumentContext(tree.rootNode);
             this.documentContexts.set(uri.toString(), context);
             this.addSymbols(symbols);
-            this.memberCache.clear();
-                    this.recentlyIndexed += symbols.length;
+            // Smart cache invalidation: only clear cached members that could be affected
+            // by changes in this specific file, rather than clearing the entire cache
+            this.invalidateMemberCacheForUri(uri);
+            this.recentlyIndexed += symbols.length;
         } catch (e) {
             console.error(`Failed to index ${uri.toString()}:`, e);
         }
@@ -438,6 +494,7 @@ export class WorkspaceIndexer {
         this.resolvedImportsCache.clear();
         this.documentContexts.clear();
         this.memberCache.clear();
+        this.memberCacheByUri.clear();
         this.typeInferenceCache.clear();
         this.recentlyIndexed = 0;
         this.aliasMap.clear();
@@ -564,6 +621,35 @@ export class WorkspaceIndexer {
         return context;
     }
 
+    /**
+     * Invalidates only the member cache entries that might be affected by changes to a specific URI.
+     * This is more efficient than clearing the entire cache when a single file changes.
+     * 
+     * @param uri The URI of the changed document
+     */
+    private invalidateMemberCacheForUri(uri: vscode.Uri): void {
+        const target = uri.toString();
+        const affectedKeys = this.memberCacheByUri.get(target);
+        
+        if (affectedKeys) {
+            // Remove cache entries for types that had members from this file
+            for (const key of affectedKeys) {
+                this.memberCache.delete(key);
+            }
+            this.memberCacheByUri.delete(target);
+            
+            if (this.verbose) {
+                console.log(`Kanagawa: Invalidated ${affectedKeys.size} member cache entries for ${target}`);
+            }
+        }
+        
+        // Also clean up reverse mapping entries that reference this URI
+        for (const [_, cacheKeys] of this.memberCacheByUri) {
+            // Note: We don't need to do anything here since the forward mapping
+            // will be rebuilt when getMembersForType is called
+        }
+    }
+
     private removeSymbolsForUri(uri: vscode.Uri) {
         const target = uri.toString();
         for (const [key, list] of this.symbolIndex.entries()) {
@@ -574,9 +660,20 @@ export class WorkspaceIndexer {
                 this.symbolIndex.set(key, filtered);
             }
         }
+        
+        // Remove qualified index entries from this file
+        for (const [qn, sym] of this.qualifiedIndex.entries()) {
+            if (sym.uri.toString() === target) {
+                this.qualifiedIndex.delete(qn);
+            }
+        }
+        
         this.documentContexts.delete(target);
         this.typeInferenceCache.delete(target);
-        this.memberCache.clear();
+        
+        // Use targeted cache invalidation instead of clearing everything
+        this.invalidateMemberCacheForUri(uri);
+        
         for (const [alias, record] of this.aliasMap.entries()) {
             if (record.uri === target) {
                 this.aliasMap.delete(alias);
@@ -1119,7 +1216,7 @@ export class WorkspaceIndexer {
     }
 
     async findSymbolsInDocument(document: vscode.TextDocument, name: string): Promise<SymbolInfo[]> {
-        const tree = this.service.getTree(document) ?? this.service.parse(document);
+        const tree = this.service.getTree(document) ?? await this.service.parse(document);
         if (!tree) { return []; }
 
         const queryString = await this.queryManager.loadQuery('definitions');
@@ -1401,6 +1498,7 @@ export class WorkspaceIndexer {
 
         const results: SymbolInfo[] = [];
         const seen = new Set<string>();
+        const contributingUris = new Set<string>();
 
         for (const list of this.symbolIndex.values()) {
             for (const sym of list) {
@@ -1414,6 +1512,9 @@ export class WorkspaceIndexer {
                 if (seen.has(key)) { continue; }
                 seen.add(key);
                 results.push(sym);
+                
+                // Track which URIs contribute to this cache entry
+                contributingUris.add(sym.uri.toString());
             }
         }
 
@@ -1426,7 +1527,19 @@ export class WorkspaceIndexer {
             return a.category.localeCompare(b.category);
         });
 
+        // Cache results and track reverse mapping for targeted invalidation
         this.memberCache.set(canonical, results.slice());
+        
+        // Update reverse mapping: URI → cache keys that include members from that URI
+        for (const uri of contributingUris) {
+            let cacheKeys = this.memberCacheByUri.get(uri);
+            if (!cacheKeys) {
+                cacheKeys = new Set();
+                this.memberCacheByUri.set(uri, cacheKeys);
+            }
+            cacheKeys.add(canonical);
+        }
+
         return this.filterMembers(results, options);
     }
 
@@ -1699,7 +1812,7 @@ export class WorkspaceIndexer {
     public async getTemplateParametersForSymbol(symbol: SymbolInfo): Promise<SymbolInfo[]> {
         try {
             const document = await vscode.workspace.openTextDocument(symbol.uri);
-            const tree = this.service.getTree(document) ?? this.service.parse(document);
+            const tree = this.service.getTree(document) ?? await this.service.parse(document);
             if (!tree) { return []; }
             const node = tree.rootNode.descendantForPosition({
                 row: symbol.range.start.line,
@@ -1933,10 +2046,25 @@ export class WorkspaceIndexer {
         return target ? target.text.trim() : undefined;
     }
 
+    /**
+     * Resolves a type alias chain to its canonical type.
+     * Handles circular references via visited set and enforces depth limit.
+     * 
+     * @param typeName The type name to resolve
+     * @returns The canonical type name after following all alias declarations
+     */
     private resolveAliasChain(typeName: string): string {
         let current = typeName;
         const visited = new Set<string>();
+        let depth = 0;
+
         while (this.aliasMap.has(current) && !visited.has(current)) {
+            // Prevent infinite loops and excessive recursion
+            if (++depth > MAX_ALIAS_CHAIN_DEPTH) {
+                console.warn(`Kanagawa: Alias chain depth exceeded for '${typeName}', stopping at '${current}'`);
+                break;
+            }
+
             visited.add(current);
             const entry = this.aliasMap.get(current);
             if (!entry) { break; }

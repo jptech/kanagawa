@@ -9,7 +9,7 @@ export class KanagawaFoldingRangeProvider implements vscode.FoldingRangeProvider
         context: vscode.FoldingContext,
         token: vscode.CancellationToken
     ): Promise<vscode.FoldingRange[]> {
-        const tree = this.service.getTree(document);
+        const tree = this.service.getTree(document) ?? await this.service.parse(document);
         if (!tree) { return []; }
 
         const ranges: vscode.FoldingRange[] = [];

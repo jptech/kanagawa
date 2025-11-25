@@ -54,7 +54,7 @@ export class KanagawaCompletionItemProvider implements vscode.CompletionItemProv
         _context: vscode.CompletionContext
     ): Promise<vscode.CompletionItem[] | vscode.CompletionList | undefined> {
         void _context;
-        const tree = this.treeService.getTree(document) ?? this.treeService.parse(document);
+        const tree = this.treeService.getTree(document) ?? await this.treeService.parse(document);
         if (!tree) { return undefined; }
 
         const lineText = document.lineAt(position.line).text;

@@ -1,7 +1,9 @@
 import * as vscode from 'vscode';
+import * as Parser from 'web-tree-sitter';
 import { TreeSitterService } from '../service/treeSitter';
 import { WorkspaceIndexer, SymbolInfo, SymbolContextHint } from '../service/indexer';
 import { extractModuleFromQualified } from '../utils/importUtils';
+import { getNodeText } from '../utils/nodeUtils';
 
 /**
  * Result of resolving hover candidates with confidence scoring.
@@ -28,7 +30,7 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
         position: vscode.Position,
         token: vscode.CancellationToken
     ): Promise<vscode.Hover | undefined> {
-        const tree = this.service.getTree(document);
+        const tree = this.service.getTree(document) ?? await this.service.parse(document);
         if (!tree) {
             return undefined;
         }
@@ -82,7 +84,7 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
      */
     private async resolveWithConfidence(
         document: vscode.TextDocument,
-        identifier: any
+        identifier: Parser.SyntaxNode
     ): Promise<HoverResolution> {
         const name = identifier.text;
         const scopePath = this.indexer.getScopePathForNode(identifier);
@@ -313,7 +315,7 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
     /**
      * Resolves identifier node from AST, handling various node types.
      */
-    private resolveIdentifierNode(node: any): any {
+    private resolveIdentifierNode(node: Parser.SyntaxNode | null): Parser.SyntaxNode | null {
         let current = node;
         while (current) {
             if (current.type === 'identifier' || current.type === 'type_identifier') {
@@ -335,16 +337,16 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
     /**
      * Finds local type information for a variable or parameter.
      */
-    private findLocalTypeInfo(document: vscode.TextDocument, identifier: any): { signature: string; initializer?: string } | undefined {
-        let current = identifier?.parent;
+    private findLocalTypeInfo(document: vscode.TextDocument, identifier: Parser.SyntaxNode): { signature: string; initializer?: string } | undefined {
+        let current: Parser.SyntaxNode | null = identifier.parent;
         while (current) {
             if (current.type === 'variable_decl') {
                 const nameNode = current.childForFieldName('name');
                 if (nameNode === identifier) {
                     const typeNode = current.childForFieldName('type');
                     const initializerNode = current.childForFieldName('initializer');
-                    const typeText = this.getNodeText(document, typeNode);
-                    const initializerText = this.getNodeText(document, initializerNode)?.trim();
+                    const typeText = getNodeText(document, typeNode);
+                    const initializerText = getNodeText(document, initializerNode)?.trim();
                     const signatureParts = [] as string[];
                     if (typeText) {
                         signatureParts.push(typeText.trim());
@@ -359,7 +361,7 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
                 const nameNode = current.childForFieldName('name');
                 if (nameNode === identifier) {
                     const typeNode = current.childForFieldName('type');
-                    const typeText = this.getNodeText(document, typeNode)?.trim();
+                    const typeText = getNodeText(document, typeNode)?.trim();
                     const signature = typeText ? `${typeText} ${identifier.text}` : identifier.text;
                     return { signature };
                 }
@@ -370,20 +372,10 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
     }
 
     /**
-     * Gets text content of an AST node.
-     */
-    private getNodeText(document: vscode.TextDocument, node: any): string | undefined {
-        if (!node) { return undefined; }
-        const start = new vscode.Position(node.startPosition.row, node.startPosition.column);
-        const end = new vscode.Position(node.endPosition.row, node.endPosition.column);
-        return document.getText(new vscode.Range(start, end));
-    }
-
-    /**
      * Builds context hint for symbol resolution based on identifier usage.
      */
-    private async buildContextHint(document: vscode.TextDocument, identifier: any): Promise<SymbolContextHint> {
-        let current = identifier.parent;
+    private async buildContextHint(document: vscode.TextDocument, identifier: Parser.SyntaxNode): Promise<SymbolContextHint> {
+        let current: Parser.SyntaxNode | null = identifier.parent;
         while (current) {
             if (current.type === 'member_expression' && current.namedChildCount >= 2) {
                 const propertyNode = current.namedChild(current.namedChildCount - 1);

@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as Parser from 'web-tree-sitter';
 import { TreeSitterService } from '../service/treeSitter';
 import { WorkspaceIndexer, SymbolInfo, SymbolContextHint } from '../service/indexer';
+import { findIdentifierNode, nodeToRange } from '../utils/nodeUtils';
 
 interface ReferenceTarget {
     symbol: SymbolInfo;
@@ -95,10 +96,10 @@ export class KanagawaReferencesProvider implements vscode.ReferenceProvider {
         context: vscode.ReferenceContext,
         token: vscode.CancellationToken
     ): Promise<vscode.Location[] | undefined> {
-        const tree = this.service.getTree(document);
+        const tree = this.service.getTree(document) ?? await this.service.parse(document);
         if (!tree) { return undefined; }
 
-        const identifier = this.findIdentifierNode(tree, position);
+        const identifier = findIdentifierNode(tree, position);
         if (!identifier) { return undefined; }
 
         const targets = await this.resolveTargets(document, identifier);
@@ -112,28 +113,12 @@ export class KanagawaReferencesProvider implements vscode.ReferenceProvider {
             }
         }
 
-        const treeForDoc = this.service.getTree(document) ?? this.service.parse(document);
+        const treeForDoc = this.service.getTree(document) ?? await this.service.parse(document);
         if (!treeForDoc) { return includeDeclaration ? results : undefined; }
         const references = await this.collectReferencesInDocument(document, treeForDoc, targets, token);
         results.push(...references);
 
         return results;
-    }
-
-    private findIdentifierNode(tree: Parser.Tree, position: vscode.Position): Parser.SyntaxNode | undefined {
-        const node = tree.rootNode.descendantForPosition({ row: position.line, column: position.character });
-        let current: Parser.SyntaxNode | null = node;
-        while (current) {
-            if (current.type === 'identifier' || current.type === 'type_identifier') {
-                return current;
-            }
-            if ((current.type === 'qualified_identifier' || current.type === 'template_instantiation') && current.namedChildCount > 0) {
-                current = current.namedChild(current.namedChildCount - 1);
-                continue;
-            }
-            current = current.parent;
-        }
-        return undefined;
     }
 
     private async resolveTargets(document: vscode.TextDocument, identifier: Parser.SyntaxNode): Promise<ReferenceTarget[]> {
@@ -254,11 +239,7 @@ export class KanagawaReferencesProvider implements vscode.ReferenceProvider {
     }
 
     private locationFromNode(document: vscode.TextDocument, node: Parser.SyntaxNode): vscode.Location {
-        const range = new vscode.Range(
-            new vscode.Position(node.startPosition.row, node.startPosition.column),
-            new vscode.Position(node.endPosition.row, node.endPosition.column)
-        );
-        return new vscode.Location(document.uri, range);
+        return new vscode.Location(document.uri, nodeToRange(node));
     }
 }
 
@@ -274,9 +255,9 @@ export class KanagawaCallHierarchyProvider implements vscode.CallHierarchyProvid
         token: vscode.CancellationToken
     ): Promise<vscode.CallHierarchyItem[] | undefined> {
         const referencesProvider = new KanagawaReferencesProvider(this.service, this.indexer);
-        const tree = this.service.getTree(document);
+        const tree = this.service.getTree(document) ?? await this.service.parse(document);
         if (!tree) { return undefined; }
-        const identifier = referencesProvider['findIdentifierNode'](tree, position);
+        const identifier = findIdentifierNode(tree, position);
         if (!identifier) { return undefined; }
         const targets = await referencesProvider['resolveTargets'](document, identifier);
         if (!targets.length) { return undefined; }
@@ -291,9 +272,9 @@ export class KanagawaCallHierarchyProvider implements vscode.CallHierarchyProvid
         if (!symbol) { return []; }
         const referenceProvider = new KanagawaReferencesProvider(this.service, this.indexer);
         const dummyDocument = await vscode.workspace.openTextDocument(symbol.uri);
-        const tree = this.service.getTree(dummyDocument) ?? this.service.parse(dummyDocument);
+        const tree = this.service.getTree(dummyDocument) ?? await this.service.parse(dummyDocument);
         if (!tree) { return []; }
-        const identifier = referenceProvider['findIdentifierNode'](tree, new vscode.Position(symbol.range.start.line, symbol.range.start.character + 1));
+        const identifier = findIdentifierNode(tree, new vscode.Position(symbol.range.start.line, symbol.range.start.character + 1));
         const targets = identifier ? await referenceProvider['resolveTargets'](dummyDocument, identifier) : [{ symbol, item: createCallHierarchyItemFromSymbol(symbol) }];
         const locations = await referenceProvider['collectReferencesInDocument'](dummyDocument, tree, targets, token);
         const grouped = new Map<string, { item: CallHierarchyItemData; ranges: vscode.Range[] }>();
@@ -303,7 +284,7 @@ export class KanagawaCallHierarchyProvider implements vscode.CallHierarchyProvid
         for (const location of allLocations) {
             if (token.isCancellationRequested) { break; }
             const doc = await vscode.workspace.openTextDocument(location.uri);
-            const treeForDoc = this.service.getTree(doc) ?? this.service.parse(doc);
+            const treeForDoc = this.service.getTree(doc) ?? await this.service.parse(doc);
             if (!treeForDoc) { continue; }
             const node = treeForDoc.rootNode.descendantForPosition({ row: location.range.start.line, column: location.range.start.character });
             const container = createCallHierarchyItemFromNode(doc, node);
@@ -332,7 +313,7 @@ export class KanagawaCallHierarchyProvider implements vscode.CallHierarchyProvid
         if (!symbol) { return []; }
 
         const doc = await vscode.workspace.openTextDocument(symbol.uri);
-        const tree = this.service.getTree(doc) ?? this.service.parse(doc);
+        const tree = this.service.getTree(doc) ?? await this.service.parse(doc);
         if (!tree) { return []; }
 
         const bodyNode = this.findBodyNode(tree, symbol.range);

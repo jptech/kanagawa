@@ -7,7 +7,8 @@ interface TypePeekResult {
     range: vscode.Range;
     label: string;
     tooltip?: string;
-    commandArgs: any[];
+    /** Command arguments - VS Code's command API accepts arbitrary argument types */
+    commandArgs: unknown[];
 }
 
 export class KanagawaTypePeekCodeLensProvider implements vscode.CodeLensProvider {
@@ -20,7 +21,7 @@ export class KanagawaTypePeekCodeLensProvider implements vscode.CodeLensProvider
         document: vscode.TextDocument,
         token: vscode.CancellationToken
     ): Promise<vscode.CodeLens[]> {
-        const tree = this.treeService.getTree(document) ?? this.treeService.parse(document);
+        const tree = this.treeService.getTree(document) ?? await this.treeService.parse(document);
         if (!tree) { return []; }
 
         const results: TypePeekResult[] = [];

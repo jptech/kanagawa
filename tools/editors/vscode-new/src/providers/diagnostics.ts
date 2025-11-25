@@ -9,8 +9,11 @@ export class KanagawaDiagnosticsProvider {
         this.collection = vscode.languages.createDiagnosticCollection('kanagawa');
     }
 
-    updateDiagnostics(document: vscode.TextDocument) {
-        const tree = this.service.getTree(document);
+    /**
+     * Updates diagnostics for a document by analyzing its parse tree.
+     */
+    async updateDiagnostics(document: vscode.TextDocument) {
+        const tree = this.service.getTree(document) ?? await this.service.parse(document);
         if (!tree) { return; }
 
         const diagnostics: vscode.Diagnostic[] = [];
@@ -18,6 +21,13 @@ export class KanagawaDiagnosticsProvider {
         this.findErrors(document, tree.rootNode, diagnostics);
 
         this.collection.set(document.uri, diagnostics);
+    }
+
+    /**
+     * Clears diagnostics for a document (e.g., when it's closed).
+     */
+    clearDiagnostics(document: vscode.TextDocument) {
+        this.collection.delete(document.uri);
     }
 
     private findErrors(

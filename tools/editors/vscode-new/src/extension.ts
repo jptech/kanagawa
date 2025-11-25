@@ -13,7 +13,9 @@ import { KanagawaDiagnosticsProvider } from './providers/diagnostics';
 import { KanagawaTypePeekCodeLensProvider } from './providers/typePeek';
 import { KanagawaSignatureHelpProvider } from './providers/signatureHelp';
 import { KanagawaReferencesProvider, KanagawaCallHierarchyProvider } from './providers/references';
+import { KanagawaRenameProvider } from './providers/rename';
 import { OutlineFilterManager } from './service/outlineFilters';
+import { KeyedDebouncer, DEBOUNCE_DELAYS } from './utils/debounce';
 
 export async function activate(context: vscode.ExtensionContext) {
     console.log('Kanagawa "LSP-Lite" is activating...');
@@ -36,7 +38,11 @@ export async function activate(context: vscode.ExtensionContext) {
     await indexer.init(context);
     const diagnosticsProvider = new KanagawaDiagnosticsProvider(service);
     
-    // Initial scan
+    // Debouncer for document change events - prevents excessive parsing during rapid typing
+    const parseDebouncer = new KeyedDebouncer<string>(DEBOUNCE_DELAYS.DOCUMENT_CHANGE);
+    context.subscriptions.push(parseDebouncer);
+
+    // Initial scan with cancellation support
     vscode.window.withProgress({
         location: vscode.ProgressLocation.Window,
         title: "Indexing Kanagawa Workspace..."
@@ -57,26 +63,58 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.languages.registerCodeLensProvider({ language: 'kanagawa' }, new KanagawaTypePeekCodeLensProvider(service, indexer)),
         vscode.languages.registerReferenceProvider('kanagawa', new KanagawaReferencesProvider(service, indexer)),
         vscode.languages.registerCallHierarchyProvider('kanagawa', new KanagawaCallHierarchyProvider(service, indexer)),
+        vscode.languages.registerRenameProvider('kanagawa', new KanagawaRenameProvider(service, indexer)),
         diagnosticsProvider,
         outlineFilters
     );
 
-    // Events
+    // Events - document lifecycle management
     context.subscriptions.push(
+        // Debounced document change handler - waits for typing to pause before parsing
         vscode.workspace.onDidChangeTextDocument((event: vscode.TextDocumentChangeEvent) => {
             if (event.document.languageId === 'kanagawa') {
-                // console.log('Kanagawa: Document changed:', event.document.uri.toString());
-                service.parse(event.document);
-                diagnosticsProvider.updateDiagnostics(event.document);
+                const uri = event.document.uri.toString();
+                const contentChanges = event.contentChanges;
+                
+                // Debounce parsing and diagnostics to avoid excessive processing during rapid typing
+                parseDebouncer.debounce(uri, async () => {
+                    // Verify document is still open (it could have been closed during the delay)
+                    if (!event.document.isClosed) {
+                        // Use incremental parsing when content changes are available
+                        await service.parse(event.document, contentChanges);
+                        await diagnosticsProvider.updateDiagnostics(event.document);
+                    }
+                });
             }
         }),
-        vscode.workspace.onDidOpenTextDocument((doc: vscode.TextDocument) => {
+
+        // Document open handler - parse immediately for initial analysis
+        vscode.workspace.onDidOpenTextDocument(async (doc: vscode.TextDocument) => {
             if (doc.languageId === 'kanagawa') {
                 console.log('Kanagawa: Document opened:', doc.uri.toString());
-                service.parse(doc);
-                diagnosticsProvider.updateDiagnostics(doc);
+                await service.parse(doc);
+                await diagnosticsProvider.updateDiagnostics(doc);
             }
         }),
+
+        // Document close handler - cleanup resources to prevent memory leaks
+        vscode.workspace.onDidCloseTextDocument((doc: vscode.TextDocument) => {
+            if (doc.languageId === 'kanagawa') {
+                const uri = doc.uri.toString();
+                console.log('Kanagawa: Document closed:', uri);
+                
+                // Cancel any pending debounced operations for this document
+                parseDebouncer.cancel(uri);
+                
+                // Remove cached parse tree
+                service.remove(doc);
+                
+                // Clear diagnostics for closed document
+                diagnosticsProvider.clearDiagnostics(doc);
+            }
+        }),
+
+        // Document save handler - update the workspace index
         vscode.workspace.onDidSaveTextDocument((doc: vscode.TextDocument) => {
             if (doc.languageId === 'kanagawa') {
                 console.log('Kanagawa: Document saved, updating index:', doc.uri.toString());
@@ -87,8 +125,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Parse currently active editor
     if (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document.languageId === 'kanagawa') {
-        service.parse(vscode.window.activeTextEditor.document);
-        diagnosticsProvider.updateDiagnostics(vscode.window.activeTextEditor.document);
+        await service.parse(vscode.window.activeTextEditor.document);
+        await diagnosticsProvider.updateDiagnostics(vscode.window.activeTextEditor.document);
     }
 
     // Debug Command

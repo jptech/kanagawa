@@ -21,7 +21,7 @@ export class KanagawaSignatureHelpProvider implements vscode.SignatureHelpProvid
         token: vscode.CancellationToken,
         context: vscode.SignatureHelpContext
     ): Promise<vscode.SignatureHelp | undefined> {
-        const tree = this.service.getTree(document);
+        const tree = this.service.getTree(document) ?? await this.service.parse(document);
         if (!tree) { return undefined; }
 
         const node = tree.rootNode.descendantForPosition({
