@@ -5,6 +5,17 @@ import { QueryManager } from '../service/query';
 import { OutlineFilterManager, snapshotContainsCategory, snapshotMatchesPrefix } from '../service/outlineFilters';
 import { SymbolCategory } from '../service/indexer';
 
+interface SymbolData {
+    name: string;
+    kind: vscode.SymbolKind;
+    detail: string;
+    category: SymbolCategory;
+    range: vscode.Range;
+    selectionRange: vscode.Range;
+    templateParams?: string;
+    children: SymbolData[];
+}
+
 export class KanagawaDocumentSymbolProvider implements vscode.DocumentSymbolProvider {
     constructor(
         private service: TreeSitterService,
@@ -25,61 +36,72 @@ export class KanagawaDocumentSymbolProvider implements vscode.DocumentSymbolProv
         }
 
         const captures = this.service.query(tree.rootNode, queryString);
-        const symbols: vscode.DocumentSymbol[] = [];
-
-        // This is a flat list. For a tree structure, we need to handle nesting.
-        // Tree-sitter captures are flat.
-        // A simple approach is to create symbols and then treeify them based on ranges,
-        // or just return a flat list if the UI handles it (VS Code prefers tree).
         
-        // For simplicity in this version, we return a flat list (VS Code will show them, but not nested).
-        // To do nesting, we would need to check parent-child relationships.
+        // Build hierarchical symbol tree from captures
+        const rootSymbols = this.buildSymbolTree(captures, tree.rootNode);
+        
+        // Apply filters and convert to VS Code symbols
+        const snapshot = this.filters.getFilters();
+        return this.filterAndConvertSymbols(rootSymbols, snapshot);
+    }
 
-        // Group captures by definition node
-        const definitionMap = new Map<Parser.SyntaxNode, { kind: vscode.SymbolKind; detail: string; category: SymbolCategory; nameNode?: Parser.SyntaxNode }>();
+    /**
+     * Builds a hierarchical tree of symbols from query captures.
+     * Symbols are nested based on their AST relationships.
+     */
+    private buildSymbolTree(captures: Parser.QueryCapture[], rootNode: Parser.SyntaxNode): SymbolData[] {
+        // First pass: identify definition nodes and their metadata
+        const definitionMap = new Map<number, { 
+            node: Parser.SyntaxNode;
+            kind: vscode.SymbolKind; 
+            detail: string; 
+            category: SymbolCategory; 
+            nameNode?: Parser.SyntaxNode;
+        }>();
         
         for (const capture of captures) {
             const node = capture.node;
+            const nodeId = node.id;
             
             switch (capture.name) {
                 case 'module':
-                    definitionMap.set(node, { kind: vscode.SymbolKind.Module, detail: 'module', category: 'module' });
+                    definitionMap.set(nodeId, { node, kind: vscode.SymbolKind.Module, detail: 'module', category: 'module' });
                     break;
                 case 'class':
-                    definitionMap.set(node, { kind: vscode.SymbolKind.Class, detail: 'class', category: 'class' });
+                    definitionMap.set(nodeId, { node, kind: vscode.SymbolKind.Class, detail: 'class', category: 'class' });
                     break;
                 case 'struct':
-                    definitionMap.set(node, { kind: vscode.SymbolKind.Struct, detail: 'struct', category: 'struct' });
+                    definitionMap.set(nodeId, { node, kind: vscode.SymbolKind.Struct, detail: 'struct', category: 'struct' });
                     break;
                 case 'union':
-                    definitionMap.set(node, { kind: vscode.SymbolKind.Struct, detail: 'union', category: 'union' });
+                    definitionMap.set(nodeId, { node, kind: vscode.SymbolKind.Struct, detail: 'union', category: 'union' });
                     break;
                 case 'enum':
-                    definitionMap.set(node, { kind: vscode.SymbolKind.Enum, detail: 'enum', category: 'enum' });
+                    definitionMap.set(nodeId, { node, kind: vscode.SymbolKind.Enum, detail: 'enum', category: 'enum' });
                     break;
                 case 'function':
-                    definitionMap.set(node, { kind: vscode.SymbolKind.Function, detail: 'function', category: 'function' });
+                    definitionMap.set(nodeId, { node, kind: vscode.SymbolKind.Function, detail: 'function', category: 'function' });
                     break;
                 case 'alias':
-                    definitionMap.set(node, { kind: vscode.SymbolKind.TypeParameter, detail: 'type', category: 'alias' });
+                    definitionMap.set(nodeId, { node, kind: vscode.SymbolKind.TypeParameter, detail: 'type', category: 'alias' });
                     break;
                 case 'variable':
-                    definitionMap.set(node, { kind: vscode.SymbolKind.Variable, detail: 'variable', category: 'variable' });
+                    definitionMap.set(nodeId, { node, kind: vscode.SymbolKind.Variable, detail: 'variable', category: 'variable' });
                     break;
                 case 'member':
-                    definitionMap.set(node, { kind: vscode.SymbolKind.Field, detail: 'field', category: 'member' });
+                    definitionMap.set(nodeId, { node, kind: vscode.SymbolKind.Field, detail: 'field', category: 'member' });
                     break;
                 case 'constant':
-                    definitionMap.set(node, { kind: vscode.SymbolKind.EnumMember, detail: 'constant', category: 'constant' });
+                    definitionMap.set(nodeId, { node, kind: vscode.SymbolKind.EnumMember, detail: 'constant', category: 'constant' });
                     break;
                     
-                // Name captures
+                // Name captures - associate with parent definition
                 case 'name': {
-                    // Find the parent definition
-                    let parent = node.parent;
+                    let parent = capture.node.parent;
                     while (parent) {
-                        if (definitionMap.has(parent)) {
-                            definitionMap.get(parent)!.nameNode = node;
+                        const def = definitionMap.get(parent.id);
+                        if (def) {
+                            def.nameNode = capture.node;
                             break;
                         }
                         parent = parent.parent;
@@ -89,41 +111,187 @@ export class KanagawaDocumentSymbolProvider implements vscode.DocumentSymbolProv
             }
         }
         
-        // Create symbols from the definition map
-        const snapshot = this.filters.getFilters();
-
-        for (const [defNode, info] of definitionMap.entries()) {
+        // Second pass: build tree structure by finding parent-child relationships
+        const symbolDataMap = new Map<number, SymbolData>();
+        const rootSymbols: SymbolData[] = [];
+        
+        for (const [nodeId, info] of definitionMap.entries()) {
             if (!info.nameNode) { continue; }
-
-            if (!snapshotContainsCategory(snapshot, info.category)) {
-                continue;
+            
+            const templateParams = this.extractTemplateParameters(info.node);
+            const displayName = templateParams 
+                ? `${info.nameNode.text}<${templateParams}>`
+                : info.nameNode.text;
+            
+            const symbolData: SymbolData = {
+                name: displayName,
+                kind: info.kind,
+                detail: info.detail,
+                category: info.category,
+                range: new vscode.Range(
+                    new vscode.Position(info.node.startPosition.row, info.node.startPosition.column),
+                    new vscode.Position(info.node.endPosition.row, info.node.endPosition.column)
+                ),
+                selectionRange: new vscode.Range(
+                    new vscode.Position(info.nameNode.startPosition.row, info.nameNode.startPosition.column),
+                    new vscode.Position(info.nameNode.endPosition.row, info.nameNode.endPosition.column)
+                ),
+                templateParams,
+                children: []
+            };
+            
+            symbolDataMap.set(nodeId, symbolData);
+        }
+        
+        // Build parent-child relationships
+        for (const [nodeId, info] of definitionMap.entries()) {
+            const symbolData = symbolDataMap.get(nodeId);
+            if (!symbolData) { continue; }
+            
+            // Find parent definition
+            let parentNode = info.node.parent;
+            let parentSymbol: SymbolData | undefined;
+            
+            while (parentNode) {
+                parentSymbol = symbolDataMap.get(parentNode.id);
+                if (parentSymbol) {
+                    break;
+                }
+                parentNode = parentNode.parent;
             }
+            
+            if (parentSymbol) {
+                parentSymbol.children.push(symbolData);
+            } else {
+                rootSymbols.push(symbolData);
+            }
+        }
+        
+        // Sort children by position
+        const sortByPosition = (a: SymbolData, b: SymbolData) => 
+            a.range.start.line - b.range.start.line || a.range.start.character - b.range.start.character;
+        
+        const sortRecursively = (symbols: SymbolData[]) => {
+            symbols.sort(sortByPosition);
+            for (const s of symbols) {
+                sortRecursively(s.children);
+            }
+        };
+        
+        sortRecursively(rootSymbols);
+        
+        return rootSymbols;
+    }
 
-            const modulePath = this.computeModulePath(defNode);
-            if (!snapshotMatchesPrefix(snapshot, modulePath)) {
+    /**
+     * Extracts template parameters from a definition node.
+     * Handles template wrappers (class_template, function_template, etc.)
+     * Returns string like "T, N" or undefined if not a template.
+     * 
+     * IMPORTANT: Only returns template params if this node is the DIRECT
+     * definition inside the template wrapper. Nested symbols (like members
+     * inside a template class) should NOT get the class's template params.
+     */
+    private extractTemplateParameters(node: Parser.SyntaxNode): string | undefined {
+        // Check if node is wrapped in a template
+        const parent = node.parent;
+        if (!parent) { return undefined; }
+        
+        const templateWrappers = [
+            'class_template', 'struct_template', 'union_template',
+            'function_template', 'alias_template', 'enum_template'
+        ];
+        
+        let templateNode: Parser.SyntaxNode | undefined;
+        
+        // Only consider immediate parent or grandparent as template wrapper
+        // The node must be the primary definition of the template, not a nested member
+        if (templateWrappers.includes(parent.type)) {
+            // node is direct child of template wrapper
+            templateNode = parent;
+        } else if (parent.parent && templateWrappers.includes(parent.parent.type)) {
+            // node is grandchild (e.g., class_decl inside class_template)
+            // But we need to verify this node is THE definition, not a member inside it
+            // Check that there's no class/struct body between us and the template
+            if (!this.isNestedInsideClassBody(node, parent.parent)) {
+                templateNode = parent.parent;
+            }
+        }
+        
+        if (!templateNode) { return undefined; }
+        
+        // Find template_params node
+        const paramsNode = templateNode.children.find(c => c.type === 'template_params');
+        if (!paramsNode) { return undefined; }
+        
+        // Extract parameter names
+        const paramNames: string[] = [];
+        for (const child of paramsNode.namedChildren) {
+            if (child.type === 'template_param') {
+                const nameNode = child.children.find(c => c.type === 'identifier');
+                if (nameNode) {
+                    paramNames.push(nameNode.text);
+                }
+            }
+        }
+        
+        return paramNames.length > 0 ? paramNames.join(', ') : undefined;
+    }
+
+    /**
+     * Checks if a node is nested inside a class/struct body (member_decl_list).
+     * Used to prevent attaching template params to nested members.
+     */
+    private isNestedInsideClassBody(node: Parser.SyntaxNode, templateNode: Parser.SyntaxNode): boolean {
+        let current: Parser.SyntaxNode | null = node.parent;
+        while (current && current !== templateNode) {
+            // If we hit a member list or block before reaching the template, 
+            // this node is a nested member, not the primary definition
+            if (current.type === 'member_decl_list' || 
+                current.type === 'class_body' || 
+                current.type === 'struct_body' ||
+                current.type === 'block') {
+                return true;
+            }
+            current = current.parent;
+        }
+        return false;
+    }
+
+    /**
+     * Filters symbols by category and module prefix, then converts to VS Code DocumentSymbol.
+     */
+    private filterAndConvertSymbols(
+        symbols: SymbolData[],
+        snapshot: ReturnType<OutlineFilterManager['getFilters']>
+    ): vscode.DocumentSymbol[] {
+        const result: vscode.DocumentSymbol[] = [];
+        
+        for (const symbol of symbols) {
+            // Check category filter
+            if (!snapshotContainsCategory(snapshot, symbol.category)) {
+                // Even if filtered, process children in case they match
+                const childSymbols = this.filterAndConvertSymbols(symbol.children, snapshot);
+                result.push(...childSymbols);
                 continue;
             }
             
-            const name = info.nameNode.text;
-            const range = new vscode.Range(
-                new vscode.Position(defNode.startPosition.row, defNode.startPosition.column),
-                new vscode.Position(defNode.endPosition.row, defNode.endPosition.column)
+            // Convert to VS Code DocumentSymbol
+            const vsSymbol = new vscode.DocumentSymbol(
+                symbol.name,
+                symbol.detail,
+                symbol.kind,
+                symbol.range,
+                symbol.selectionRange
             );
-            const selectionRange = new vscode.Range(
-                new vscode.Position(info.nameNode.startPosition.row, info.nameNode.startPosition.column),
-                new vscode.Position(info.nameNode.endPosition.row, info.nameNode.endPosition.column)
-            );
-
-            symbols.push(new vscode.DocumentSymbol(
-                name,
-                info.detail,
-                info.kind,
-                range,
-                selectionRange
-            ));
+            
+            // Process children recursively
+            vsSymbol.children = this.filterAndConvertSymbols(symbol.children, snapshot);
+            
+            result.push(vsSymbol);
         }
-
-        return symbols;
+        
+        return result;
     }
 
     private computeModulePath(node: Parser.SyntaxNode): string | undefined {

@@ -21,6 +21,12 @@ export class KanagawaTypePeekCodeLensProvider implements vscode.CodeLensProvider
         document: vscode.TextDocument,
         token: vscode.CancellationToken
     ): Promise<vscode.CodeLens[]> {
+        // Check if typePeek is enabled (disabled by default since inlay hints show same info)
+        const config = vscode.workspace.getConfiguration('kanagawa.typePeek');
+        if (!config.get<boolean>('enabled', false)) {
+            return [];
+        }
+
         const tree = this.treeService.getTree(document) ?? await this.treeService.parse(document);
         if (!tree) { return []; }
 

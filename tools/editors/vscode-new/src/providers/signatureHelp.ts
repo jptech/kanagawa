@@ -9,6 +9,15 @@ interface CallContext {
     callee: Parser.SyntaxNode;
 }
 
+/** Parsed parameter information */
+interface ParsedParameter {
+    label: string;         // Full parameter text: "uint32 size"
+    name: string;          // Just the name: "size"
+    type?: string;         // Just the type: "uint32"
+    defaultValue?: string; // Default value if any: "0"
+    documentation?: string; // Doc comment for this param
+}
+
 export class KanagawaSignatureHelpProvider implements vscode.SignatureHelpProvider {
     constructor(
         private readonly service: TreeSitterService,
@@ -22,18 +31,51 @@ export class KanagawaSignatureHelpProvider implements vscode.SignatureHelpProvid
         context: vscode.SignatureHelpContext
     ): Promise<vscode.SignatureHelp | undefined> {
         const tree = this.service.getTree(document) ?? await this.service.parse(document);
-        if (!tree) { return undefined; }
+        if (!tree) { 
+            // If we have previous signature help and this is a retrigger, preserve it
+            if (context.isRetrigger && context.activeSignatureHelp) {
+                return this.updateActiveParameterOnly(document, position, context.activeSignatureHelp);
+            }
+            return undefined; 
+        }
 
         const node = tree.rootNode.descendantForPosition({
             row: position.line,
             column: position.character
         });
 
-        const callContext = this.findCallContext(node);
-        if (!callContext) { return undefined; }
+        // Try multiple strategies to find the call context
+        let callContext = this.findCallContext(node);
+        
+        // If not found, try searching from a slightly earlier position
+        // This helps when cursor is right after '(' or ','
+        if (!callContext && position.character > 0) {
+            const prevNode = tree.rootNode.descendantForPosition({
+                row: position.line,
+                column: position.character - 1
+            });
+            callContext = this.findCallContext(prevNode);
+        }
+        
+        // Try text-based fallback for incomplete parses
+        if (!callContext) {
+            callContext = this.findCallContextFromText(document, position, tree);
+        }
+        
+        // If still no call context but we have active signature help, preserve it with updated parameter
+        // This handles cases where AST is temporarily broken while typing
+        if (!callContext) { 
+            if (context.isRetrigger && context.activeSignatureHelp) {
+                return this.updateActiveParameterOnly(document, position, context.activeSignatureHelp);
+            }
+            return undefined; 
+        }
 
         const offset = document.offsetAt(position);
-        const activeParameter = this.computeActiveParameter(document, callContext.argumentList, offset);
+        
+        // Compute active parameter - prefer text-based counting for robustness
+        const activeParameter = this.computeActiveParameterFromText(document, position) 
+            ?? this.computeActiveParameter(document, callContext.argumentList, offset);
 
         const candidates = await this.resolveSignatures(document, callContext);
         if (!candidates.length) { return undefined; }
@@ -58,21 +100,290 @@ export class KanagawaSignatureHelpProvider implements vscode.SignatureHelpProvid
         return signatureHelp;
     }
 
+    /**
+     * Compute active parameter by counting commas in the text from the opening paren to cursor.
+     * This is more robust than AST-based counting when the tree is incomplete.
+     */
+    private computeActiveParameterFromText(
+        document: vscode.TextDocument,
+        position: vscode.Position
+    ): number | undefined {
+        // Get text from start of document to cursor (or a reasonable chunk)
+        const startLine = Math.max(0, position.line - 20); // Look back up to 20 lines
+        const textRange = new vscode.Range(startLine, 0, position.line, position.character);
+        const text = document.getText(textRange);
+        
+        // Find the matching opening parenthesis by scanning backwards
+        let parenDepth = 0;
+        let angleDepth = 0;
+        let bracketDepth = 0;
+        let braceDepth = 0;
+        let openParenIndex = -1;
+        
+        for (let i = text.length - 1; i >= 0; i--) {
+            const ch = text[i];
+            switch (ch) {
+                case ')': parenDepth++; break;
+                case '(':
+                    if (parenDepth === 0) {
+                        openParenIndex = i;
+                    } else {
+                        parenDepth--;
+                    }
+                    break;
+                case '>': angleDepth++; break;
+                case '<': angleDepth = Math.max(0, angleDepth - 1); break;
+                case ']': bracketDepth++; break;
+                case '[': bracketDepth = Math.max(0, bracketDepth - 1); break;
+                case '}': braceDepth++; break;
+                case '{': braceDepth = Math.max(0, braceDepth - 1); break;
+            }
+            if (openParenIndex >= 0) { break; }
+        }
+        
+        if (openParenIndex < 0) { return undefined; }
+        
+        // Count commas from opening paren to cursor, respecting nesting
+        const argsText = text.substring(openParenIndex + 1); // Text after '('
+        let commaCount = 0;
+        parenDepth = 0;
+        angleDepth = 0;
+        bracketDepth = 0;
+        braceDepth = 0;
+        let inString = false;
+        let stringChar = '';
+        
+        for (let i = 0; i < argsText.length; i++) {
+            const ch = argsText[i];
+            const prevCh = i > 0 ? argsText[i - 1] : '';
+            
+            // Handle string literals
+            if ((ch === '"' || ch === "'") && prevCh !== '\\') {
+                if (!inString) {
+                    inString = true;
+                    stringChar = ch;
+                } else if (ch === stringChar) {
+                    inString = false;
+                }
+                continue;
+            }
+            
+            if (inString) { continue; }
+            
+            switch (ch) {
+                case '(': parenDepth++; break;
+                case ')': parenDepth--; break;
+                case '<': angleDepth++; break;
+                case '>': angleDepth--; break;
+                case '[': bracketDepth++; break;
+                case ']': bracketDepth--; break;
+                case '{': braceDepth++; break;
+                case '}': braceDepth--; break;
+                case ',':
+                    // Only count commas at the top level (not nested in parens, angles, etc.)
+                    if (parenDepth === 0 && angleDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
+                        commaCount++;
+                    }
+                    break;
+            }
+        }
+        
+        return commaCount;
+    }
+
+    /**
+     * Preserves existing signature help but updates the active parameter.
+     * Used when AST is temporarily broken but we want to keep showing signature help.
+     */
+    private updateActiveParameterOnly(
+        document: vscode.TextDocument,
+        position: vscode.Position,
+        existingHelp: vscode.SignatureHelp
+    ): vscode.SignatureHelp | undefined {
+        // First, check if we're still inside a function call
+        // by verifying there's an unclosed parenthesis before the cursor
+        if (!this.isInsideFunctionCall(document, position)) {
+            return undefined; // Dismiss signature help
+        }
+        
+        const activeParameter = this.computeActiveParameterFromText(document, position) ?? 0;
+        
+        const updatedHelp = new vscode.SignatureHelp();
+        updatedHelp.signatures = existingHelp.signatures;
+        updatedHelp.activeSignature = existingHelp.activeSignature;
+        
+        // Update active parameter within bounds
+        const activeSignature = existingHelp.signatures[existingHelp.activeSignature];
+        if (activeSignature) {
+            const paramCount = activeSignature.parameters.length;
+            updatedHelp.activeParameter = paramCount === 0
+                ? 0
+                : Math.min(activeParameter, Math.max(0, paramCount - 1));
+        } else {
+            updatedHelp.activeParameter = activeParameter;
+        }
+        
+        return updatedHelp;
+    }
+
+    /**
+     * Checks if the cursor is inside a function call (has unclosed opening parenthesis).
+     */
+    private isInsideFunctionCall(
+        document: vscode.TextDocument,
+        position: vscode.Position
+    ): boolean {
+        const startLine = Math.max(0, position.line - 20);
+        const textRange = new vscode.Range(startLine, 0, position.line, position.character);
+        const text = document.getText(textRange);
+        
+        let parenDepth = 0;
+        let inString = false;
+        let stringChar = '';
+        
+        for (let i = 0; i < text.length; i++) {
+            const ch = text[i];
+            const prevCh = i > 0 ? text[i - 1] : '';
+            
+            // Handle string literals
+            if ((ch === '"' || ch === "'") && prevCh !== '\\') {
+                if (!inString) {
+                    inString = true;
+                    stringChar = ch;
+                } else if (ch === stringChar) {
+                    inString = false;
+                }
+                continue;
+            }
+            
+            if (inString) { continue; }
+            
+            if (ch === '(') { parenDepth++; }
+            else if (ch === ')') { parenDepth--; }
+        }
+        
+        // If parenDepth > 0, we have unclosed parentheses (inside a call)
+        return parenDepth > 0;
+    }
+
     private findCallContext(node: Parser.SyntaxNode | null): CallContext | undefined {
         let current: Parser.SyntaxNode | null = node;
         while (current) {
+            // Direct argument_list match
             if (current.type === 'argument_list') {
                 const callExpression = current.parent;
-                if (!callExpression || callExpression.type !== 'call_expression') {
-                    return undefined;
+                if (callExpression && callExpression.type === 'call_expression') {
+                    const callee = this.getCalleeNode(callExpression);
+                    if (callee) {
+                        return { callExpression, argumentList: current, callee };
+                    }
                 }
-                const callee = this.getCalleeNode(callExpression);
-                if (!callee) { return undefined; }
-                return { callExpression, argumentList: current, callee };
             }
+            
+            // Check if we're in a call_expression (handles incomplete parses)
+            if (current.type === 'call_expression') {
+                const callee = this.getCalleeNode(current);
+                const argList = current.children.find(c => c.type === 'argument_list');
+                if (callee && argList) {
+                    return { callExpression: current, argumentList: argList, callee };
+                }
+                // Even without argument_list, we might be right after the opening paren
+                if (callee) {
+                    // Create a synthetic range for the "argument list" from callee end to current end
+                    return { 
+                        callExpression: current, 
+                        argumentList: current, // Use call_expression as fallback
+                        callee 
+                    };
+                }
+            }
+            
             current = current.parent;
         }
         return undefined;
+    }
+
+    /**
+     * Text-based fallback to find call context when AST is incomplete.
+     * Scans backwards from cursor to find opening parenthesis and function name.
+     */
+    private findCallContextFromText(
+        document: vscode.TextDocument, 
+        position: vscode.Position,
+        tree: Parser.Tree
+    ): CallContext | undefined {
+        const lineText = document.lineAt(position.line).text;
+        const textBeforeCursor = lineText.substring(0, position.character);
+        
+        // Find the matching opening parenthesis
+        let parenDepth = 0;
+        let openParenIndex = -1;
+        
+        for (let i = textBeforeCursor.length - 1; i >= 0; i--) {
+            const ch = textBeforeCursor[i];
+            if (ch === ')') {
+                parenDepth++;
+            } else if (ch === '(') {
+                if (parenDepth === 0) {
+                    openParenIndex = i;
+                    break;
+                }
+                parenDepth--;
+            }
+        }
+        
+        if (openParenIndex < 0) { return undefined; }
+        
+        // Find the identifier/expression before the opening paren
+        // Skip whitespace
+        let identEnd = openParenIndex;
+        while (identEnd > 0 && /\s/.test(textBeforeCursor[identEnd - 1])) {
+            identEnd--;
+        }
+        
+        if (identEnd <= 0) { return undefined; }
+        
+        // Now find the AST node at the position just before the '('
+        const nodeBeforeParen = tree.rootNode.descendantForPosition({
+            row: position.line,
+            column: identEnd - 1
+        });
+        
+        if (!nodeBeforeParen) { return undefined; }
+        
+        // Walk up to find a call_expression or the callee itself
+        let callee: Parser.SyntaxNode | undefined;
+        let callExpr: Parser.SyntaxNode | undefined;
+        let argList: Parser.SyntaxNode | undefined;
+        
+        let current: Parser.SyntaxNode | null = nodeBeforeParen;
+        while (current) {
+            if (current.type === 'call_expression') {
+                callExpr = current;
+                callee = this.getCalleeNode(current);
+                argList = current.children.find(c => c.type === 'argument_list');
+                break;
+            }
+            // If we find an identifier or member_expression, it might be our callee
+            if (!callee && (current.type === 'identifier' || current.type === 'member_expression')) {
+                callee = current;
+            }
+            current = current.parent;
+        }
+        
+        if (!callee) { return undefined; }
+        
+        // If we found a callee but no call_expression, construct one
+        if (!callExpr) {
+            // Use the callee's parent as a best-effort call expression
+            callExpr = callee.parent ?? callee;
+        }
+        
+        return {
+            callExpression: callExpr,
+            argumentList: argList ?? callExpr,
+            callee
+        };
     }
 
     private getCalleeNode(callExpression: Parser.SyntaxNode): Parser.SyntaxNode | undefined {
@@ -129,6 +440,10 @@ export class KanagawaSignatureHelpProvider implements vscode.SignatureHelpProvid
         return Math.min(commas, args.length);
     }
 
+    /**
+     * Resolves function signatures for a call expression.
+     * Uses the same resolution logic as hover for consistency.
+     */
     private async resolveSignatures(
         document: vscode.TextDocument,
         callContext: CallContext
@@ -136,27 +451,77 @@ export class KanagawaSignatureHelpProvider implements vscode.SignatureHelpProvid
         const { callee } = callContext;
         let symbols: SymbolInfo[] = [];
 
+        // Try member expression first (obj.method())
         if (callee.type === 'member_expression') {
             const propertyNode = callee.namedChild(callee.namedChildCount - 1);
             if (propertyNode) {
                 const matches = await this.indexer.resolveMemberSymbol(document, propertyNode);
                 if (matches && matches.length > 0) {
-                    symbols = matches;
+                    // Filter to callable symbols
+                    symbols = matches.filter(sym => 
+                        sym.category === 'function' || 
+                        sym.category === 'method' ||
+                        sym.signature?.includes('(')
+                    );
                 }
             }
         }
 
+        // Try as free function or constructor using resolveWithContext (same as hover)
         if (!symbols.length) {
             const identifier = this.extractIdentifierNode(callee);
             if (identifier) {
                 const scopePath = this.indexer.getScopePathForNode(identifier);
+                
+                // Use resolveWithContext for consistent resolution with hover
                 const contextHint: SymbolContextHint = { kind: 'free' };
-                const resolved = this.indexer.resolveSymbols(identifier.text, scopePath, {
+                const resolution = this.indexer.resolveWithContext(identifier.text, scopePath, {
                     uri: document.uri,
-                    context: contextHint,
-                    limit: 5
+                    context: contextHint
                 });
-                symbols = resolved;
+                
+                // Collect primary and alternatives
+                const allCandidates: SymbolInfo[] = [];
+                if (resolution.primary) {
+                    allCandidates.push(resolution.primary);
+                }
+                allCandidates.push(...resolution.alternatives);
+                
+                // Filter to functions/methods that have signatures
+                symbols = allCandidates.filter(sym => 
+                    sym.category === 'function' || 
+                    sym.category === 'method' ||
+                    sym.signature?.includes('(')
+                );
+                
+                // If no functions found, it might be a constructor call (ClassName())
+                if (symbols.length === 0) {
+                    const typeSymbols = allCandidates.filter(sym => 
+                        sym.category === 'class' || 
+                        sym.category === 'struct'
+                    );
+                    
+                    if (typeSymbols.length > 0) {
+                        // Look for constructor methods in the class
+                        for (const typeSym of typeSymbols) {
+                            const members = this.indexer.getMembersForType(typeSym.name, {
+                                includeMethods: true,
+                                includeFields: false
+                            });
+                            const constructors = members.filter(m => 
+                                m.name === typeSym.name || 
+                                m.name === 'constructor' ||
+                                m.name === 'new'
+                            );
+                            if (constructors.length > 0) {
+                                symbols.push(...constructors);
+                            } else {
+                                // No explicit constructor, use the class itself with generic signature
+                                symbols.push(typeSym);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -164,10 +529,13 @@ export class KanagawaSignatureHelpProvider implements vscode.SignatureHelpProvid
             return [];
         }
 
-        return symbols.map(symbol => ({
-            symbol,
-            signature: this.convertToSignatureInformation(symbol)
-        }));
+        // Convert symbols to signature information
+        return symbols
+            .filter(symbol => symbol.signature || symbol.name) // Must have something to show
+            .map(symbol => ({
+                symbol,
+                signature: this.convertToSignatureInformation(symbol)
+            }));
     }
 
     private extractIdentifierNode(node: Parser.SyntaxNode): Parser.SyntaxNode | undefined {
@@ -188,10 +556,138 @@ export class KanagawaSignatureHelpProvider implements vscode.SignatureHelpProvid
     private convertToSignatureInformation(symbol: SymbolInfo): vscode.SignatureInformation {
         const fallback = `${symbol.detail ?? ''} ${symbol.name}`.trim();
         const label = (symbol.signature ?? fallback) || symbol.name;
-        const signatureInfo = new vscode.SignatureInformation(label, symbol.docMarkdown);
-        const parameters = this.parseParametersFromSignature(label);
-        signatureInfo.parameters = parameters.map(paramLabel => new vscode.ParameterInformation(paramLabel.trim()));
+        
+        // Build documentation with return type
+        const docParts: string[] = [];
+        if (symbol.docMarkdown) {
+            docParts.push(symbol.docMarkdown);
+        }
+        if (symbol.typeHint && symbol.typeHint !== 'void') {
+            docParts.push(`\n\n**Returns:** \`${symbol.typeHint}\``);
+        }
+        
+        const signatureInfo = new vscode.SignatureInformation(
+            label, 
+            docParts.length > 0 ? new vscode.MarkdownString(docParts.join('')) : undefined
+        );
+        
+        // Parse parameters with enhanced info
+        const parameters = this.parseParametersWithDetails(label, symbol.docMarkdown);
+        signatureInfo.parameters = parameters.map(param => {
+            const paramInfo = new vscode.ParameterInformation(param.label);
+            
+            // Build parameter documentation
+            const paramDocParts: string[] = [];
+            if (param.type) {
+                paramDocParts.push(`**Type:** \`${param.type}\``);
+            }
+            if (param.defaultValue) {
+                paramDocParts.push(`**Default:** \`${param.defaultValue}\``);
+            }
+            if (param.documentation) {
+                paramDocParts.push(param.documentation);
+            }
+            
+            if (paramDocParts.length > 0) {
+                paramInfo.documentation = new vscode.MarkdownString(paramDocParts.join('\n\n'));
+            }
+            
+            return paramInfo;
+        });
+        
         return signatureInfo;
+    }
+
+    /**
+     * Parses parameters from signature with enhanced detail extraction.
+     */
+    private parseParametersWithDetails(signature: string, docMarkdown?: string): ParsedParameter[] {
+        const rawParams = this.parseParametersFromSignature(signature);
+        const paramDocs = this.extractParamDocs(docMarkdown);
+        
+        return rawParams.map(paramText => {
+            const parsed = this.parseParameterDetails(paramText);
+            
+            // Try to find documentation for this parameter
+            if (parsed.name && paramDocs.has(parsed.name)) {
+                parsed.documentation = paramDocs.get(parsed.name);
+            }
+            
+            return parsed;
+        });
+    }
+
+    /**
+     * Parses a single parameter string into its components.
+     */
+    private parseParameterDetails(paramText: string): ParsedParameter {
+        const trimmed = paramText.trim();
+        
+        // Check for default value
+        let defaultValue: string | undefined;
+        let mainPart = trimmed;
+        const defaultMatch = trimmed.match(/^(.+?)\s*=\s*(.+)$/);
+        if (defaultMatch) {
+            mainPart = defaultMatch[1].trim();
+            defaultValue = defaultMatch[2].trim();
+        }
+        
+        // Extract type and name
+        // Patterns: "Type name", "Type& name", "Type* name", "const Type& name"
+        const parts = mainPart.split(/\s+/);
+        let name = parts[parts.length - 1] || '';
+        let type: string | undefined;
+        
+        // Remove ref/ptr markers from name
+        name = name.replace(/^[&*]+|[&*]+$/g, '');
+        
+        if (parts.length > 1) {
+            // Everything except the last part is the type
+            type = parts.slice(0, -1).join(' ');
+            // Also include any ref/ptr markers that were on the name
+            const markers = (parts[parts.length - 1] || '').match(/^[&*]+/)?.[0] ?? '';
+            if (markers) {
+                type += markers;
+            }
+        }
+        
+        return {
+            label: trimmed,
+            name,
+            type,
+            defaultValue
+        };
+    }
+
+    /**
+     * Extracts @param documentation from markdown doc comments.
+     */
+    private extractParamDocs(docMarkdown?: string): Map<string, string> {
+        const result = new Map<string, string>();
+        if (!docMarkdown) { return result; }
+        
+        // Match @param patterns: @param name description
+        // Also handles: @param {type} name description
+        const paramRegex = /@param\s+(?:\{[^}]+\}\s+)?(\w+)\s+([^\n@]+)/g;
+        let match;
+        
+        while ((match = paramRegex.exec(docMarkdown)) !== null) {
+            const name = match[1];
+            const description = match[2].trim();
+            result.set(name, description);
+        }
+        
+        // Also try to match "param_name: description" format from line doc comments
+        const lineParamRegex = /^\s*(\w+):\s+(.+)$/gm;
+        while ((match = lineParamRegex.exec(docMarkdown)) !== null) {
+            const name = match[1];
+            // Only set if not already captured by @param
+            if (!result.has(name)) {
+                result.set(name, match[2].trim());
+            }
+        }
+        
+        return result;
     }
 
     private parseParametersFromSignature(signature: string): string[] {

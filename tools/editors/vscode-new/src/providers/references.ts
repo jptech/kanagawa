@@ -24,6 +24,14 @@ interface CallCandidate {
     callExpression: Parser.SyntaxNode;
 }
 
+/** Extended reference info with context */
+interface ReferenceInfo {
+    location: vscode.Location;
+    isDefinition: boolean;
+    isWrite: boolean;
+    context?: string;  // Surrounding code snippet
+}
+
 function isSameLocation(a: SymbolInfo, b: SymbolInfo): boolean {
     return a.uri.toString() === b.uri.toString() &&
         a.range.start.line === b.range.start.line &&
@@ -103,22 +111,121 @@ export class KanagawaReferencesProvider implements vscode.ReferenceProvider {
         if (!identifier) { return undefined; }
 
         const targets = await this.resolveTargets(document, identifier);
-        if (!targets.length) { return undefined; }
+        if (!targets.length) { 
+            // Fall back to simple text search for non-indexed symbols
+            return this.findReferencesWorkspaceWide(identifier.text, context.includeDeclaration, token);
+        }
 
         const includeDeclaration = context.includeDeclaration ?? false;
         const results: vscode.Location[] = [];
+        
+        // Include declarations
         if (includeDeclaration) {
             for (const target of targets) {
                 results.push(new vscode.Location(target.symbol.uri, target.symbol.range));
             }
         }
 
-        const treeForDoc = this.service.getTree(document) ?? await this.service.parse(document);
-        if (!treeForDoc) { return includeDeclaration ? results : undefined; }
-        const references = await this.collectReferencesInDocument(document, treeForDoc, targets, token);
-        results.push(...references);
+        // Search across all indexed files
+        const indexedUris = this.indexer.getIndexedUris();
+        
+        for (const uri of indexedUris) {
+            if (token.isCancellationRequested) { break; }
+            
+            try {
+                const doc = await vscode.workspace.openTextDocument(uri);
+                const treeForDoc = this.service.getTree(doc) ?? await this.service.parse(doc);
+                if (!treeForDoc) { continue; }
+                
+                const references = await this.collectReferencesInDocument(doc, treeForDoc, targets, token);
+                results.push(...references);
+            } catch (e) {
+                // Ignore files that can't be opened
+            }
+        }
 
-        return results;
+        // Deduplicate results
+        return this.deduplicateLocations(results);
+    }
+
+    /**
+     * Simple workspace-wide text search for symbols that couldn't be resolved.
+     */
+    private async findReferencesWorkspaceWide(
+        name: string,
+        includeDeclaration: boolean,
+        token: vscode.CancellationToken
+    ): Promise<vscode.Location[]> {
+        const results: vscode.Location[] = [];
+        const indexedUris = this.indexer.getIndexedUris();
+        
+        // Also search for declarations if requested
+        if (includeDeclaration) {
+            const symbols = this.indexer.getSymbols(name);
+            if (symbols) {
+                for (const sym of symbols) {
+                    results.push(new vscode.Location(sym.uri, sym.range));
+                }
+            }
+        }
+        
+        // Search all files for identifier usages
+        for (const uri of indexedUris) {
+            if (token.isCancellationRequested) { break; }
+            
+            try {
+                const doc = await vscode.workspace.openTextDocument(uri);
+                const tree = this.service.getTree(doc) ?? await this.service.parse(doc);
+                if (!tree) { continue; }
+                
+                // Find all identifier nodes matching the name
+                const matches = this.findIdentifierMatches(tree.rootNode, name);
+                for (const node of matches) {
+                    results.push(new vscode.Location(uri, nodeToRange(node)));
+                }
+            } catch (e) {
+                // Ignore files that can't be opened
+            }
+        }
+        
+        return this.deduplicateLocations(results);
+    }
+
+    /**
+     * Finds all identifier nodes in the AST that match the given name.
+     */
+    private findIdentifierMatches(root: Parser.SyntaxNode, name: string): Parser.SyntaxNode[] {
+        const matches: Parser.SyntaxNode[] = [];
+        
+        const visit = (node: Parser.SyntaxNode) => {
+            if ((node.type === 'identifier' || node.type === 'type_identifier') && node.text === name) {
+                matches.push(node);
+            }
+            for (const child of node.children) {
+                visit(child);
+            }
+        };
+        
+        visit(root);
+        return matches;
+    }
+
+    /**
+     * Removes duplicate locations from the results.
+     */
+    private deduplicateLocations(locations: vscode.Location[]): vscode.Location[] {
+        const seen = new Set<string>();
+        const unique: vscode.Location[] = [];
+        
+        for (const loc of locations) {
+            const key = `${loc.uri.toString()}:${loc.range.start.line}:${loc.range.start.character}`;
+            if (!seen.has(key)) {
+                seen.add(key);
+                unique.push(loc);
+            }
+        }
+        
+        return unique;
     }
 
     private async resolveTargets(document: vscode.TextDocument, identifier: Parser.SyntaxNode): Promise<ReferenceTarget[]> {

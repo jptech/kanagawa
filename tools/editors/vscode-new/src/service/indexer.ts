@@ -198,6 +198,7 @@ export class WorkspaceIndexer {
             this.memberCache.clear();
             this.typeInferenceCache.clear();
             this.aliasMap.clear();
+            this.indexedFiles.clear();
             this.clearTemplateCaches();
 
             if (effectiveToken.isCancellationRequested) { return; }
@@ -215,7 +216,31 @@ export class WorkspaceIndexer {
 
             const files = await this.collectSourceFiles(importConfiguration.importPaths);
             
+            // Pre-load all documents in parallel (I/O bound)
+            // This is much faster than loading one-by-one during indexing
+            const preloadEndTiming = perfLogger.start(PerfOps.INDEX_PRELOAD, 'documents');
+            const documentPromises = files.map(async (uri): Promise<vscode.TextDocument | undefined> => {
+                try {
+                    return await vscode.workspace.openTextDocument(uri);
+                } catch (e) {
+                    console.warn(`Kanagawa: Failed to open ${uri.toString()}:`, e);
+                    return undefined;
+                }
+            });
+            const documents = await Promise.all(documentPromises);
+            preloadEndTiming();
+            
+            // Create a map for quick lookup
+            const documentMap = new Map<string, vscode.TextDocument>();
+            for (let i = 0; i < files.length; i++) {
+                const doc = documents[i];
+                if (doc) {
+                    documentMap.set(files[i].toString(), doc);
+                }
+            }
+            
             // Process in chunks to avoid blocking UI, with cancellation checks
+            // Note: Parsing is serialized by mutex, but symbol extraction can overlap
             for (let i = 0; i < files.length; i += INDEX_CHUNK_SIZE) {
                 if (effectiveToken.isCancellationRequested) {
                     console.log('Kanagawa: Workspace scan cancelled.');
@@ -225,7 +250,10 @@ export class WorkspaceIndexer {
                 const chunk = files.slice(i, i + INDEX_CHUNK_SIZE);
                 await Promise.all(chunk.map(async (uri: vscode.Uri) => {
                     if (!effectiveToken.isCancellationRequested) {
-                        await this.indexFile(uri, queryString);
+                        const doc = documentMap.get(uri.toString());
+                        if (doc) {
+                            await this.indexFileWithDocument(uri, doc, queryString);
+                        }
                     }
                 }));
                 
@@ -265,14 +293,27 @@ export class WorkspaceIndexer {
     }
 
     async indexFile(uri: vscode.Uri, queryString?: string) {
+        const document = await vscode.workspace.openTextDocument(uri);
+        return this.indexFileWithDocument(uri, document, queryString);
+    }
+
+    /**
+     * Indexes a file with a pre-loaded document.
+     * Used during workspace scan when documents are pre-loaded in parallel.
+     */
+    private async indexFileWithDocument(uri: vscode.Uri, document: vscode.TextDocument, queryString?: string) {
         const endTiming = perfLogger.start(PerfOps.INDEX_FILE, uri.toString());
+        
+        // Mark as indexed to prevent duplicate work from ensureFileIndexed
+        this.indexedFiles.add(uri.toString());
+        
         try {
             if (this.verbose) {
                 console.log('Kanagawa: Indexing file:', uri.toString());
             }
             this.clearDocumentCaches(uri);
-            // console.log('Kanagawa: Indexing file:', uri.toString());
-            const document = await vscode.workspace.openTextDocument(uri);
+            
+            // Parse document (serialized via mutex in TreeSitterService)
             const tree = await this.service.parse(document);
             if (!tree) { 
                 console.warn('Kanagawa: No tree for file:', uri.toString());
@@ -288,6 +329,7 @@ export class WorkspaceIndexer {
                 queryString = loaded;
             }
 
+            // Symbol extraction (CPU-bound, can run in parallel after parsing)
             const symbols = this.extractSymbols(document, tree, queryString, uri);
             const context = this.collectDocumentContext(tree.rootNode);
             this.documentContexts.set(uri.toString(), context);
@@ -301,6 +343,81 @@ export class WorkspaceIndexer {
         } finally {
             endTiming();
         }
+    }
+
+    /** Set of URIs that have been indexed (for priority indexing) */
+    private indexedFiles = new Set<string>();
+
+    /**
+     * Ensures a file is indexed. Called when a file is opened to provide
+     * immediate hover/go-to-definition support even before full workspace scan completes.
+     * 
+     * This is a no-op if the file is already indexed.
+     */
+    async ensureFileIndexed(uri: vscode.Uri): Promise<void> {
+        const uriStr = uri.toString();
+        if (this.indexedFiles.has(uriStr)) {
+            return; // Already indexed
+        }
+
+        // Mark as indexed to prevent duplicate work
+        this.indexedFiles.add(uriStr);
+
+        try {
+            // Index the file
+            await this.indexFile(uri);
+
+            // Also index its imports for better resolution
+            const context = this.documentContexts.get(uriStr);
+            if (context?.imports) {
+                for (const imp of context.imports) {
+                    try {
+                        // Resolve the import path to a URI and index if not already done
+                        const importUri = await this.resolveImportToUri(imp.path);
+                        if (importUri && !this.indexedFiles.has(importUri.toString())) {
+                            this.indexedFiles.add(importUri.toString());
+                            // Index imports in background (don't await, errors logged inside indexFile)
+                            this.indexFile(importUri).catch((err) => {
+                                console.warn(`Kanagawa: Failed to index import ${imp.path}:`, err);
+                            });
+                        }
+                    } catch (err) {
+                        // Ignore individual import resolution failures
+                        console.warn(`Kanagawa: Failed to resolve import ${imp.path}:`, err);
+                    }
+                }
+            }
+        } catch (err) {
+            // Remove from indexed set so it can be retried
+            this.indexedFiles.delete(uriStr);
+            throw err;
+        }
+    }
+
+    /**
+     * Resolves an import path to a file URI.
+     */
+    private async resolveImportToUri(importPath: string): Promise<vscode.Uri | undefined> {
+        try {
+            const config = await this.importConfig.resolveImportConfiguration();
+            const parts = importPath.split('.');
+            const fileName = parts[parts.length - 1] + '.k';
+            const dirPath = parts.slice(0, -1).join('/');
+
+            for (const basePath of config.importPaths) {
+                const fullPath = dirPath ? `${basePath}/${dirPath}/${fileName}` : `${basePath}/${fileName}`;
+                const uri = vscode.Uri.file(fullPath);
+                try {
+                    await vscode.workspace.fs.stat(uri);
+                    return uri;
+                } catch {
+                    // File doesn't exist at this path, try next
+                }
+            }
+        } catch {
+            // Ignore resolution errors
+        }
+        return undefined;
     }
     
     private findCaptureByName(
@@ -1534,17 +1651,22 @@ export class WorkspaceIndexer {
             return a.category.localeCompare(b.category);
         });
 
-        // Cache results and track reverse mapping for targeted invalidation
-        this.memberCache.set(canonical, results.slice());
-        
-        // Update reverse mapping: URI → cache keys that include members from that URI
-        for (const uri of contributingUris) {
-            let cacheKeys = this.memberCacheByUri.get(uri);
-            if (!cacheKeys) {
-                cacheKeys = new Set();
-                this.memberCacheByUri.set(uri, cacheKeys);
+        // Only cache non-empty results to avoid "stuck" empty caches
+        // Empty results might occur if indexing hasn't completed yet, and we don't want
+        // to cache that state as it won't be properly invalidated later
+        if (results.length > 0) {
+            // Cache results and track reverse mapping for targeted invalidation
+            this.memberCache.set(canonical, results.slice());
+            
+            // Update reverse mapping: URI → cache keys that include members from that URI
+            for (const uri of contributingUris) {
+                let cacheKeys = this.memberCacheByUri.get(uri);
+                if (!cacheKeys) {
+                    cacheKeys = new Set();
+                    this.memberCacheByUri.set(uri, cacheKeys);
+                }
+                cacheKeys.add(canonical);
             }
-            cacheKeys.add(canonical);
         }
 
         return this.filterMembers(results, options);

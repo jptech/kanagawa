@@ -14,9 +14,11 @@ import { KanagawaTypePeekCodeLensProvider } from './providers/typePeek';
 import { KanagawaSignatureHelpProvider } from './providers/signatureHelp';
 import { KanagawaReferencesProvider, KanagawaCallHierarchyProvider } from './providers/references';
 import { KanagawaRenameProvider } from './providers/rename';
+import { KanagawaInlayHintsProvider } from './providers/inlayHints';
 import { OutlineFilterManager } from './service/outlineFilters';
 import { KeyedDebouncer, DEBOUNCE_DELAYS } from './utils/debounce';
 import { perfLogger, PerfLogLevel } from './utils/perfLogger';
+import { registerDependencyGraphCommands } from './views/dependencyGraph';
 
 export async function activate(context: vscode.ExtensionContext) {
     console.log('Kanagawa "LSP-Lite" is activating...');
@@ -46,15 +48,8 @@ export async function activate(context: vscode.ExtensionContext) {
     const parseDebouncer = new KeyedDebouncer<string>(DEBOUNCE_DELAYS.DOCUMENT_CHANGE);
     context.subscriptions.push(parseDebouncer);
 
-    // Initial scan with cancellation support
-    vscode.window.withProgress({
-        location: vscode.ProgressLocation.Window,
-        title: "Indexing Kanagawa Workspace..."
-    }, async () => {
-        await indexer.scanWorkspace();
-    });
-
-    // Register Providers
+    // Register Providers FIRST - extension is immediately usable
+    // (providers will work with empty/partial index, improving as indexing completes)
     context.subscriptions.push(
         vscode.languages.registerHoverProvider('kanagawa', new KanagawaHoverProvider(service, indexer)),
         vscode.languages.registerDefinitionProvider('kanagawa', new KanagawaDefinitionProvider(service, indexer)),
@@ -63,14 +58,34 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.languages.registerWorkspaceSymbolProvider(new KanagawaWorkspaceSymbolProvider(indexer, outlineFilters)),
         vscode.languages.registerFoldingRangeProvider('kanagawa', new KanagawaFoldingRangeProvider(service)),
         vscode.languages.registerCompletionItemProvider('kanagawa', new KanagawaCompletionItemProvider(indexer, service), '.'),
-        vscode.languages.registerSignatureHelpProvider('kanagawa', new KanagawaSignatureHelpProvider(service, indexer), '(', ',', ')'),
+        vscode.languages.registerSignatureHelpProvider('kanagawa', new KanagawaSignatureHelpProvider(service, indexer), {
+            triggerCharacters: ['(', ','],
+            retriggerCharacters: [')', ',', ' ']
+        }),
         vscode.languages.registerCodeLensProvider({ language: 'kanagawa' }, new KanagawaTypePeekCodeLensProvider(service, indexer)),
         vscode.languages.registerReferenceProvider('kanagawa', new KanagawaReferencesProvider(service, indexer)),
         vscode.languages.registerCallHierarchyProvider('kanagawa', new KanagawaCallHierarchyProvider(service, indexer)),
         vscode.languages.registerRenameProvider('kanagawa', new KanagawaRenameProvider(service, indexer)),
+        vscode.languages.registerInlayHintsProvider('kanagawa', new KanagawaInlayHintsProvider(service, indexer)),
         diagnosticsProvider,
         outlineFilters
     );
+
+    // Background indexing - starts after a short delay to let the UI settle
+    // The extension is usable immediately; indexing improves completions/go-to-def over time
+    setTimeout(() => {
+        vscode.window.withProgress({
+            location: vscode.ProgressLocation.Window,
+            title: "Indexing Kanagawa Workspace..."
+        }, async () => {
+            await indexer.scanWorkspace();
+        }).then(undefined, (err) => {
+            console.error('Kanagawa: Background indexing failed:', err);
+        });
+    }, 100); // 100ms delay lets VS Code finish loading
+
+    // Register dependency graph commands
+    registerDependencyGraphCommands(context, indexer);
 
     // Events - document lifecycle management
     context.subscriptions.push(
@@ -96,12 +111,18 @@ export async function activate(context: vscode.ExtensionContext) {
             }
         }),
 
-        // Document open handler - parse immediately for initial analysis
+        // Document open handler - parse immediately and ensure file is indexed
         vscode.workspace.onDidOpenTextDocument(async (doc: vscode.TextDocument) => {
             if (doc.languageId === 'kanagawa') {
                 console.log('Kanagawa: Document opened:', doc.uri.toString());
                 await service.parse(doc);
                 await diagnosticsProvider.updateDiagnostics(doc);
+                
+                // Priority index: ensure this file is indexed for hover/go-to-def
+                // This runs in background and doesn't block the document opening
+                indexer.ensureFileIndexed(doc.uri).catch((err) => {
+                    console.error('Kanagawa: Failed to index opened file:', err);
+                });
             }
         }),
 

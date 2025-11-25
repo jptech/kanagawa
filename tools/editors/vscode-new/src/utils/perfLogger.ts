@@ -303,6 +303,7 @@ export const PerfOps = {
     
     // Indexing
     INDEX_SCAN: 'index.scan',
+    INDEX_PRELOAD: 'index.preload',
     INDEX_FILE: 'index.file',
     INDEX_RESOLVE: 'index.resolve',
     

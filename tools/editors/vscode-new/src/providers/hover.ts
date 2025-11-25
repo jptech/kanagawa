@@ -53,8 +53,14 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
             );
 
             // Try local variable/parameter first
-            const typeInfo = this.findLocalTypeInfo(document, identifier);
+            const typeInfo = await this.findLocalTypeInfo(document, identifier);
             if (typeInfo) {
+                // If this is an auto variable with an inlay hint showing the type,
+                // suppress the hover to avoid redundancy
+                if (typeInfo.isAutoWithInlayHint) {
+                    return undefined;
+                }
+                
                 const md = new vscode.MarkdownString();
                 md.appendCodeblock(typeInfo.signature, 'kanagawa');
                 if (typeInfo.initializer) {
@@ -339,8 +345,12 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
 
     /**
      * Finds local type information for a variable or parameter.
+     * Also detects if this is an auto variable that would have an inlay type hint shown.
      */
-    private findLocalTypeInfo(document: vscode.TextDocument, identifier: Parser.SyntaxNode): { signature: string; initializer?: string } | undefined {
+    private async findLocalTypeInfo(
+        document: vscode.TextDocument, 
+        identifier: Parser.SyntaxNode
+    ): Promise<{ signature: string; initializer?: string; isAutoWithInlayHint?: boolean } | undefined> {
         let current: Parser.SyntaxNode | null = identifier.parent;
         while (current) {
             if (current.type === 'variable_decl') {
@@ -350,6 +360,28 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
                     const initializerNode = current.childForFieldName('initializer');
                     const typeText = getNodeText(document, typeNode);
                     const initializerText = getNodeText(document, initializerNode)?.trim();
+                    
+                    // Check if this is an auto variable
+                    const isAuto = typeText?.includes('auto') ?? false;
+                    let isAutoWithInlayHint = false;
+                    
+                    // If auto with initializer, check if we can infer the type
+                    // (which means an inlay hint would be shown)
+                    if (isAuto && initializerNode) {
+                        const config = vscode.workspace.getConfiguration('kanagawa.inlayHints');
+                        const typeHintsEnabled = config.get<boolean>('typeHints.enabled', true);
+                        
+                        if (typeHintsEnabled) {
+                            // Check if we can infer the type - if so, inlay hint is showing
+                            const initValue = this.findInitializerValue(current) ?? initializerNode;
+                            const inferredType = await this.indexer.inferTypeFromExpression(document, initValue);
+                            
+                            if (inferredType && inferredType !== 'auto' && inferredType !== 'unknown') {
+                                isAutoWithInlayHint = true;
+                            }
+                        }
+                    }
+                    
                     const signatureParts = [] as string[];
                     if (typeText) {
                         signatureParts.push(typeText.trim());
@@ -357,7 +389,8 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
                     signatureParts.push(identifier.text);
                     return {
                         signature: signatureParts.join(' '),
-                        initializer: initializerText
+                        initializer: initializerText,
+                        isAutoWithInlayHint
                     };
                 }
             } else if (current.type === 'parameter') {
@@ -370,6 +403,24 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
                 }
             }
             current = current.parent;
+        }
+        return undefined;
+    }
+
+    /**
+     * Finds the initializer value in a variable declaration.
+     */
+    private findInitializerValue(node: Parser.SyntaxNode): Parser.SyntaxNode | undefined {
+        // Look for pattern: name = value or name = { ... }
+        let foundEquals = false;
+        for (const child of node.children) {
+            if (child.type === '=' || child.text === '=') {
+                foundEquals = true;
+                continue;
+            }
+            if (foundEquals && child.type !== ';') {
+                return child;
+            }
         }
         return undefined;
     }

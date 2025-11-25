@@ -96,6 +96,21 @@
         "command": "kanagawa.perf.setThreshold",
         "title": "Kanagawa: Set Slow Operation Threshold",
         "category": "Kanagawa"
+      },
+      {
+        "command": "kanagawa.deps.showCurrent",
+        "title": "Kanagawa: Show Module Dependencies",
+        "category": "Kanagawa"
+      },
+      {
+        "command": "kanagawa.deps.showFull",
+        "title": "Kanagawa: Show Full Dependency Graph",
+        "category": "Kanagawa"
+      },
+      {
+        "command": "kanagawa.deps.showInteractive",
+        "title": "Kanagawa: Browse Module Dependencies",
+        "category": "Kanagawa"
       }
     ],
     "configuration": {
@@ -127,6 +142,26 @@
           "type": "string",
           "default": "",
           "description": "Only show symbols whose module path starts with this prefix."
+        },
+        "kanagawa.typePeek.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show 'type: ...' CodeLens above 'auto' variable declarations. Disabled by default since inlay hints provide the same information inline."
+        },
+        "kanagawa.inlayHints.typeHints.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inferred type hints for 'auto' variable declarations."
+        },
+        "kanagawa.inlayHints.parameterNames.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show parameter name hints at function call sites."
+        },
+        "kanagawa.inlayHints.templateParameterNames.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show template parameter name hints at template instantiation sites."
         },
         "kanagawa.compiler.importPaths": {
           "type": "array",
