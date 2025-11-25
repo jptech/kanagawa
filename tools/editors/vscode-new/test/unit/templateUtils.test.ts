@@ -13,6 +13,9 @@ import {
     parseTemplateParameters,
     buildInstantiationKey,
     normalizeTemplateType,
+    hasUnresolvedTemplateParams,
+    applyTemplateContext,
+    createEmptyContext,
     TemplateParameter
 } from '../../src/utils/templateUtils';
 
@@ -540,6 +543,50 @@ describe('Template Utilities', () => {
                 const fifoInstantiation = createInstantiation('FIFO', fifoParams, ['int']);
                 const popReturn = getInstantiatedReturnType('T pop()', fifoInstantiation);
                 expect(popReturn).to.equal('int');
+            });
+        });
+
+        describe('Nested template parameter propagation', () => {
+            it('propagates T through nested template', () => {
+                // Scenario: template<typename T> class Parent { FIFO<T, 32> fifo; }
+                // fifo.dequeue() should return T (not resolved until Parent is instantiated)
+                const fifoParams: TemplateParameter[] = [
+                    { name: 'U', kind: 'type' },
+                    { name: 'Size', kind: 'value' }
+                ];
+                
+                // FIFO<T, 32> instantiation where T is still a parameter
+                const instantiation = createInstantiation('FIFO', fifoParams, ['T', '32']);
+                expect(instantiation.substitutions.get('U')).to.equal('T');
+                expect(instantiation.substitutions.get('Size')).to.equal('32');
+                
+                // dequeue() returns U, which is T
+                const returnType = getInstantiatedReturnType('U dequeue()', instantiation);
+                expect(returnType).to.equal('T');
+            });
+
+            it('fully resolves when outer template is instantiated', () => {
+                // Scenario: Parent<uint32> where Parent has FIFO<T, 32> fifo
+                // First: Parent<uint32> means T = uint32
+                // Then: FIFO<T, 32> becomes FIFO<uint32, 32>
+                // Finally: fifo.dequeue() returns uint32
+                
+                // Step 1: Resolve Parent's T to uint32
+                const parentContext = new Map([['T', 'uint32']]);
+                const fifoType = substituteParameters('FIFO<T, 32>', parentContext);
+                expect(fifoType).to.equal('FIFO<uint32, 32>');
+                
+                // Step 2: Now resolve FIFO<uint32, 32>.dequeue()
+                const parsed = parseTemplateType(fifoType);
+                expect(parsed).to.not.be.undefined;
+                
+                const fifoParams: TemplateParameter[] = [
+                    { name: 'U', kind: 'type' },
+                    { name: 'Size', kind: 'value' }
+                ];
+                const fifoInstantiation = createInstantiation('FIFO', fifoParams, parsed!.arguments);
+                const returnType = getInstantiatedReturnType('U dequeue()', fifoInstantiation);
+                expect(returnType).to.equal('uint32');
             });
         });
     });

@@ -36,13 +36,17 @@ import {
     TemplateType,
     TemplateParameter,
     TemplateInstantiation,
+    TemplateContext,
     isTemplatedType,
     parseTemplateType,
     createInstantiation,
     instantiateMethodSignature,
     substituteParameters,
     buildInstantiationKey,
-    parseTemplateParameters
+    parseTemplateParameters,
+    hasUnresolvedTemplateParams,
+    applyTemplateContext,
+    createEmptyContext
 } from '../utils/templateUtils';
 
 export type SymbolCategory =
@@ -1190,6 +1194,14 @@ export class WorkspaceIndexer {
             inferred = await this.inferCallExpressionType(document, expression);
         }
 
+        // Apply enclosing template context if the inferred type has unresolved parameters
+        if (inferred && hasUnresolvedTemplateParams(inferred)) {
+            const enclosingContext = this.getEnclosingTemplateContext(document, expression);
+            if (enclosingContext.parameters.size > 0) {
+                inferred = applyTemplateContext(inferred, enclosingContext);
+            }
+        }
+
         if (inferred) {
             cache.set(expression.id, inferred);
             this.typeInferenceCache.set(docKey, cache);
@@ -1972,6 +1984,48 @@ export class WorkspaceIndexer {
             current = current.parent;
         }
         return undefined;
+    }
+
+    /**
+     * Collects the template context from all enclosing template definitions.
+     * This allows resolving template parameters like T when inside a template class.
+     * 
+     * @example
+     * For code inside `template<typename T> class Foo { FIFO<T> fifo; }`:
+     * Returns context with T mapped to itself (still a parameter).
+     * 
+     * For code inside an instantiation context, the parameters are resolved.
+     */
+    public getEnclosingTemplateContext(
+        document: vscode.TextDocument,
+        node: Parser.SyntaxNode
+    ): TemplateContext {
+        const context = createEmptyContext();
+        const processedTemplates = new Set<number>();
+        
+        let current: Parser.SyntaxNode | null = node;
+        while (current) {
+            const templateNode = this.findTemplateAncestor(current);
+            if (templateNode && !processedTemplates.has(templateNode.id)) {
+                processedTemplates.add(templateNode.id);
+                
+                // Get template parameters from this template
+                const params = this.getTemplateParameterSymbols(document, templateNode);
+                for (const param of params) {
+                    // Map parameter to itself - it's in scope but not yet instantiated
+                    // This will be substituted later if we have an actual instantiation
+                    if (!context.parameters.has(param.name)) {
+                        context.parameters.set(param.name, param.name);
+                    }
+                }
+                
+                current = templateNode.parent;
+            } else {
+                current = current?.parent ?? null;
+            }
+        }
+        
+        return context;
     }
 
     private getTemplateParameterSymbols(document: vscode.TextDocument, templateNode: Parser.SyntaxNode): SymbolInfo[] {

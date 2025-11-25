@@ -375,3 +375,76 @@ export function normalizeTemplateType(typeName: string): string {
     const normalizedArgs = parsed.arguments.map(arg => normalizeTemplateType(arg));
     return `${parsed.baseName}<${normalizedArgs.join(', ')}>`;
 }
+
+/**
+ * Common template parameter names that indicate unresolved parameters.
+ * Single uppercase letters and common conventions.
+ */
+const TEMPLATE_PARAM_PATTERN = /\b[A-Z]\b|\b[A-Z][a-z]*_t\b|\bT\d*\b/;
+
+/**
+ * Checks if a type string contains unresolved template parameters.
+ * Looks for single uppercase letters (T, U, V, N) or common patterns.
+ * 
+ * @example
+ * hasUnresolvedTemplateParams("FIFO<T, 32>") → true
+ * hasUnresolvedTemplateParams("FIFO<uint32, 32>") → false
+ * hasUnresolvedTemplateParams("T") → true
+ */
+export function hasUnresolvedTemplateParams(typeString: string): boolean {
+    return TEMPLATE_PARAM_PATTERN.test(typeString);
+}
+
+/**
+ * Enclosing template context - parameters available from parent templates.
+ */
+export interface TemplateContext {
+    /** Map from parameter name to its resolved type (or still a parameter name if nested) */
+    parameters: Map<string, string>;
+}
+
+/**
+ * Creates an empty template context.
+ */
+export function createEmptyContext(): TemplateContext {
+    return { parameters: new Map() };
+}
+
+/**
+ * Merges two template contexts, with the inner context taking precedence.
+ */
+export function mergeContexts(outer: TemplateContext, inner: TemplateContext): TemplateContext {
+    const merged = new Map(outer.parameters);
+    for (const [key, value] of inner.parameters) {
+        merged.set(key, value);
+    }
+    return { parameters: merged };
+}
+
+/**
+ * Applies a template context to resolve parameters in a type string.
+ * 
+ * @example
+ * applyContext("FIFO<T, 32>", { parameters: Map { "T" → "uint32" } }) → "FIFO<uint32, 32>"
+ * applyContext("T", { parameters: Map { "T" → "int" } }) → "int"
+ */
+export function applyTemplateContext(typeString: string, context: TemplateContext): string {
+    if (context.parameters.size === 0) {
+        return typeString;
+    }
+    return substituteParameters(typeString, context.parameters);
+}
+
+/**
+ * Extracts template arguments from a type and creates a context mapping
+ * those arguments to the parameters of the base type.
+ * 
+ * @example
+ * For `FIFO<T, 32>` where FIFO has params `<typename U, auto Size>`:
+ * Returns context with { "U" → "T", "Size" → "32" }
+ */
+export function createContextFromInstantiation(
+    instantiation: TemplateInstantiation
+): TemplateContext {
+    return { parameters: new Map(instantiation.substitutions) };
+}
