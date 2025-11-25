@@ -1,371 +1,261 @@
 /**
- * Type Inference Tests for Kanagawa WorkspaceIndexer
+ * Type Inference Tests for Kanagawa Extension
  *
- * Tests for type inference capabilities including:
- * - Variable type inference from expressions
- * - Cast expression type inference
- * - Method return type inference
- * - Member access resolution
+ * These tests exercise the ACTUAL utility functions from src/utils/typeUtils.ts
+ * that are used by the WorkspaceIndexer for type inference.
  */
 
 import * as assert from 'assert';
+import {
+    normalizeTypeName,
+    sanitizeTypeText,
+    lastSegment,
+    inferLiteralType,
+    extractCastTargetTypeFromText,
+    inferBinaryExpressionType,
+    isArrayType,
+    extractArrayElementType,
+    isTemplatedType,
+    extractTemplateBase,
+    extractTemplateArgs
+} from '../utils/typeUtils';
 
-// NOTE: Full type inference testing requires the actual indexer service.
-// These tests cover the core logic patterns and expected behaviors.
-
-describe('Type Inference', function() {
+describe('Type Utilities (Real Extension Code)', function() {
     this.timeout(10000);
 
-    describe('Literal Type Inference', () => {
-        it('should infer integer literal as int32', () => {
-            // Pattern: auto x = 42;
-            // Expected: x should be inferred as int32
-            const literalValue = '42';
-            const inferredType = inferLiteralType(literalValue);
-            assert.strictEqual(inferredType, 'int32');
+    describe('normalizeTypeName', () => {
+        it('should return empty string for empty input', () => {
+            assert.strictEqual(normalizeTypeName(''), '');
         });
 
-        it('should infer negative integer as int32', () => {
-            const literalValue = '-10';
-            const inferredType = inferLiteralType(literalValue);
-            assert.strictEqual(inferredType, 'int32');
+        it('should strip const prefix', () => {
+            assert.strictEqual(normalizeTypeName('const uint32'), 'uint32');
         });
 
-        it('should infer floating point as float', () => {
-            const literalValue = '3.14';
-            const inferredType = inferLiteralType(literalValue);
-            assert.strictEqual(inferredType, 'float');
+        it('should strip template arguments', () => {
+            assert.strictEqual(normalizeTypeName('FIFO<uint32>'), 'FIFO');
+            assert.strictEqual(normalizeTypeName('optional<FIFO<uint32>>'), 'optional');
         });
 
-        it('should infer boolean true', () => {
-            const literalValue = 'true';
-            const inferredType = inferLiteralType(literalValue);
-            assert.strictEqual(inferredType, 'bool');
+        it('should extract last segment from :: paths', () => {
+            assert.strictEqual(normalizeTypeName('std::vector'), 'vector');
+            assert.strictEqual(normalizeTypeName('ns::inner::Type'), 'Type');
         });
 
-        it('should infer boolean false', () => {
-            const literalValue = 'false';
-            const inferredType = inferLiteralType(literalValue);
-            assert.strictEqual(inferredType, 'bool');
+        it('should extract last segment from . paths', () => {
+            assert.strictEqual(normalizeTypeName('data.fifo.FIFO'), 'FIFO');
         });
 
-        it('should infer string literal', () => {
-            const literalValue = '"hello"';
-            const inferredType = inferLiteralType(literalValue);
-            assert.strictEqual(inferredType, 'string');
+        it('should remove whitespace', () => {
+            assert.strictEqual(normalizeTypeName('  uint32  '), 'uint32');
         });
 
-        it('should infer character literal', () => {
-            const literalValue = "'a'";
-            const inferredType = inferLiteralType(literalValue);
-            assert.strictEqual(inferredType, 'char');
-        });
-
-        it('should infer hex literal as uint32', () => {
-            const literalValue = '0xFF';
-            const inferredType = inferLiteralType(literalValue);
-            assert.strictEqual(inferredType, 'uint32');
-        });
-
-        it('should infer binary literal as uint32', () => {
-            const literalValue = '0b1010';
-            const inferredType = inferLiteralType(literalValue);
-            assert.strictEqual(inferredType, 'uint32');
+        it('should handle combined cases', () => {
+            assert.strictEqual(normalizeTypeName('const std::optional<T>'), 'optional');
         });
     });
 
-    describe('Cast Expression Type Extraction', () => {
-        it('should extract type from cast<float>', () => {
-            const castExpr = 'cast<float>(x)';
-            const targetType = extractCastTargetType(castExpr);
-            assert.strictEqual(targetType, 'float');
+    describe('sanitizeTypeText', () => {
+        it('should return undefined for undefined input', () => {
+            assert.strictEqual(sanitizeTypeText(undefined), undefined);
         });
 
-        it('should extract type from static_cast<uint32>', () => {
-            const castExpr = 'static_cast<uint32>(y)';
-            const targetType = extractCastTargetType(castExpr);
-            assert.strictEqual(targetType, 'uint32');
+        it('should normalize whitespace', () => {
+            assert.strictEqual(sanitizeTypeText('uint32   [  8  ]'), 'uint32 [ 8 ]');
         });
 
-        it('should extract type from reinterpret_cast<void*>', () => {
-            const castExpr = 'reinterpret_cast<void*>(ptr)';
-            const targetType = extractCastTargetType(castExpr);
-            assert.strictEqual(targetType, 'void*');
+        it('should trim', () => {
+            assert.strictEqual(sanitizeTypeText('  uint32  '), 'uint32');
+        });
+    });
+
+    describe('lastSegment', () => {
+        it('should return last segment of dotted path', () => {
+            assert.strictEqual(lastSegment('a.b.c'), 'c');
         });
 
-        it('should extract type from checked_cast<uint8>', () => {
-            const castExpr = 'checked_cast<uint8>(wide)';
-            const targetType = extractCastTargetType(castExpr);
-            assert.strictEqual(targetType, 'uint8');
+        it('should return input if no dots', () => {
+            assert.strictEqual(lastSegment('identifier'), 'identifier');
+        });
+    });
+
+    describe('inferLiteralType', () => {
+        it('should infer bool for true/false', () => {
+            assert.strictEqual(inferLiteralType('true'), 'bool');
+            assert.strictEqual(inferLiteralType('false'), 'bool');
         });
 
-        it('should extract templated type from cast', () => {
-            const castExpr = 'cast<FIFO<uint32>>(x)';
-            const targetType = extractCastTargetType(castExpr);
-            assert.strictEqual(targetType, 'FIFO<uint32>');
+        it('should infer string for quoted strings', () => {
+            assert.strictEqual(inferLiteralType('"hello"'), 'string');
+        });
+
+        it('should infer char for single-quoted chars', () => {
+            assert.strictEqual(inferLiteralType("'a'"), 'char');
+        });
+
+        it('should infer uint32 for hex literals', () => {
+            assert.strictEqual(inferLiteralType('0xFF'), 'uint32');
+            assert.strictEqual(inferLiteralType('0XAB'), 'uint32');
+        });
+
+        it('should infer uint32 for binary literals', () => {
+            assert.strictEqual(inferLiteralType('0b1010'), 'uint32');
+            assert.strictEqual(inferLiteralType('0B1111'), 'uint32');
+        });
+
+        it('should infer float for decimal literals', () => {
+            assert.strictEqual(inferLiteralType('3.14'), 'float');
+            assert.strictEqual(inferLiteralType('1e10'), 'float');
+            assert.strictEqual(inferLiteralType('2.5E-3'), 'float');
+        });
+
+        it('should infer int32 for integer literals', () => {
+            assert.strictEqual(inferLiteralType('42'), 'int32');
+            assert.strictEqual(inferLiteralType('-10'), 'int32');
+        });
+    });
+
+    describe('extractCastTargetTypeFromText', () => {
+        it('should extract type from cast<Type>', () => {
+            assert.strictEqual(extractCastTargetTypeFromText('cast<float>(x)'), 'float');
+        });
+
+        it('should extract type from static_cast<Type>', () => {
+            assert.strictEqual(extractCastTargetTypeFromText('static_cast<uint32>(y)'), 'uint32');
+        });
+
+        it('should extract type from reinterpret_cast<Type>', () => {
+            assert.strictEqual(extractCastTargetTypeFromText('reinterpret_cast<void*>(ptr)'), 'void*');
+        });
+
+        it('should extract type from checked_cast<Type>', () => {
+            assert.strictEqual(extractCastTargetTypeFromText('checked_cast<uint8>(wide)'), 'uint8');
+        });
+
+        it('should handle templated cast types', () => {
+            assert.strictEqual(extractCastTargetTypeFromText('cast<FIFO<uint32>>(x)'), 'FIFO<uint32>');
+        });
+
+        it('should handle nested templates in cast', () => {
+            assert.strictEqual(
+                extractCastTargetTypeFromText('cast<optional<FIFO<uint32>>>(x)'),
+                'optional<FIFO<uint32>>'
+            );
         });
 
         it('should return undefined for cast without type', () => {
-            const castExpr = 'cast(x)';
-            const targetType = extractCastTargetType(castExpr);
-            assert.strictEqual(targetType, undefined);
+            assert.strictEqual(extractCastTargetTypeFromText('cast(x)'), undefined);
         });
 
-        it('should handle nested template in cast', () => {
-            const castExpr = 'cast<optional<FIFO<uint32>>>(x)';
-            const targetType = extractCastTargetType(castExpr);
-            assert.strictEqual(targetType, 'optional<FIFO<uint32>>');
+        it('should return undefined for non-cast expressions', () => {
+            assert.strictEqual(extractCastTargetTypeFromText('foo<T>(x)'), undefined);
         });
     });
 
-    describe('Binary Expression Type Inference', () => {
-        it('should infer comparison result as bool', () => {
-            const operator = '<';
-            const resultType = inferBinaryExprType(operator, 'int32', 'int32');
-            assert.strictEqual(resultType, 'bool');
+    describe('inferBinaryExpressionType', () => {
+        it('should return bool for comparison operators', () => {
+            assert.strictEqual(inferBinaryExpressionType('<', 'int32', 'int32'), 'bool');
+            assert.strictEqual(inferBinaryExpressionType('>=', 'uint32', 'uint32'), 'bool');
+            assert.strictEqual(inferBinaryExpressionType('==', 'int32', 'int32'), 'bool');
+            assert.strictEqual(inferBinaryExpressionType('!=', 'int32', 'int32'), 'bool');
         });
 
-        it('should infer equality result as bool', () => {
-            const operator = '==';
-            const resultType = inferBinaryExprType(operator, 'uint32', 'uint32');
-            assert.strictEqual(resultType, 'bool');
+        it('should return bool for logical operators', () => {
+            assert.strictEqual(inferBinaryExpressionType('&&', 'bool', 'bool'), 'bool');
+            assert.strictEqual(inferBinaryExpressionType('||', 'bool', 'bool'), 'bool');
         });
 
-        it('should infer arithmetic result from operands', () => {
-            const operator = '+';
-            const resultType = inferBinaryExprType(operator, 'int32', 'int32');
-            assert.strictEqual(resultType, 'int32');
+        it('should preserve type for bitwise operators', () => {
+            assert.strictEqual(inferBinaryExpressionType('&', 'uint32', 'uint32'), 'uint32');
+            assert.strictEqual(inferBinaryExpressionType('|', 'uint8', 'uint8'), 'uint8');
         });
 
-        it('should infer logical result as bool', () => {
-            const operator = '&&';
-            const resultType = inferBinaryExprType(operator, 'bool', 'bool');
-            assert.strictEqual(resultType, 'bool');
+        it('should promote to float for arithmetic with float', () => {
+            assert.strictEqual(inferBinaryExpressionType('+', 'int32', 'float'), 'float');
+            assert.strictEqual(inferBinaryExpressionType('*', 'float', 'int32'), 'float');
         });
 
-        it('should infer wider type for mixed arithmetic', () => {
-            const operator = '+';
-            const resultType = inferBinaryExprType(operator, 'int32', 'int64');
-            assert.strictEqual(resultType, 'int64');
+        it('should promote to wider integer type', () => {
+            assert.strictEqual(inferBinaryExpressionType('+', 'int32', 'int64'), 'int64');
+            assert.strictEqual(inferBinaryExpressionType('-', 'uint64', 'uint32'), 'uint64');
         });
     });
 
-    describe('Member Expression Resolution', () => {
-        // These test the patterns that the indexer uses
-
-        it('should identify method call pattern', () => {
-            // Pattern: obj.method()
-            const expr = { hasArgs: true, memberName: 'compute' };
-            assert.ok(isMethodCall(expr), 'Should detect as method call');
+    describe('isArrayType', () => {
+        it('should detect array types', () => {
+            assert.ok(isArrayType('uint32[8]'));
+            assert.ok(isArrayType('int[N]'));
         });
 
-        it('should identify field access pattern', () => {
-            // Pattern: obj.field
-            const expr = { hasArgs: false, memberName: 'length' };
-            assert.ok(!isMethodCall(expr), 'Should detect as field access');
-        });
-
-        it('should handle chained member access', () => {
-            // Pattern: obj.field.method()
-            const parts = parseMemberChain('obj.field.method()');
-            assert.deepStrictEqual(parts, ['obj', 'field', 'method']);
+        it('should not detect non-array types', () => {
+            assert.ok(!isArrayType('uint32'));
+            assert.ok(!isArrayType('FIFO<uint32>')); // template, not array
         });
     });
 
-    describe('Template Type Inference', () => {
-        it('should identify template type pattern', () => {
-            const type = 'FIFO<uint32>';
-            assert.ok(isTemplatedType(type), 'Should detect templated type');
+    describe('extractArrayElementType', () => {
+        it('should extract element type from simple arrays', () => {
+            assert.strictEqual(extractArrayElementType('uint32[8]'), 'uint32');
         });
 
-        it('should extract template base type', () => {
-            const type = 'FIFO<uint32>';
-            const base = extractTemplateBase(type);
-            assert.strictEqual(base, 'FIFO');
+        it('should extract element type from templated arrays', () => {
+            assert.strictEqual(extractArrayElementType('FIFO<uint32>[4]'), 'FIFO<uint32>');
         });
 
-        it('should extract template arguments', () => {
-            const type = 'FIFO<uint32>';
-            const args = extractTemplateArgs(type);
-            assert.deepStrictEqual(args, ['uint32']);
+        it('should extract outer element type from multi-dimensional arrays', () => {
+            // int[3][2] → element is int[3]
+            assert.strictEqual(extractArrayElementType('int[3][2]'), 'int[3]');
+        });
+    });
+
+    describe('isTemplatedType', () => {
+        it('should detect templated types', () => {
+            assert.ok(isTemplatedType('FIFO<uint32>'));
+            assert.ok(isTemplatedType('optional<T>'));
         });
 
-        it('should handle multiple template arguments', () => {
-            const type = 'Map<string, int32>';
-            const args = extractTemplateArgs(type);
-            assert.deepStrictEqual(args, ['string', 'int32']);
+        it('should not detect non-templated types', () => {
+            assert.ok(!isTemplatedType('uint32'));
+            assert.ok(!isTemplatedType('uint32[8]'));
+        });
+    });
+
+    describe('extractTemplateBase', () => {
+        it('should extract base type', () => {
+            assert.strictEqual(extractTemplateBase('FIFO<uint32>'), 'FIFO');
+            assert.strictEqual(extractTemplateBase('optional<FIFO<uint32>>'), 'optional');
+        });
+
+        it('should return input if not templated', () => {
+            assert.strictEqual(extractTemplateBase('uint32'), 'uint32');
+        });
+    });
+
+    describe('extractTemplateArgs', () => {
+        it('should extract single argument', () => {
+            assert.deepStrictEqual(extractTemplateArgs('FIFO<uint32>'), ['uint32']);
+        });
+
+        it('should extract multiple arguments', () => {
+            assert.deepStrictEqual(extractTemplateArgs('Map<string, int32>'), ['string', 'int32']);
         });
 
         it('should handle nested templates', () => {
-            const type = 'optional<FIFO<uint32>>';
-            const base = extractTemplateBase(type);
-            assert.strictEqual(base, 'optional');
-            const args = extractTemplateArgs(type);
-            assert.deepStrictEqual(args, ['FIFO<uint32>']);
-        });
-    });
-
-    describe('Array Type Inference', () => {
-        it('should identify array type pattern', () => {
-            const type = 'uint32[8]';
-            assert.ok(isArrayType(type), 'Should detect array type');
+            assert.deepStrictEqual(
+                extractTemplateArgs('optional<FIFO<uint32>>'),
+                ['FIFO<uint32>']
+            );
         });
 
-        it('should extract array element type', () => {
-            const type = 'uint32[8]';
-            const elementType = extractArrayElementType(type);
-            assert.strictEqual(elementType, 'uint32');
+        it('should handle complex nested templates', () => {
+            assert.deepStrictEqual(
+                extractTemplateArgs('Map<string, FIFO<uint32>>'),
+                ['string', 'FIFO<uint32>']
+            );
         });
 
-        it('should extract array size', () => {
-            const type = 'uint32[8]';
-            const size = extractArraySize(type);
-            assert.strictEqual(size, '8');
-        });
-
-        it('should handle template array type', () => {
-            const type = 'FIFO<uint32>[4]';
-            const elementType = extractArrayElementType(type);
-            assert.strictEqual(elementType, 'FIFO<uint32>');
-        });
-
-        it('should handle multi-dimensional array', () => {
-            const type = 'int32[3][2]';
-            const elementType = extractArrayElementType(type);
-            // First dimension extraction
-            assert.strictEqual(elementType, 'int32[3]');
+        it('should return empty array for non-templated types', () => {
+            assert.deepStrictEqual(extractTemplateArgs('uint32'), []);
         });
     });
 });
-
-// Helper functions that mirror indexer logic
-
-function inferLiteralType(literal: string): string {
-    if (literal === 'true' || literal === 'false') {
-        return 'bool';
-    }
-    if (literal.startsWith('"') && literal.endsWith('"')) {
-        return 'string';
-    }
-    if (literal.startsWith("'") && literal.endsWith("'")) {
-        return 'char';
-    }
-    if (literal.startsWith('0x') || literal.startsWith('0X')) {
-        return 'uint32';
-    }
-    if (literal.startsWith('0b') || literal.startsWith('0B')) {
-        return 'uint32';
-    }
-    if (literal.includes('.')) {
-        return 'float';
-    }
-    return 'int32';
-}
-
-function extractCastTargetType(castExpr: string): string | undefined {
-    // Match the cast keyword
-    const castMatch = castExpr.match(/(?:static_cast|reinterpret_cast|checked_cast|cast)</);
-    if (!castMatch) return undefined;
-    
-    // Find the opening < after the cast keyword
-    const startIdx = castMatch.index! + castMatch[0].length;
-    if (castExpr[startIdx - 1] !== '<') return undefined;
-    
-    // Match brackets properly, handling nested templates
-    let depth = 1;
-    let endIdx = startIdx;
-    
-    while (endIdx < castExpr.length && depth > 0) {
-        if (castExpr[endIdx] === '<') depth++;
-        else if (castExpr[endIdx] === '>') depth--;
-        if (depth > 0) endIdx++;
-    }
-    
-    if (depth !== 0) return undefined;
-    
-    return castExpr.substring(startIdx, endIdx);
-}
-
-function inferBinaryExprType(operator: string, leftType: string, rightType: string): string {
-    // Comparison and equality operators
-    if (['<', '>', '<=', '>=', '==', '!='].includes(operator)) {
-        return 'bool';
-    }
-    // Logical operators
-    if (['&&', '||'].includes(operator)) {
-        return 'bool';
-    }
-    // Arithmetic operators - use wider type
-    if (['+', '-', '*', '/', '%'].includes(operator)) {
-        // Simple type widening
-        if (leftType === 'int64' || rightType === 'int64') return 'int64';
-        if (leftType === 'uint64' || rightType === 'uint64') return 'uint64';
-        if (leftType === 'float' || rightType === 'float') return 'float';
-        return leftType;
-    }
-    return leftType;
-}
-
-function isMethodCall(expr: { hasArgs: boolean; memberName: string }): boolean {
-    return expr.hasArgs;
-}
-
-function parseMemberChain(expr: string): string[] {
-    // Remove argument lists for parsing
-    const cleaned = expr.replace(/\([^)]*\)/g, '');
-    return cleaned.split('.');
-}
-
-function isTemplatedType(type: string): boolean {
-    return type.includes('<') && type.includes('>');
-}
-
-function extractTemplateBase(type: string): string {
-    const idx = type.indexOf('<');
-    return idx > 0 ? type.substring(0, idx) : type;
-}
-
-function extractTemplateArgs(type: string): string[] {
-    const start = type.indexOf('<');
-    const end = type.lastIndexOf('>');
-    if (start < 0 || end < 0) return [];
-
-    const argsStr = type.substring(start + 1, end);
-
-    // Handle nested templates by counting angle brackets
-    const args: string[] = [];
-    let current = '';
-    let depth = 0;
-
-    for (const char of argsStr) {
-        if (char === '<') depth++;
-        if (char === '>') depth--;
-        if (char === ',' && depth === 0) {
-            args.push(current.trim());
-            current = '';
-        } else {
-            current += char;
-        }
-    }
-    if (current.trim()) {
-        args.push(current.trim());
-    }
-
-    return args;
-}
-
-function isArrayType(type: string): boolean {
-    // Check for array suffix [N] but not template args
-    return /\[\d+\]$/.test(type) || /\[[a-zA-Z_]\w*\]$/.test(type);
-}
-
-function extractArrayElementType(type: string): string {
-    // Find the last [N] pattern
-    const match = type.match(/^(.+?)\[[^\]]+\]$/);
-    return match ? match[1] : type;
-}
-
-function extractArraySize(type: string): string {
-    const match = type.match(/\[([^\]]+)\]$/);
-    return match ? match[1] : '';
-}

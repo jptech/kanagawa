@@ -4,6 +4,11 @@ import * as path from 'path';
 import { TreeSitterService } from './treeSitter';
 import { QueryManager } from './query';
 import { ImportConfigService, ImportConfiguration } from './importConfig';
+import {
+    normalizeTypeName as normalizeTypeNameUtil,
+    sanitizeTypeText as sanitizeTypeTextUtil,
+    lastSegment as lastSegmentUtil
+} from '../utils/typeUtils';
 
 export type SymbolCategory =
     | 'module'
@@ -1288,32 +1293,15 @@ export class WorkspaceIndexer {
     }
 
     private lastSegment(value: string): string {
-        const parts = value.split('.');
-        return parts[parts.length - 1] ?? value;
+        return lastSegmentUtil(value);
     }
 
     private normalizeTypeName(raw: string): string {
-        if (!raw) { return ''; }
-        let text = raw.trim();
-        text = text.replace(/^const\s+/, '');
-        const angleIndex = text.indexOf('<');
-        if (angleIndex !== -1) {
-            text = text.slice(0, angleIndex);
-        }
-        const doubleSep = text.lastIndexOf('::');
-        if (doubleSep !== -1) {
-            text = text.slice(doubleSep + 2);
-        }
-        const dotSep = text.lastIndexOf('.');
-        if (dotSep !== -1) {
-            text = text.slice(dotSep + 1);
-        }
-        return text.replace(/\s+/g, '');
+        return normalizeTypeNameUtil(raw);
     }
 
     private sanitizeTypeText(text?: string): string | undefined {
-        if (!text) { return undefined; }
-        return text.replace(/\s+/g, ' ').trim();
+        return sanitizeTypeTextUtil(text);
     }
 
     private extractAliasTarget(node: Parser.SyntaxNode): string | undefined {
