@@ -871,29 +871,7 @@ export class WorkspaceIndexer {
                 inferred = member?.typeHint;
             }
         } else if (expression.type === 'call_expression') {
-            const callee = this.getCallTarget(expression);
-            if (callee) {
-                if (callee.type === 'member_expression') {
-                    const propertyNode = this.getMemberIdentifier(callee);
-                    if (propertyNode) {
-                        const memberMatches = await this.resolveMemberSymbol(document, propertyNode);
-                        const match = memberMatches?.find((sym: SymbolInfo) => !!sym.typeHint);
-                        inferred = match?.typeHint;
-                    }
-                } else {
-                    const idNode = this.extractIdentifierFromExpression(callee);
-                    if (idNode) {
-                        const scopePath = this.getScopePathForNode(idNode);
-                        const candidates = this.resolveSymbols(idNode.text, scopePath, {
-                            uri: document.uri,
-                            context: { kind: 'free' },
-                            limit: 5
-                        });
-                        const match = candidates.find(candidate => !!candidate.typeHint);
-                        inferred = match?.typeHint;
-                    }
-                }
-            }
+            inferred = await this.inferCallExpressionType(document, expression);
         }
 
         if (inferred) {
@@ -907,6 +885,109 @@ export class WorkspaceIndexer {
         return undefined;
     }
 
+    /**
+     * Infers the return type of a call expression, handling:
+     * - Cast expressions: `cast<Type>(value)` → Type
+     * - Member method calls: `obj.method()` → method's return type
+     * - Free function calls: `func()` → function's return type
+     * - Constructor calls: `Foo<T>()` → Foo
+     */
+    private async inferCallExpressionType(
+        document: vscode.TextDocument,
+        callExpression: Parser.SyntaxNode
+    ): Promise<string | undefined> {
+        const callee = this.getCallTarget(callExpression);
+        if (!callee) { return undefined; }
+
+        // Handle cast expressions: cast<Type>(value), static_cast<Type>(value), etc.
+        if (callee.type === 'cast_operator') {
+            return this.extractCastTargetType(callee);
+        }
+
+        // Handle member method calls: obj.method()
+        if (callee.type === 'member_expression') {
+            return this.inferMemberCallReturnType(document, callee);
+        }
+
+        // Handle free function calls or constructor calls
+        const idNode = this.extractIdentifierFromExpression(callee);
+        if (!idNode) { return undefined; }
+
+        // Check if this looks like a constructor call (identifier matches a known class)
+        const className = this.normalizeTypeName(callee.text);
+        if (className) {
+            const classSymbols = this.symbolIndex.get(className);
+            const isClass = classSymbols?.some(sym =>
+                sym.category === 'class' || sym.category === 'struct'
+            );
+            if (isClass) {
+                return className;
+            }
+        }
+
+        // Otherwise resolve as a free function call and get its return type
+        const scopePath = this.getScopePathForNode(idNode);
+        const candidates = this.resolveSymbols(idNode.text, scopePath, {
+            uri: document.uri,
+            context: { kind: 'free' },
+            limit: 5
+        });
+
+        // Return the typeHint (return type) of the first matching function
+        const match = candidates.find(candidate =>
+            (candidate.category === 'function' || candidate.category === 'method') &&
+            !!candidate.typeHint
+        );
+        return match?.typeHint;
+    }
+
+    /**
+     * Extracts the target type from a cast_operator node.
+     * Handles: cast<float>, static_cast<uint32>, reinterpret_cast<T>, checked_cast<Type>
+     */
+    private extractCastTargetType(castOperator: Parser.SyntaxNode): string | undefined {
+        // The cast_operator structure is: cast<Type> where Type can be:
+        // - type_specifier (identifier or templated)
+        // - primitive_type (int, uint, float32, etc.)
+        for (const child of castOperator.namedChildren) {
+            if (child.type === 'type_specifier' ||
+                child.type === 'primitive_type' ||
+                child.type === 'modified_type' ||
+                child.type === 'array_type') {
+                return this.sanitizeTypeText(child.text);
+            }
+        }
+        return undefined;
+    }
+
+    /**
+     * Infers the return type of a member method call: obj.method()
+     */
+    private async inferMemberCallReturnType(
+        document: vscode.TextDocument,
+        memberExpression: Parser.SyntaxNode
+    ): Promise<string | undefined> {
+        const propertyNode = this.getMemberIdentifier(memberExpression);
+        if (!propertyNode) { return undefined; }
+
+        // First try to resolve as a member method
+        const memberMatches = await this.resolveMemberSymbol(document, propertyNode);
+        if (memberMatches?.length) {
+            // Find a function/method with a return type
+            const methodMatch = memberMatches.find(sym =>
+                (sym.category === 'function' || sym.category === 'method') &&
+                !!sym.typeHint
+            );
+            if (methodMatch?.typeHint) {
+                return methodMatch.typeHint;
+            }
+        }
+
+        // Fall back to any symbol with a type hint
+        const anyMatch = memberMatches?.find(sym => !!sym.typeHint);
+        return anyMatch?.typeHint;
+    }
+
     public async resolveMemberSymbol(
         document: vscode.TextDocument,
         identifier: Parser.SyntaxNode
@@ -918,13 +999,30 @@ export class WorkspaceIndexer {
 
         const receiverNode = parent.namedChild(0);
         if (!receiverNode) { return undefined; }
-        const methodName = identifier.text;
+        const memberName = identifier.text;
 
         const receiverType = await this.inferTypeFromExpression(document, receiverNode);
         if (!receiverType) { return undefined; }
 
-        const members = this.getMembersForType(receiverType, { includeMethods: true, includeFields: false });
-        const matches = members.filter(sym => sym.name === methodName);
+        // Check if this is a call context (member is being called as a method)
+        const grandparent = parent.parent;
+        const isCallContext = grandparent?.type === 'call_expression';
+
+        // Get both methods and fields - the caller can filter based on context
+        const members = this.getMembersForType(receiverType, {
+            includeMethods: true,
+            includeFields: true
+        });
+        const matches = members.filter(sym => sym.name === memberName);
+        
+        // If in call context, prefer methods; otherwise prefer fields
+        if (isCallContext && matches.length > 1) {
+            const methods = matches.filter(sym => sym.category === 'method' || sym.category === 'function');
+            if (methods.length > 0) {
+                return methods;
+            }
+        }
+        
         return matches.length ? matches : undefined;
     }
 

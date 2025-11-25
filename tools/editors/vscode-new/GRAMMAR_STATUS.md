@@ -114,53 +114,29 @@ Based on testing with library files:
 
 **Impact**: Affects ~10-15% of files in `test/library/`
 
-### 2. Template Instantiation Array Types ⚠️ **CRITICAL**
+### 2. Template Instantiation Array Types ✅ **RESOLVED**
 
-**Issue**: Variable declarations with template instantiation array types parse incorrectly inside function bodies.
+**Previous Issue**: Variable declarations with template instantiation array types parsed incorrectly inside function bodies.
 
 **Example**:
 ```kanagawa
 void foo() {
-    optional<T>[N] x;  // ❌ Parses as subscript expression, not variable declaration
+    optional<T>[N] x;  // ✅ Now parses correctly as variable declaration with array type
     int[N] y;          // ✅ Works correctly (primitive type)
 }
 ```
 
-**Root Cause**: Tree-sitter's GLR parser sees `optional<T>[N]` and commits to parsing it as:
-1. `template_instantiation` (expression) followed by
-2. `subscript_expression` with index `[N]`
+**Resolution**: The grammar now correctly handles this case. The `array_type` rule with `prec.dynamic(20)` and proper conflict declarations allows the parser to prefer the variable declaration interpretation over the subscript expression.
 
-Before it considers the alternative:
-1. `array_type` where base is `type_specifier` (`optional<T>`)
-
-Even with:
-- `prec.dynamic(100)` on `variable_decl`
-- `prec.dynamic(20)` on `type_specifier`  
-- `prec.dynamic(-10)` on `subscript_expression`
-- `[$.variable_decl, $.primary_expression]` conflict declaration
-- Explicit `seq($.variable_decl, ';')` in statement choices
-
-The parser still prefers the subscript interpretation.
-
-**Why Primitive Types Work**: `int` is not an expression, so `int[N]` can only be a type. But `optional` is a valid identifier that can appear in expressions.
-
-**Impact**: Affects ~20% of standard library files including:
-- `library/data/array.k` (multiple instances)
-- `library/codec/crc.k`
-- `library/control/async.k`
-- `library/control/loop.k`
-
-**Workaround**: Add a space before the bracket:
-```kanagawa
-optional<T> [N] x;  // ✅ Parses correctly with space
+**Verified**: Tree-sitter test suite confirms correct parsing:
 ```
-
-**Long-term Fix**: Requires either:
-- External scanner for lookahead
-- Grammar restructure to unify types/expressions
-- Wait for Tree-sitter improvements
-
-**Status**: **BLOCKING** for correct parsing of significant portions of standard library. This is a known limitation that will require substantial work to resolve properly.
+type: (array_type
+  (type_specifier
+    (identifier)   ; "optional"
+    (identifier))  ; "T"
+  (identifier))    ; "N"
+name: (identifier) ; "x"
+```
 
 ### 3. Complex Generic/Template Edge Cases
 
@@ -168,7 +144,7 @@ Some heavily templated code with nested template arguments may have minor parsin
 
 **Mitigation**: Template parameter default values use `_template_arg_expression` which excludes comparison operators.
 
-### 3. Designated Initializers
+### 4. Designated Initializers
 
 While basic initializers work, complex designated initializers may have edge cases.
 

@@ -3,12 +3,28 @@ import * as Parser from 'web-tree-sitter';
 import { WorkspaceIndexer } from '../service/indexer';
 import { TreeSitterService } from '../service/treeSitter';
 
+// Kanagawa language keywords (from overview.md and grammar.js)
 const KEYWORDS = [
-    'module', 'import', 'class', 'fn', 'let', 'var', 'if', 'else',
-    'for', 'while', 'return', 'type', 'struct', 'enum', 'interface',
-    'extends', 'implements', 'public', 'private', 'protected', 'static',
-    'const', 'true', 'false', 'null', 'this', 'super', 'match', 'case',
-    'async', 'await', 'try', 'catch', 'throw', 'new'
+    // Module system
+    'module', 'import', 'export', 'extern', 'as',
+    // Type declarations
+    'class', 'struct', 'union', 'enum', 'using', 'template', 'typename', 'decltype',
+    // Modifiers
+    'static', 'const', 'inline', 'noinline', 'auto', 'void',
+    // Primitive types
+    'bool', 'int', 'uint', 'float32', 'string',
+    // Control flow
+    'if', 'else', 'switch', 'case', 'default', 'for', 'while', 'do', 'break', 'continue', 'return',
+    // Concurrency primitives
+    'atomic', 'barrier', 'reorder',
+    // Visibility
+    'public', 'private',
+    // Literals
+    'true', 'false',
+    // Built-in operators
+    'bitsizeof', 'bytesizeof', 'clog2',
+    // Cast operators
+    'cast', 'static_cast', 'reinterpret_cast', 'checked_cast',
 ];
 
 export class KanagawaCompletionItemProvider implements vscode.CompletionItemProvider {
