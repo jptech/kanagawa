@@ -1,0 +1,128 @@
+================================================================================
+Simple function definition
+================================================================================
+
+void foo() {}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (function_definition
+      return_type: (primitive_type)
+      name: (identifier)
+      parameters: (parameter_list)
+      (block))))
+
+================================================================================
+Function with return type
+================================================================================
+
+uint32 compute() { return 42; }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (function_definition
+      return_type: (type_specifier
+        (identifier))
+      name: (identifier)
+      parameters: (parameter_list)
+      (block
+        (return_statement
+          (literal
+            (integer_literal)))))))
+
+================================================================================
+Function with parameters
+================================================================================
+
+uint32 add(uint32 a, uint32 b) { return a + b; }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (function_definition
+      return_type: (type_specifier
+        (identifier))
+      name: (identifier)
+      parameters: (parameter_list
+        (parameter
+          type: (type_specifier
+            (identifier))
+          name: (identifier))
+        (parameter
+          type: (type_specifier
+            (identifier))
+          name: (identifier)))
+      (block
+        (return_statement
+          (binary_expression
+            (identifier)
+            (identifier)))))))
+
+================================================================================
+Template function
+================================================================================
+
+template <typename T>
+T identity(T x) { return x; }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (function_template
+      (template_params
+        (template_param
+          (identifier)))
+      (function_definition
+        return_type: (type_specifier
+          (identifier))
+        name: (identifier)
+        parameters: (parameter_list
+          (parameter
+            type: (type_specifier
+              (identifier))
+            name: (identifier)))
+        (block
+          (return_statement
+            (identifier)))))))
+
+================================================================================
+Inline function
+================================================================================
+
+inline void helper() {}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (function_definition
+      modifiers: (func_modifiers)
+      return_type: (primitive_type)
+      name: (identifier)
+      parameters: (parameter_list)
+      (block))))
+
+================================================================================
+Function with attributes
+================================================================================
+
+[[pipelined]] void process() {}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (function_definition
+      (attributes
+        (attribute
+          (identifier)))
+      return_type: (primitive_type)
+      name: (identifier)
+      parameters: (parameter_list)
+      (block))))

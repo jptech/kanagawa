@@ -1,0 +1,97 @@
+================================================================================
+Cast expression with type
+================================================================================
+
+auto x = cast<float>(y);
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (variable_decl
+      type: (primitive_type)
+      name: (identifier)
+      initializer: (call_expression
+        (cast_operator
+          (type_specifier
+            (identifier)))
+        (argument_list
+          (identifier))))))
+
+================================================================================
+Static cast expression
+================================================================================
+
+auto val = static_cast<uint32>(input);
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (variable_decl
+      type: (primitive_type)
+      name: (identifier)
+      initializer: (call_expression
+        (cast_operator
+          (type_specifier
+            (identifier)))
+        (argument_list
+          (identifier))))))
+
+================================================================================
+Reinterpret cast expression
+================================================================================
+
+auto bits = reinterpret_cast<uint64>(ptr);
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (variable_decl
+      type: (primitive_type)
+      name: (identifier)
+      initializer: (call_expression
+        (cast_operator
+          (type_specifier
+            (identifier)))
+        (argument_list
+          (identifier))))))
+
+================================================================================
+Checked cast expression
+================================================================================
+
+auto narrow = checked_cast<uint8>(wide);
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (variable_decl
+      type: (primitive_type)
+      name: (identifier)
+      initializer: (call_expression
+        (cast_operator
+          (type_specifier
+            (identifier)))
+        (argument_list
+          (identifier))))))
+
+================================================================================
+Cast without explicit type (uses auto deduction)
+================================================================================
+
+auto result = cast(value);
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (variable_decl
+      type: (primitive_type)
+      name: (identifier)
+      initializer: (call_expression
+        (cast_operator)
+        (argument_list
+          (identifier))))))

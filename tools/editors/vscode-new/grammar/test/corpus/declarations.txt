@@ -1,0 +1,127 @@
+================================================================================
+Simple variable declaration
+================================================================================
+
+uint32 count = 0;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (variable_decl
+      type: (type_specifier
+        (identifier))
+      name: (identifier)
+      initializer: (literal
+        (integer_literal)))))
+
+================================================================================
+Auto variable with initializer
+================================================================================
+
+auto x = 5;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (variable_decl
+      type: (primitive_type)
+      name: (identifier)
+      initializer: (literal
+        (integer_literal)))))
+
+================================================================================
+Templated array type variable
+================================================================================
+
+optional<T>[N] x;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (variable_decl
+      type: (array_type
+        (type_specifier
+          (identifier)
+          (identifier))
+        (identifier))
+      name: (identifier))))
+
+================================================================================
+Nested template array type
+================================================================================
+
+FIFO<uint<32>>[8] fifo;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (variable_decl
+      type: (array_type
+        (type_specifier
+          (identifier)
+          (primitive_type
+            (literal
+              (integer_literal))))
+        (literal
+          (integer_literal)))
+      name: (identifier))))
+
+================================================================================
+Multi-dimensional array
+================================================================================
+
+int[3][2] matrix;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (variable_decl
+      type: (array_type
+        (array_type
+          (primitive_type)
+          (literal
+            (integer_literal)))
+        (literal
+          (integer_literal)))
+      name: (identifier))))
+
+================================================================================
+Const variable
+================================================================================
+
+const uint32 MAX_SIZE = 100;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (variable_decl
+      type: (modified_type
+        (type_specifier
+          (identifier)))
+      name: (identifier)
+      initializer: (literal
+        (integer_literal)))))
+
+================================================================================
+Static variable
+================================================================================
+
+static uint32 counter = 0;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (variable_decl
+      modifiers: (decl_modifiers)
+      type: (type_specifier
+        (identifier))
+      name: (identifier)
+      initializer: (literal
+        (integer_literal)))))

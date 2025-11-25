@@ -1,0 +1,164 @@
+================================================================================
+Simple class
+================================================================================
+
+class Foo {}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (class_decl
+      name: (identifier))))
+
+================================================================================
+Class with members
+================================================================================
+
+class Counter {
+public:
+    uint32 value;
+    void increment() {}
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (class_decl
+      name: (identifier)
+      (member_decl)
+      (member_decl
+        (variable_decl
+          type: (type_specifier
+            (identifier))
+          name: (identifier)))
+      (member_decl
+        (function_definition
+          return_type: (primitive_type)
+          name: (identifier)
+          parameters: (parameter_list)
+          (block))))))
+
+================================================================================
+Template class
+================================================================================
+
+template <typename T, auto N>
+class Buffer {
+    T[N] data;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (class_template
+      (template_params
+        (template_param
+          (identifier))
+        (template_param
+          (identifier)))
+      (class_decl
+        name: (identifier)
+        (member_decl
+          (declaration
+            (variable_decl
+              type: (array_type
+                (type_specifier
+                  (identifier))
+                (identifier))
+              name: (identifier))))))))
+
+================================================================================
+Struct definition
+================================================================================
+
+struct Point {
+    int32 x;
+    int32 y;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (struct_decl
+      name: (identifier)
+      (member_decl
+        (declaration
+          (variable_decl
+            type: (type_specifier
+              (identifier))
+            name: (identifier))))
+      (member_decl
+        (variable_decl
+          type: (type_specifier
+            (identifier))
+          name: (identifier))))))
+
+================================================================================
+Enum definition
+================================================================================
+
+enum Color : uint8 {
+    Red = 0,
+    Green = 1,
+    Blue = 2
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (enum_decl
+      name: (identifier)
+      base_type: (type_specifier
+        (identifier))
+      (enum_constant
+        name: (identifier)
+        value: (literal
+          (integer_literal)))
+      (enum_constant
+        name: (identifier)
+        value: (literal
+          (integer_literal)))
+      (enum_constant
+        name: (identifier)
+        value: (literal
+          (integer_literal))))))
+
+================================================================================
+Type alias
+================================================================================
+
+using Index = uint32;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (alias_decl
+      name: (identifier)
+      type: (type_specifier
+        (identifier)))))
+
+================================================================================
+Template type alias
+================================================================================
+
+template <typename T>
+using Ptr = optional<T>;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (alias_template
+      (template_params
+        (template_param
+          (identifier)))
+      name: (identifier)
+      type: (type_specifier
+        (identifier)
+        (identifier)))))

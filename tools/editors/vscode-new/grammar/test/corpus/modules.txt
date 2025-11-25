@@ -1,0 +1,101 @@
+================================================================================
+Module declaration
+================================================================================
+
+module data.fifo {
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_decl
+    name: (module_name
+      (module_identifier_part)
+      (module_identifier_part))
+    (module_exports)))
+
+================================================================================
+Import statement
+================================================================================
+
+import data.memory
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (import_decl
+    path: (module_name
+      (module_identifier_part)
+      (module_identifier_part))))
+
+================================================================================
+Import with alias
+================================================================================
+
+import data.fifo as fifo
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (import_decl
+    path: (module_name
+      (module_identifier_part)
+      (module_identifier_part))
+    alias: (identifier)))
+
+================================================================================
+Module with exports
+================================================================================
+
+module control.loop { pipelined_for, parallel_for }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_decl
+    name: (module_name
+      (module_identifier_part)
+      (module_identifier_part))
+    (module_exports
+      (identifier)
+      (identifier))))
+
+================================================================================
+Module with nested content
+================================================================================
+
+module math
+
+uint32 abs(int32 x) {
+    if (x < 0) { return -x; }
+    return x;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_decl
+    name: (module_name
+      (module_identifier_part))
+    (declaration
+      (function_definition
+        return_type: (type_specifier
+          (identifier))
+        name: (identifier)
+        parameters: (parameter_list
+          (parameter
+            type: (type_specifier
+              (identifier))
+            name: (identifier)))
+        (block
+          (if_statement
+            (binary_expression
+              (identifier)
+              (literal
+                (integer_literal)))
+            (block
+              (return_statement
+                (unary_expression
+                  (identifier)))))
+          (return_statement
+            (identifier)))))))

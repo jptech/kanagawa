@@ -1,0 +1,101 @@
+================================================================================
+Simple method call
+================================================================================
+
+auto result = obj.compute();
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (variable_decl
+      type: (primitive_type)
+      name: (identifier)
+      initializer: (call_expression
+        (member_expression
+          (identifier)
+          (identifier))
+        (argument_list)))))
+
+================================================================================
+Chained method calls
+================================================================================
+
+auto val = a.b().c();
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (variable_decl
+      type: (primitive_type)
+      name: (identifier)
+      initializer: (call_expression
+        (member_expression
+          (call_expression
+            (member_expression
+              (identifier)
+              (identifier))
+            (argument_list))
+          (identifier))
+        (argument_list)))))
+
+================================================================================
+Method call with arguments
+================================================================================
+
+auto sum = list.reduce(0, add);
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (variable_decl
+      type: (primitive_type)
+      name: (identifier)
+      initializer: (call_expression
+        (member_expression
+          (identifier)
+          (identifier))
+        (argument_list
+          (literal
+            (integer_literal))
+          (identifier))))))
+
+================================================================================
+Member access without call
+================================================================================
+
+auto len = buffer.length;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (variable_decl
+      type: (primitive_type)
+      name: (identifier)
+      initializer: (member_expression
+        (identifier)
+        (identifier)))))
+
+================================================================================
+Templated method call
+================================================================================
+
+auto item = container.get<uint32>(index);
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (variable_decl
+      type: (primitive_type)
+      name: (identifier)
+      initializer: (call_expression
+        (member_expression
+          (identifier)
+          (identifier)
+          (identifier))
+        (argument_list
+          (identifier))))))

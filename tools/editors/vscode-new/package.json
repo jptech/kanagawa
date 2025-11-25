@@ -136,9 +136,10 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "pretest": "npm run compile && npm run lint",
+    "pretest": "npm run compile",
     "lint": "eslint src --ext ts",
-    "test": "node ./out/test/runTest.js"
+    "test": "mocha ./out/test/**/*.test.js --timeout 10000",
+    "test:grammar": "cd grammar && npx tree-sitter test"
   },
   "devDependencies": {
     "@types/glob": "^8.0.0",
