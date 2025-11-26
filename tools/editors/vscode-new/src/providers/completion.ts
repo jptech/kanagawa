@@ -53,34 +53,46 @@ export class KanagawaCompletionItemProvider implements vscode.CompletionItemProv
         token: vscode.CancellationToken,
         _context: vscode.CompletionContext
     ): Promise<vscode.CompletionItem[] | vscode.CompletionList | undefined> {
-        void _context;
-        const tree = this.treeService.getTree(document) ?? await this.treeService.parse(document);
-        if (!tree) { return undefined; }
+        try {
+            void _context;
+            
+            if (token.isCancellationRequested) { return undefined; }
+            
+            const tree = this.treeService.getTree(document) ?? await this.treeService.parse(document);
+            if (!tree) { return undefined; }
 
-        const lineText = document.lineAt(position.line).text;
-        const prefix = lineText.slice(0, position.character);
+            if (token.isCancellationRequested) { return undefined; }
 
-        // Member completions (after '.')
-        if (prefix.endsWith('.')) {
-            const memberItems = await this.provideMemberCompletions(document, position, tree, token);
-            if (memberItems.length > 0) {
-                return new vscode.CompletionList(memberItems, true);
+            const lineText = document.lineAt(position.line).text;
+            const prefix = lineText.slice(0, position.character);
+
+            // Member completions (after '.')
+            if (prefix.endsWith('.')) {
+                const memberItems = await this.provideMemberCompletions(document, position, tree, token);
+                if (memberItems.length > 0) {
+                    return new vscode.CompletionList(memberItems, true);
+                }
             }
-        }
 
-        // Static member completions (after '::')
-        if (prefix.endsWith('::')) {
-            const staticItems = await this.provideStaticMemberCompletions(document, position, tree, token, prefix);
-            if (staticItems.length > 0) {
-                return new vscode.CompletionList(staticItems, true);
+            // Static member completions (after '::')
+            if (prefix.endsWith('::')) {
+                const staticItems = await this.provideStaticMemberCompletions(document, position, tree, token, prefix);
+                if (staticItems.length > 0) {
+                    return new vscode.CompletionList(staticItems, true);
+                }
             }
+
+            if (token.isCancellationRequested) { return undefined; }
+
+            // General completions with tiered sorting
+            const currentPrefix = this.extractWordPrefix(lineText, position.character);
+            const items = await this.provideGeneralCompletions(document, position, tree, currentPrefix);
+
+            return new vscode.CompletionList(items, false);
+        } catch (error) {
+            console.error('Kanagawa: Completion provider error:', error);
+            return undefined;
         }
-
-        // General completions with tiered sorting
-        const currentPrefix = this.extractWordPrefix(lineText, position.character);
-        const items = await this.provideGeneralCompletions(document, position, tree, currentPrefix);
-
-        return new vscode.CompletionList(items, false);
     }
 
     /**

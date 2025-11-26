@@ -2,9 +2,16 @@
 .git/**
 .vscode/**
 .vscode-test/**
-node_modules/**
 src/**
 test/**
+
+# Explicitly include production dependencies (negate gitignore patterns)
+!node_modules/
+!node_modules/web-tree-sitter/**
+
+# Exclude all other node_modules except web-tree-sitter
+node_modules/*
+!node_modules/web-tree-sitter
 
 # Compiled test files (not needed in production)
 out/test/**
@@ -37,3 +44,6 @@ dist/service/**
 
 # ESLint config
 .eslintrc.json
+
+# Temp test folders
+vsix-test/**

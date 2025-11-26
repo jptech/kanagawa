@@ -66,9 +66,17 @@ export class TreeSitterService {
      */
     private parseMutex = new AsyncMutex();
 
+    /** Track initialization state for graceful degradation */
+    private initialized = false;
+    private initializationError: Error | undefined;
+
     constructor(private context: vscode.ExtensionContext) {}
 
-    async init() {
+    /**
+     * Initialize the Tree-sitter parser and language.
+     * @returns true if initialization succeeded, false otherwise
+     */
+    async init(): Promise<boolean> {
         try {
             // Explicitly point to the runtime WASM in the dist folder
             const runtimeWasmPath = path.join(this.context.extensionPath, 'dist', 'tree-sitter.wasm');
@@ -84,11 +92,29 @@ export class TreeSitterService {
             
             this.parser = new Parser();
             this.parser.setLanguage(this.language);
+            this.initialized = true;
             console.log('Kanagawa: Tree-sitter initialized successfully.');
+            return true;
         } catch (e) {
+            this.initializationError = e instanceof Error ? e : new Error(String(e));
             console.error('Failed to initialize TreeSitterService:', e);
             vscode.window.showErrorMessage(`Kanagawa: Failed to load Tree-sitter parser: ${e}`);
+            return false;
         }
+    }
+
+    /**
+     * Returns true if the parser is ready to use.
+     */
+    isReady(): boolean {
+        return this.initialized && this.parser !== undefined;
+    }
+
+    /**
+     * Returns the initialization error if init failed.
+     */
+    getInitError(): Error | undefined {
+        return this.initializationError;
     }
 
     getParser(): Parser | undefined {
@@ -136,7 +162,13 @@ export class TreeSitterService {
 
             // Use incremental parsing if we have a previous tree and content changes
             if (previous && isIncremental) {
-                newTree = this.parseIncremental(document, previous, contentChanges!);
+                try {
+                    newTree = this.parseIncremental(document, previous, contentChanges!);
+                } catch (incrementalError) {
+                    // Incremental parse failed - fall back to full reparse
+                    console.warn('Kanagawa: Incremental parse failed, falling back to full parse:', incrementalError);
+                    newTree = this.parser.parse(document.getText());
+                }
             } else {
                 // Full reparse - either no previous tree or no change information
                 newTree = this.parser.parse(document.getText());
@@ -144,7 +176,12 @@ export class TreeSitterService {
 
             // Clean up old tree after successful parse
             if (previous) {
-                previous.delete();
+                try {
+                    previous.delete();
+                } catch (deleteError) {
+                    // Tree deletion can fail if already deleted - ignore
+                    console.warn('Kanagawa: Failed to delete old tree:', deleteError);
+                }
             }
 
             this.trees.set(uri, newTree);

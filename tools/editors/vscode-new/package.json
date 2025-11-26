@@ -23,7 +23,9 @@
     "onCommand:kanagawa.typePeek.show",
     "onCommand:kanagawa.outline.selectCategories",
     "onCommand:kanagawa.outline.setModulePrefix",
-    "onCommand:kanagawa.outline.clearModulePrefix"
+    "onCommand:kanagawa.outline.clearModulePrefix",
+    "onCommand:kanagawa.diagnostics",
+    "onCommand:kanagawa.restart"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -115,6 +117,21 @@
       {
         "command": "kanagawa.deps.showInteractive",
         "title": "Kanagawa: Browse Module Dependencies",
+        "category": "Kanagawa"
+      },
+      {
+        "command": "kanagawa.diagnostics",
+        "title": "Kanagawa: Show Diagnostics",
+        "category": "Kanagawa"
+      },
+      {
+        "command": "kanagawa.restart",
+        "title": "Kanagawa: Restart Extension",
+        "category": "Kanagawa"
+      },
+      {
+        "command": "kanagawa.debugParseTree",
+        "title": "Kanagawa: Debug Parse Tree",
         "category": "Kanagawa"
       }
     ],

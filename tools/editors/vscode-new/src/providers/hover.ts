@@ -31,60 +31,73 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
         position: vscode.Position,
         token: vscode.CancellationToken
     ): Promise<vscode.Hover | undefined> {
-        return perfLogger.measure(PerfOps.HOVER, document.uri.toString(), async () => {
-            const tree = this.service.getTree(document) ?? await this.service.parse(document);
-            if (!tree) {
-                return undefined;
-            }
-
-            const node = tree.rootNode.descendantForPosition({
-                row: position.line,
-                column: position.character
-            });
-
-            const identifier = this.resolveIdentifierNode(node);
-            if (!identifier) {
-                return undefined;
-            }
-
-            const hoverRange = new vscode.Range(
-                new vscode.Position(identifier.startPosition.row, identifier.startPosition.column),
-                new vscode.Position(identifier.endPosition.row, identifier.endPosition.column)
-            );
-
-            // Try local variable/parameter first
-            const typeInfo = await this.findLocalTypeInfo(document, identifier);
-            if (typeInfo) {
-                // If this is an auto variable with an inlay hint showing the type,
-                // suppress the hover to avoid redundancy
-                if (typeInfo.isAutoWithInlayHint) {
+        try {
+            return await perfLogger.measure(PerfOps.HOVER, document.uri.toString(), async () => {
+                // Check for cancellation early
+                if (token.isCancellationRequested) { return undefined; }
+                
+                const tree = this.service.getTree(document) ?? await this.service.parse(document);
+                if (!tree) {
                     return undefined;
                 }
-                
-                const md = new vscode.MarkdownString();
-                md.appendCodeblock(typeInfo.signature, 'kanagawa');
-                if (typeInfo.initializer) {
-                    md.appendMarkdown(`\n\n**Initializer:** \`${typeInfo.initializer}\``);
+
+                if (token.isCancellationRequested) { return undefined; }
+
+                const node = tree.rootNode.descendantForPosition({
+                    row: position.line,
+                    column: position.character
+                });
+
+                const identifier = this.resolveIdentifierNode(node);
+                if (!identifier) {
+                    return undefined;
                 }
-                return new vscode.Hover(md, hoverRange);
-            }
 
-            // Resolve with confidence scoring
-            const resolution = await this.resolveWithConfidence(document, identifier);
+                const hoverRange = new vscode.Range(
+                    new vscode.Position(identifier.startPosition.row, identifier.startPosition.column),
+                    new vscode.Position(identifier.endPosition.row, identifier.endPosition.column)
+                );
 
-            if (resolution.confidence === 'none') {
+                // Try local variable/parameter first
+                const typeInfo = await this.findLocalTypeInfo(document, identifier);
+                if (typeInfo) {
+                    // If this is an auto variable with an inlay hint showing the type,
+                    // suppress the hover to avoid redundancy
+                    if (typeInfo.isAutoWithInlayHint) {
+                        return undefined;
+                    }
+                    
+                    const md = new vscode.MarkdownString();
+                    md.appendCodeblock(typeInfo.signature, 'kanagawa');
+                    if (typeInfo.initializer) {
+                        md.appendMarkdown(`\n\n**Initializer:** \`${typeInfo.initializer}\``);
+                    }
+                    return new vscode.Hover(md, hoverRange);
+                }
+
+                if (token.isCancellationRequested) { return undefined; }
+
+                // Resolve with confidence scoring
+                const resolution = await this.resolveWithConfidence(document, identifier);
+
+                if (resolution.confidence === 'none') {
+                    return undefined;
+                }
+
+                // Build hover content based on confidence
+                const markdowns = await this.buildHoverContent(document, resolution);
+
+                if (markdowns.length > 0) {
+                    return new vscode.Hover(markdowns, hoverRange);
+                }
+
                 return undefined;
-            }
-
-            // Build hover content based on confidence
-            const markdowns = await this.buildHoverContent(document, resolution);
-
-            if (markdowns.length > 0) {
-                return new vscode.Hover(markdowns, hoverRange);
-            }
-
+            }); // end perfLogger.measure
+        } catch (error) {
+            // Log error but don't crash the provider
+            console.error('Kanagawa: Hover provider error:', error);
             return undefined;
-        }); // end perfLogger.measure
+        }
     }
 
     /**

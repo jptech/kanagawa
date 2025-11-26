@@ -24,13 +24,26 @@ import { IndexStatusBar } from './views/statusBar';
 export async function activate(context: vscode.ExtensionContext) {
     console.log('Kanagawa "LSP-Lite" is activating...');
 
-    // Initialize performance logger (off by default)
-    perfLogger.init(context);
+    try {
+        // Initialize performance logger (off by default)
+        perfLogger.init(context);
 
-    const service = new TreeSitterService(context);
-    await service.init();
+        const service = new TreeSitterService(context);
+        const initSuccess = await service.init();
+        
+        if (!initSuccess) {
+            vscode.window.showErrorMessage(
+                'Kanagawa: Failed to initialize parser. Some features may not work.',
+                'Retry'
+            ).then(choice => {
+                if (choice === 'Retry') {
+                    vscode.commands.executeCommand('workbench.action.reloadWindow');
+                }
+            });
+            // Continue with partial functionality - providers will gracefully degrade
+        }
 
-    const queryManager = new QueryManager(context);
+        const queryManager = new QueryManager(context);
     
     // Preload all queries
     await Promise.all([
@@ -198,18 +211,53 @@ export async function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(
         vscode.commands.registerCommand('kanagawa.index.clear', async () => {
-            indexer.clearIndex();
-            vscode.window.showInformationMessage('Kanagawa index cleared.');
+            try {
+                indexer.clearIndex();
+                vscode.window.showInformationMessage('Kanagawa index cleared. Use "Rebuild Index" to re-index the workspace.');
+            } catch (error) {
+                console.error('Kanagawa: Failed to clear index:', error);
+                vscode.window.showErrorMessage(
+                    `Kanagawa: Failed to clear index: ${error instanceof Error ? error.message : String(error)}`
+                );
+            }
         }),
         vscode.commands.registerCommand('kanagawa.index.rebuild', async () => {
-            await vscode.window.withProgress({
-                location: vscode.ProgressLocation.Window,
-                title: 'Rebuilding Kanagawa index...'
-            }, async () => {
-                indexer.clearIndex();
-                await indexer.scanWorkspace();
-            });
-            vscode.window.showInformationMessage('Kanagawa index rebuilt.');
+            try {
+                await vscode.window.withProgress({
+                    location: vscode.ProgressLocation.Notification,
+                    title: 'Kanagawa: Rebuilding index...',
+                    cancellable: true
+                }, async (progress, token) => {
+                    progress.report({ message: 'Clearing existing index...' });
+                    indexer.clearIndex();
+                    
+                    progress.report({ message: 'Scanning workspace...' });
+                    await indexer.scanWorkspace(token);
+                    
+                    if (token.isCancellationRequested) {
+                        vscode.window.showWarningMessage('Kanagawa: Index rebuild cancelled.');
+                        return;
+                    }
+                    
+                    const stats = indexer.getStats();
+                    progress.report({ message: `Indexed ${stats.totalSymbols} symbols` });
+                });
+                
+                const stats = indexer.getStats();
+                vscode.window.showInformationMessage(
+                    `Kanagawa index rebuilt: ${stats.totalSymbols} symbols from ${stats.uniqueFiles} files.`
+                );
+            } catch (error) {
+                console.error('Kanagawa: Failed to rebuild index:', error);
+                vscode.window.showErrorMessage(
+                    `Kanagawa: Failed to rebuild index: ${error instanceof Error ? error.message : String(error)}`,
+                    'Show Diagnostics'
+                ).then(choice => {
+                    if (choice === 'Show Diagnostics') {
+                        vscode.commands.executeCommand('kanagawa.diagnostics');
+                    }
+                });
+            }
         }),
         vscode.commands.registerCommand('kanagawa.index.toggleVerbose', () => {
             const state = indexer.toggleVerbose();
@@ -303,8 +351,163 @@ export async function activate(context: vscode.ExtensionContext) {
                 perfLogger.setSlowThreshold(parseInt(value, 10));
                 vscode.window.showInformationMessage(`Kanagawa slow threshold set to ${value}ms`);
             }
+        }),
+        // Diagnostics command - shows extension health status
+        vscode.commands.registerCommand('kanagawa.diagnostics', async () => {
+            const diagOutput = vscode.window.createOutputChannel('Kanagawa Diagnostics');
+            diagOutput.clear();
+            diagOutput.show(true);
+            
+            diagOutput.appendLine('═══════════════════════════════════════════════════════════');
+            diagOutput.appendLine('                   KANAGAWA DIAGNOSTICS');
+            diagOutput.appendLine('═══════════════════════════════════════════════════════════');
+            diagOutput.appendLine('');
+            
+            // Tree-sitter status
+            diagOutput.appendLine('▶ Tree-sitter Service:');
+            const treeSitterOk = service.isReady();
+            diagOutput.appendLine(`    Status: ${treeSitterOk ? '✓ Initialized' : '✗ NOT INITIALIZED'}`);
+            if (!treeSitterOk) {
+                diagOutput.appendLine('    ⚠ Parse tree features will not work. Try "Kanagawa: Restart Extension".');
+            }
+            diagOutput.appendLine('');
+            
+            // Index status
+            diagOutput.appendLine('▶ Workspace Index:');
+            const stats = indexer.getStats();
+            diagOutput.appendLine(`    Total symbols: ${stats.totalSymbols}`);
+            diagOutput.appendLine(`    Files indexed: ${stats.uniqueFiles}`);
+            diagOutput.appendLine(`    Verbose mode: ${stats.verbose ? 'enabled' : 'disabled'}`);
+            if (stats.totalSymbols === 0) {
+                diagOutput.appendLine('    ⚠ No symbols indexed. Try "Kanagawa: Rebuild Index".');
+            }
+            diagOutput.appendLine('');
+            
+            // Configuration status
+            diagOutput.appendLine('▶ Configuration:');
+            const config = vscode.workspace.getConfiguration('kanagawa');
+            const importPaths = config.get<string[]>('index.importPaths') ?? [];
+            const stdlibPath = config.get<string>('index.stdlibPath') ?? '';
+            const excludePatterns = config.get<string[]>('index.exclude') ?? [];
+            diagOutput.appendLine(`    Import paths: ${importPaths.length > 0 ? importPaths.join(', ') : '(none)'}`);
+            diagOutput.appendLine(`    Stdlib path: ${stdlibPath || '(not set)'}`);
+            diagOutput.appendLine(`    Exclude patterns: ${excludePatterns.length > 0 ? excludePatterns.join(', ') : '(none)'}`);
+            diagOutput.appendLine('');
+            
+            // kanagawa.config.json status
+            diagOutput.appendLine('▶ Project Configuration (kanagawa.config.json):');
+            try {
+                const workspaceFolders = vscode.workspace.workspaceFolders;
+                if (workspaceFolders && workspaceFolders.length > 0) {
+                    const configUri = vscode.Uri.joinPath(workspaceFolders[0].uri, 'kanagawa.config.json');
+                    try {
+                        const configDoc = await vscode.workspace.openTextDocument(configUri);
+                        const configJson = JSON.parse(configDoc.getText());
+                        diagOutput.appendLine(`    Found: ${configUri.fsPath}`);
+                        if (configJson.importPaths) {
+                            diagOutput.appendLine(`    importPaths: ${JSON.stringify(configJson.importPaths)}`);
+                        }
+                        if (configJson.stdlibPath) {
+                            diagOutput.appendLine(`    stdlibPath: ${configJson.stdlibPath}`);
+                        }
+                    } catch {
+                        diagOutput.appendLine('    Not found or invalid (using VS Code settings instead)');
+                    }
+                } else {
+                    diagOutput.appendLine('    No workspace folder open');
+                }
+            } catch (e) {
+                diagOutput.appendLine(`    Error checking config: ${e}`);
+            }
+            diagOutput.appendLine('');
+            
+            // Workspace status
+            diagOutput.appendLine('▶ Workspace:');
+            const folders = vscode.workspace.workspaceFolders;
+            if (folders && folders.length > 0) {
+                for (const folder of folders) {
+                    diagOutput.appendLine(`    Folder: ${folder.uri.fsPath}`);
+                }
+            } else {
+                diagOutput.appendLine('    No workspace folders open');
+            }
+            diagOutput.appendLine('');
+            
+            // Recovery options
+            diagOutput.appendLine('═══════════════════════════════════════════════════════════');
+            diagOutput.appendLine('                    RECOVERY OPTIONS');
+            diagOutput.appendLine('═══════════════════════════════════════════════════════════');
+            diagOutput.appendLine('');
+            diagOutput.appendLine('If you encounter issues, try these commands:');
+            diagOutput.appendLine('  • "Kanagawa: Clear Index" - Clears cached symbols');
+            diagOutput.appendLine('  • "Kanagawa: Rebuild Index" - Re-scans workspace files');
+            diagOutput.appendLine('  • "Kanagawa: Restart Extension" - Reinitializes everything');
+            diagOutput.appendLine('  • "Developer: Reload Window" - Full VS Code reload');
+            diagOutput.appendLine('');
+            
+            // Overall health
+            const isHealthy = treeSitterOk && stats.totalSymbols > 0;
+            diagOutput.appendLine('═══════════════════════════════════════════════════════════');
+            diagOutput.appendLine(`Overall Status: ${isHealthy ? '✓ HEALTHY' : '⚠ ISSUES DETECTED'}`);
+            diagOutput.appendLine('═══════════════════════════════════════════════════════════');
+        }),
+        // Restart command - reinitializes the extension
+        vscode.commands.registerCommand('kanagawa.restart', async () => {
+            const choice = await vscode.window.showWarningMessage(
+                'Restart Kanagawa extension? This will clear all caches and reinitialize.',
+                'Restart',
+                'Cancel'
+            );
+            
+            if (choice !== 'Restart') {
+                return;
+            }
+            
+            try {
+                await vscode.window.withProgress({
+                    location: vscode.ProgressLocation.Notification,
+                    title: 'Kanagawa: Restarting...',
+                    cancellable: false
+                }, async (progress) => {
+                    progress.report({ message: 'Clearing caches...' });
+                    indexer.clearIndex();
+                    perfLogger.clearStats();
+                    
+                    progress.report({ message: 'Reinitializing Tree-sitter...' });
+                    await service.init();
+                    
+                    progress.report({ message: 'Rebuilding index...' });
+                    await indexer.scanWorkspace();
+                    
+                    const stats = indexer.getStats();
+                    progress.report({ message: `Done! Indexed ${stats.totalSymbols} symbols.` });
+                });
+                
+                vscode.window.showInformationMessage('Kanagawa extension restarted successfully.');
+            } catch (error) {
+                console.error('Kanagawa: Failed to restart:', error);
+                vscode.window.showErrorMessage(
+                    `Kanagawa: Failed to restart: ${error instanceof Error ? error.message : String(error)}`,
+                    'Reload Window'
+                ).then(choice => {
+                    if (choice === 'Reload Window') {
+                        vscode.commands.executeCommand('workbench.action.reloadWindow');
+                    }
+                });
+            }
         })
     );
+    } catch (error) {
+        console.error('Kanagawa: Critical error during activation:', error);
+        vscode.window.showErrorMessage(
+            `Kanagawa: Extension failed to activate: ${error instanceof Error ? error.message : String(error)}`,
+            'Reload Window'
+        ).then(choice => {
+            if (choice === 'Reload Window') {
+                vscode.commands.executeCommand('workbench.action.reloadWindow');
+            }
+        });
+    }
 }
 
 export function deactivate(): void {

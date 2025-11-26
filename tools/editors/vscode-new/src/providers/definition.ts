@@ -30,8 +30,12 @@ export class KanagawaDefinitionProvider implements vscode.DefinitionProvider {
     ): Promise<vscode.Definition | undefined> {
         const endTiming = perfLogger.start(PerfOps.DEFINITION, document.uri.toString());
         try {
+            if (token.isCancellationRequested) { return undefined; }
+            
             const tree = this.service.getTree(document) ?? await this.service.parse(document);
             if (!tree) { return undefined; }
+
+            if (token.isCancellationRequested) { return undefined; }
 
             const node = tree.rootNode.descendantForPosition({
                 row: position.line,
@@ -62,6 +66,9 @@ export class KanagawaDefinitionProvider implements vscode.DefinitionProvider {
 
             // Single match even at lower confidence → jump directly
             return new vscode.Location(resolution.primary.uri, resolution.primary.range);
+        } catch (error) {
+            console.error('Kanagawa: Definition provider error:', error);
+            return undefined;
         } finally {
             endTiming();
         }

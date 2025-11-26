@@ -350,15 +350,22 @@ export function registerDependencyGraphCommands(
 ): void {
     const provider = new DependencyGraphProvider(indexer);
     
+    const handleError = (operation: string) => (error: unknown) => {
+        console.error(`Kanagawa: ${operation} failed:`, error);
+        vscode.window.showErrorMessage(
+            `Kanagawa: ${operation} failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+    };
+    
     context.subscriptions.push(
         vscode.commands.registerCommand('kanagawa.deps.showCurrent', () => {
-            provider.showForCurrentFile().catch(console.error);
+            provider.showForCurrentFile().catch(handleError('Show current file dependencies'));
         }),
         vscode.commands.registerCommand('kanagawa.deps.showFull', () => {
-            provider.showFullGraph().catch(console.error);
+            provider.showFullGraph().catch(handleError('Show full dependency graph'));
         }),
         vscode.commands.registerCommand('kanagawa.deps.showInteractive', () => {
-            provider.showInteractive().catch(console.error);
+            provider.showInteractive().catch(handleError('Browse module dependencies'));
         }),
         provider
     );
