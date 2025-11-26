@@ -10,6 +10,16 @@ interface CallContext {
     callee: Parser.SyntaxNode;
 }
 
+/** Context for template argument signature help */
+interface TemplateContext {
+    /** The template instantiation node (e.g., `FIFO<...>`) */
+    templateNode: Parser.SyntaxNode;
+    /** The template arguments node (e.g., `<uint32, 32>`) */
+    templateArgs: Parser.SyntaxNode;
+    /** The base name of the template (e.g., `FIFO`) */
+    baseName: string;
+}
+
 /** Parsed parameter information */
 interface ParsedParameter {
     label: string;         // Full parameter text: "uint32 size"
@@ -31,6 +41,20 @@ export class KanagawaSignatureHelpProvider implements vscode.SignatureHelpProvid
         token: vscode.CancellationToken,
         context: vscode.SignatureHelpContext
     ): Promise<vscode.SignatureHelp | undefined> {
+        try {
+            return await this.provideSignatureHelpImpl(document, position, token, context);
+        } catch (error) {
+            console.error('[SignatureHelp] Error:', error);
+            return undefined;
+        }
+    }
+
+    private async provideSignatureHelpImpl(
+        document: vscode.TextDocument,
+        position: vscode.Position,
+        token: vscode.CancellationToken,
+        context: vscode.SignatureHelpContext
+    ): Promise<vscode.SignatureHelp | undefined> {
         const tree = this.service.getTree(document) ?? await this.service.parse(document);
         if (!tree) { 
             // If we have previous signature help and this is a retrigger, preserve it
@@ -44,6 +68,19 @@ export class KanagawaSignatureHelpProvider implements vscode.SignatureHelpProvid
             row: position.line,
             column: position.character
         });
+
+        // FIRST: Check for template context (triggered by '<')
+        // Template signature help takes priority over function call help
+        const templateHelpEnabled = vscode.workspace.getConfiguration('kanagawa.signatureHelp.templateParameters').get<boolean>('enabled', true);
+        if (templateHelpEnabled) {
+            const templateContext = this.findTemplateContext(node, document, position, tree);
+            if (templateContext) {
+                const templateHelp = await this.provideTemplateSignatureHelp(document, position, templateContext);
+                if (templateHelp) {
+                    return templateHelp;
+                }
+            }
+        }
 
         // Try multiple strategies to find the call context
         let callContext = this.findCallContext(node);
@@ -789,5 +826,524 @@ export class KanagawaSignatureHelpProvider implements vscode.SignatureHelpProvid
             if (found) { return found; }
         }
         return undefined;
+    }
+
+    // ============================================================================
+    // TEMPLATE SIGNATURE HELP
+    // ============================================================================
+
+    /**
+     * Finds template context when cursor is inside template arguments.
+     * Detects patterns like: `FIFO<|`, `Map<string, |>`, `Array<T, |>`
+     */
+    private findTemplateContext(
+        node: Parser.SyntaxNode | null,
+        document: vscode.TextDocument,
+        position: vscode.Position,
+        tree: Parser.Tree
+    ): TemplateContext | undefined {
+        // First try AST-based detection
+        const astContext = this.findTemplateContextFromAST(node);
+        if (astContext) { return astContext; }
+
+        // Fallback to text-based detection for incomplete parses
+        return this.findTemplateContextFromText(document, position, tree);
+    }
+
+    /**
+     * AST-based template context detection.
+     * Walks up from current node looking for template_args or template_type.
+     */
+    private findTemplateContextFromAST(node: Parser.SyntaxNode | null): TemplateContext | undefined {
+        let current = node;
+        while (current) {
+            // Check for template_args (we're inside <...>)
+            if (current.type === 'template_args') {
+                const parent = current.parent;
+                if (parent) {
+                    const baseName = this.extractTemplateBaseName(parent);
+                    if (baseName) {
+                        return {
+                            templateNode: parent,
+                            templateArgs: current,
+                            baseName
+                        };
+                    }
+                }
+            }
+
+            // Check for template_type or template_call
+            if (current.type === 'template_type' || current.type === 'template_call') {
+                const templateArgs = current.children.find(c => c.type === 'template_args');
+                const baseName = this.extractTemplateBaseName(current);
+                if (templateArgs && baseName) {
+                    return {
+                        templateNode: current,
+                        templateArgs,
+                        baseName
+                    };
+                }
+            }
+
+            current = current.parent;
+        }
+        return undefined;
+    }
+
+    /**
+     * Text-based fallback for template context detection.
+     * Scans backwards from cursor to find `identifier<` pattern.
+     */
+    private findTemplateContextFromText(
+        document: vscode.TextDocument,
+        position: vscode.Position,
+        tree: Parser.Tree
+    ): TemplateContext | undefined {
+        const startLine = Math.max(0, position.line - 5);
+        const textRange = new vscode.Range(startLine, 0, position.line, position.character);
+        const text = document.getText(textRange);
+
+        // Count angle brackets to determine if we're inside template args
+        let angleDepth = 0;
+        let parenDepth = 0;
+        let openAngleIndex = -1;
+
+        for (let i = text.length - 1; i >= 0; i--) {
+            const ch = text[i];
+            switch (ch) {
+                case '>':
+                    // Be careful with >> operator and comparisons
+                    if (i > 0 && text[i - 1] === '>') {
+                        i--; // Skip >>
+                    } else if (i > 0 && text[i - 1] === '-') {
+                        // Skip -> operator
+                    } else {
+                        angleDepth++;
+                    }
+                    break;
+                case '<':
+                    if (angleDepth === 0) {
+                        openAngleIndex = i;
+                    } else {
+                        angleDepth--;
+                    }
+                    break;
+                case ')': parenDepth++; break;
+                case '(':
+                    if (parenDepth > 0) {
+                        parenDepth--;
+                    } else {
+                        // Hit an unmatched '(' - we're probably in function args, not template
+                        return undefined;
+                    }
+                    break;
+                case ';': case '{': case '}':
+                    // Statement boundary - stop searching
+                    return undefined;
+            }
+            if (openAngleIndex >= 0) { break; }
+        }
+
+        if (openAngleIndex < 0) { return undefined; }
+
+        // Extract the identifier before '<'
+        let identEnd = openAngleIndex;
+        while (identEnd > 0 && /\s/.test(text[identEnd - 1])) {
+            identEnd--;
+        }
+
+        let identStart = identEnd;
+        while (identStart > 0 && /[a-zA-Z0-9_]/.test(text[identStart - 1])) {
+            identStart--;
+        }
+
+        if (identStart >= identEnd) { return undefined; }
+
+        const baseName = text.substring(identStart, identEnd);
+        if (!baseName || /^\d/.test(baseName)) { return undefined; } // Skip if starts with digit
+
+        // Calculate the position of the identifier in the document
+        const identLine = startLine + text.substring(0, identStart).split('\n').length - 1;
+        const lastNewline = text.lastIndexOf('\n', identStart);
+        const identCol = lastNewline >= 0 ? identStart - lastNewline - 1 : identStart;
+
+        // Find the AST node at this position
+        const nodeAtIdent = tree.rootNode.descendantForPosition({
+            row: identLine,
+            column: identCol
+        });
+
+        // Create a synthetic context
+        return {
+            templateNode: nodeAtIdent ?? tree.rootNode,
+            templateArgs: nodeAtIdent ?? tree.rootNode,
+            baseName
+        };
+    }
+
+    /**
+     * Extracts the base template name from a template node.
+     */
+    private extractTemplateBaseName(node: Parser.SyntaxNode): string | undefined {
+        // For template_type: look for identifier or type_identifier
+        if (node.type === 'template_type') {
+            const ident = node.children.find(c =>
+                c.type === 'identifier' || c.type === 'type_identifier'
+            );
+            return ident?.text;
+        }
+
+        // For template_call: look for identifier
+        if (node.type === 'template_call') {
+            const ident = node.children.find(c => c.type === 'identifier');
+            return ident?.text;
+        }
+
+        // For member expressions with template: check the member part
+        if (node.type === 'member_expression') {
+            const member = node.namedChild(node.namedChildCount - 1);
+            if (member) {
+                return this.extractTemplateBaseName(member);
+            }
+        }
+
+        // Generic: look for first identifier child
+        const ident = node.children.find(c =>
+            c.type === 'identifier' || c.type === 'type_identifier'
+        );
+        return ident?.text;
+    }
+
+    /**
+     * Provides signature help specifically for template arguments.
+     */
+    private async provideTemplateSignatureHelp(
+        document: vscode.TextDocument,
+        position: vscode.Position,
+        templateContext: TemplateContext
+    ): Promise<vscode.SignatureHelp | undefined> {
+        try {
+            const { baseName } = templateContext;
+
+            // Look up the template definition
+            const symbols = this.indexer.getSymbols(baseName);
+            if (!symbols || symbols.length === 0) { return undefined; }
+
+            // Find template symbols (class, struct, function, alias with template params)
+            const templateSymbols = symbols.filter(s =>
+                (s.detail && s.detail.includes('template')) ||
+                (s.signature && s.signature.includes('template'))
+            );
+
+            if (templateSymbols.length === 0) {
+                // Try getting template parameters directly
+                for (const sym of symbols) {
+                    if (sym.category === 'class' || sym.category === 'struct' || sym.category === 'alias' || sym.category === 'function') {
+                        const params = await this.indexer.getTemplateParametersForSymbol(sym);
+                        if (params.length > 0) {
+                            templateSymbols.push(sym);
+                        }
+                    }
+                }
+            }
+
+            if (templateSymbols.length === 0) { return undefined; }
+
+            // Use the first (best) match
+            const templateSymbol = templateSymbols[0];
+            const templateParams = await this.indexer.getTemplateParametersForSymbol(templateSymbol);
+
+            if (templateParams.length === 0) { return undefined; }
+
+            // Compute active template parameter
+            const activeParam = this.computeActiveTemplateParameter(document, position);
+
+            // Build the signature
+            const signature = this.buildTemplateSignature(templateSymbol, templateParams, document, position);
+
+            const help = new vscode.SignatureHelp();
+            help.signatures = [signature];
+            help.activeSignature = 0;
+            help.activeParameter = Math.min(activeParam, Math.max(0, templateParams.length - 1));
+
+            return help;
+        } catch (error) {
+            console.error('[SignatureHelp] Template signature error:', error);
+            return undefined;
+        }
+    }
+
+    /**
+     * Computes which template parameter is currently being typed.
+     * Counts commas from the opening '<' to the cursor position.
+     */
+    private computeActiveTemplateParameter(
+        document: vscode.TextDocument,
+        position: vscode.Position
+    ): number {
+        const startLine = Math.max(0, position.line - 5);
+        const textRange = new vscode.Range(startLine, 0, position.line, position.character);
+        const text = document.getText(textRange);
+
+        // Find the opening '<' by scanning backwards
+        let angleDepth = 0;
+        let openAngleIndex = -1;
+
+        for (let i = text.length - 1; i >= 0; i--) {
+            const ch = text[i];
+            if (ch === '>') { angleDepth++; }
+            else if (ch === '<') {
+                if (angleDepth === 0) {
+                    openAngleIndex = i;
+                    break;
+                }
+                angleDepth--;
+            }
+        }
+
+        if (openAngleIndex < 0) { return 0; }
+
+        // Count commas from opening '<' to cursor, respecting nesting
+        const argsText = text.substring(openAngleIndex + 1);
+        let commaCount = 0;
+        let parenDepth = 0;
+        angleDepth = 0;
+        let bracketDepth = 0;
+        let braceDepth = 0;
+        let inString = false;
+        let stringChar = '';
+
+        for (let i = 0; i < argsText.length; i++) {
+            const ch = argsText[i];
+            const prevCh = i > 0 ? argsText[i - 1] : '';
+
+            // Handle string literals
+            if ((ch === '"' || ch === "'") && prevCh !== '\\') {
+                if (!inString) {
+                    inString = true;
+                    stringChar = ch;
+                } else if (ch === stringChar) {
+                    inString = false;
+                }
+                continue;
+            }
+
+            if (inString) { continue; }
+
+            switch (ch) {
+                case '(': parenDepth++; break;
+                case ')': parenDepth--; break;
+                case '<': angleDepth++; break;
+                case '>': angleDepth--; break;
+                case '[': bracketDepth++; break;
+                case ']': bracketDepth--; break;
+                case '{': braceDepth++; break;
+                case '}': braceDepth--; break;
+                case ',':
+                    // Only count commas at the top level
+                    if (parenDepth === 0 && angleDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
+                        commaCount++;
+                    }
+                    break;
+            }
+        }
+
+        return commaCount;
+    }
+
+    /**
+     * Builds a SignatureInformation for template parameters.
+     */
+    private buildTemplateSignature(
+        symbol: SymbolInfo,
+        templateParams: SymbolInfo[],
+        document: vscode.TextDocument,
+        position: vscode.Position
+    ): vscode.SignatureInformation {
+        // Collect current argument texts for display
+        const argumentTexts = this.collectCurrentTemplateArguments(document, position);
+
+        // Build the label: "template<typename T, auto N = 32>"
+        const paramLabels = templateParams.map(param => param.signature ?? param.name);
+        const label = `${symbol.name}<${paramLabels.join(', ')}>`;
+
+        // Create documentation
+        let documentation: vscode.MarkdownString | undefined;
+        if (symbol.docMarkdown) {
+            documentation = new vscode.MarkdownString(symbol.docMarkdown);
+        } else if (symbol.signature) {
+            documentation = new vscode.MarkdownString();
+            documentation.appendCodeblock(symbol.signature, 'kanagawa');
+        }
+
+        const signature = new vscode.SignatureInformation(label, documentation);
+
+        // Build parameter information
+        signature.parameters = templateParams.map((param, index) => {
+            const paramLabel = param.signature ?? param.name;
+            const actual = argumentTexts[index];
+
+            // Create rich documentation for the parameter
+            const paramDoc = new vscode.MarkdownString();
+
+            // Show the parameter kind (type vs value)
+            const kind = param.category === 'alias' || param.typeHint === 'type' ? 'type' : 'value';
+            paramDoc.appendMarkdown(`**${kind}** parameter`);
+
+            // Show constraint if any
+            if (param.typeHint && param.typeHint !== 'type') {
+                paramDoc.appendMarkdown(` of type \`${param.typeHint}\``);
+            }
+
+            // Show default value if any
+            if (param.signature && param.signature.includes('=')) {
+                const defaultMatch = param.signature.match(/=\s*(.+)$/);
+                if (defaultMatch) {
+                    paramDoc.appendMarkdown(`\n\nDefault: \`${defaultMatch[1].trim()}\``);
+                }
+            }
+
+            // Show current argument value
+            if (actual) {
+                paramDoc.appendMarkdown(`\n\n**Current:** \`${actual}\``);
+            }
+
+            // Add any doc comments
+            if (param.docMarkdown) {
+                paramDoc.appendMarkdown('\n\n---\n\n');
+                paramDoc.appendMarkdown(param.docMarkdown);
+            }
+
+            const info = new vscode.ParameterInformation(paramLabel, paramDoc);
+            return info;
+        });
+
+        return signature;
+    }
+
+    /**
+     * Collects current template argument texts from the document.
+     */
+    private collectCurrentTemplateArguments(
+        document: vscode.TextDocument,
+        position: vscode.Position
+    ): string[] {
+        const startLine = Math.max(0, position.line - 5);
+        const textRange = new vscode.Range(startLine, 0, position.line, position.character);
+        const text = document.getText(textRange);
+
+        // Find the opening '<'
+        let angleDepth = 0;
+        let openAngleIndex = -1;
+
+        for (let i = text.length - 1; i >= 0; i--) {
+            const ch = text[i];
+            if (ch === '>') { angleDepth++; }
+            else if (ch === '<') {
+                if (angleDepth === 0) {
+                    openAngleIndex = i;
+                    break;
+                }
+                angleDepth--;
+            }
+        }
+
+        if (openAngleIndex < 0) { return []; }
+
+        // Parse arguments from '<' to cursor
+        const argsText = text.substring(openAngleIndex + 1);
+        return this.splitTemplateArguments(argsText);
+    }
+
+    /**
+     * Splits template arguments by comma, respecting nesting.
+     */
+    private splitTemplateArguments(argsText: string): string[] {
+        const args: string[] = [];
+        let current = '';
+        let parenDepth = 0;
+        let angleDepth = 0;
+        let bracketDepth = 0;
+        let braceDepth = 0;
+        let inString = false;
+        let stringChar = '';
+
+        for (let i = 0; i < argsText.length; i++) {
+            const ch = argsText[i];
+            const prevCh = i > 0 ? argsText[i - 1] : '';
+
+            // Handle string literals
+            if ((ch === '"' || ch === "'") && prevCh !== '\\') {
+                if (!inString) {
+                    inString = true;
+                    stringChar = ch;
+                } else if (ch === stringChar) {
+                    inString = false;
+                }
+                current += ch;
+                continue;
+            }
+
+            if (inString) {
+                current += ch;
+                continue;
+            }
+
+            switch (ch) {
+                case '(':
+                    parenDepth++;
+                    current += ch;
+                    break;
+                case ')':
+                    parenDepth--;
+                    current += ch;
+                    break;
+                case '<':
+                    angleDepth++;
+                    current += ch;
+                    break;
+                case '>':
+                    if (angleDepth > 0) {
+                        angleDepth--;
+                        current += ch;
+                    }
+                    // Don't add closing '>' at depth 0 - it ends the template args
+                    break;
+                case '[':
+                    bracketDepth++;
+                    current += ch;
+                    break;
+                case ']':
+                    bracketDepth--;
+                    current += ch;
+                    break;
+                case '{':
+                    braceDepth++;
+                    current += ch;
+                    break;
+                case '}':
+                    braceDepth--;
+                    current += ch;
+                    break;
+                case ',':
+                    if (parenDepth === 0 && angleDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
+                        args.push(current.trim());
+                        current = '';
+                    } else {
+                        current += ch;
+                    }
+                    break;
+                default:
+                    current += ch;
+                    break;
+            }
+        }
+
+        // Add the last argument (what user is currently typing)
+        if (current.trim()) {
+            args.push(current.trim());
+        }
+
+        return args;
     }
 }

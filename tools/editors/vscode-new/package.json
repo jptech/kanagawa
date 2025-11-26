@@ -163,6 +163,11 @@
           "default": true,
           "description": "Show template parameter name hints at template instantiation sites."
         },
+        "kanagawa.signatureHelp.templateParameters.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show template parameter signature help when typing template arguments (triggered by '<')."
+        },
         "kanagawa.compiler.importPaths": {
           "type": "array",
           "scope": "resource",

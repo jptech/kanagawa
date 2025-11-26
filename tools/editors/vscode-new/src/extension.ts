@@ -59,8 +59,8 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.languages.registerFoldingRangeProvider('kanagawa', new KanagawaFoldingRangeProvider(service)),
         vscode.languages.registerCompletionItemProvider('kanagawa', new KanagawaCompletionItemProvider(indexer, service), '.'),
         vscode.languages.registerSignatureHelpProvider('kanagawa', new KanagawaSignatureHelpProvider(service, indexer), {
-            triggerCharacters: ['(', ','],
-            retriggerCharacters: [')', ',', ' ']
+            triggerCharacters: ['(', ',', '<'],
+            retriggerCharacters: [')', ',', ' ', '>']
         }),
         vscode.languages.registerCodeLensProvider({ language: 'kanagawa' }, new KanagawaTypePeekCodeLensProvider(service, indexer)),
         vscode.languages.registerReferenceProvider('kanagawa', new KanagawaReferencesProvider(service, indexer)),
