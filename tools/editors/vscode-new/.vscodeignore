@@ -1,0 +1,39 @@
+# Development files
+.git/**
+.vscode/**
+.vscode-test/**
+node_modules/**
+src/**
+test/**
+
+# Compiled test files (not needed in production)
+out/test/**
+
+# Build artifacts (we use out/ for runtime)
+**/*.ts
+**/*.map
+*.vsix
+*.tgz
+
+# Test configuration
+.mocharc.json
+tsconfig.test.json
+
+# Documentation (internal)
+ARCHITECTURE_LESSONS.md
+DEBUGGING.md
+GRAMMAR_STATUS.md
+LARGE_PROJECT_ROADMAP.md
+symbol_upgrade_plan.md
+
+# Grammar source and build dependencies (only need compiled WASM in dist/)
+grammar/**
+
+# Dist folder JS files (we use out/ for JS, but dist/ for WASM)
+dist/**/*.js
+dist/**/*.js.map
+dist/providers/**
+dist/service/**
+
+# ESLint config
+.eslintrc.json

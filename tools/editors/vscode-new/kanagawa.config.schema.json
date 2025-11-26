@@ -1,0 +1,41 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "Kanagawa Project Configuration",
+    "description": "Configuration file for Kanagawa VS Code extension project settings",
+    "type": "object",
+    "properties": {
+        "importPaths": {
+            "type": "array",
+            "description": "Additional directories to search for imported Kanagawa modules. Paths are relative to the workspace root.",
+            "items": {
+                "type": "string"
+            },
+            "default": [],
+            "examples": [
+                ["../shared-lib", "vendor/third-party"],
+                ["modules/core/src", "modules/io/src"]
+            ]
+        },
+        "stdlibPath": {
+            "type": "string",
+            "description": "Override for the Kanagawa standard library location. Relative paths are resolved against the workspace root.",
+            "examples": [
+                ".kanagawa/stdlib",
+                "/opt/kanagawa/lib"
+            ]
+        },
+        "exclude": {
+            "type": "array",
+            "description": "Glob patterns for files and folders to exclude from indexing. Patterns are matched against relative paths.",
+            "items": {
+                "type": "string"
+            },
+            "default": [],
+            "examples": [
+                ["**/generated/**", "**/*.gen.k"],
+                ["test_vectors/**", "benchmarks/**"]
+            ]
+        }
+    },
+    "additionalProperties": false
+}

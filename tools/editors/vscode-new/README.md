@@ -205,12 +205,6 @@ The following directories are automatically skipped during indexing:
 - `node_modules`
 - `build`, `dist`, `out`
 
-## Contributing
-
-See [ARCHITECTURE_LESSONS.md](ARCHITECTURE_LESSONS.md) for development patterns and anti-patterns discovered during development.
-
-See [DEBUGGING.md](DEBUGGING.md) for extension debugging techniques.
-
 ## License
 
-See [LICENSE](LICENSE) file.
+See LICENSE file.
