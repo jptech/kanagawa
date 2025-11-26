@@ -210,3 +210,28 @@ export function getDefinitionName(node: Parser.SyntaxNode): string | undefined {
 export function getTypeNode(node: Parser.SyntaxNode): Parser.SyntaxNode | undefined {
     return node.childForFieldName('type') ?? undefined;
 }
+
+/**
+ * Creates a unique string key for a location (URI + position).
+ * Useful for deduplication in Sets and Maps.
+ * 
+ * @param uri The document URI
+ * @param range The range (uses start position)
+ * @returns A string key in the format "uri#line:character"
+ */
+export function makeLocationKey(uri: vscode.Uri, range: vscode.Range): string {
+    return `${uri.toString()}#${range.start.line}:${range.start.character}`;
+}
+
+/**
+ * Creates a unique string key for a symbol location.
+ * Useful for deduplication in Sets and Maps.
+ * 
+ * @param uri The document URI
+ * @param line The line number
+ * @param character The character position
+ * @returns A string key in the format "uri#line:character"
+ */
+export function makePositionKey(uri: vscode.Uri, line: number, character: number): string {
+    return `${uri.toString()}#${line}:${character}`;
+}

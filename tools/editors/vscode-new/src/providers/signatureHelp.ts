@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as Parser from 'web-tree-sitter';
 import { TreeSitterService } from '../service/treeSitter';
 import { WorkspaceIndexer, SymbolInfo, SymbolContextHint } from '../service/indexer';
+import { getNodeText } from '../utils/nodeUtils';
 
 interface CallContext {
     callExpression: Parser.SyntaxNode;
@@ -411,7 +412,7 @@ export class KanagawaSignatureHelpProvider implements vscode.SignatureHelpProvid
             }
         }
 
-        const text = this.getNodeText(document, argumentList);
+        const text = getNodeText(document, argumentList);
         if (!text) { return args.length; }
 
         const relative = Math.min(Math.max(0, offset - argumentList.startIndex), text.length);
@@ -736,13 +737,6 @@ export class KanagawaSignatureHelpProvider implements vscode.SignatureHelpProvid
         return parts;
     }
 
-    private getNodeText(document: vscode.TextDocument, node: Parser.SyntaxNode | null): string | undefined {
-        if (!node) { return undefined; }
-        const start = new vscode.Position(node.startPosition.row, node.startPosition.column);
-        const end = new vscode.Position(node.endPosition.row, node.endPosition.column);
-        return document.getText(new vscode.Range(start, end));
-    }
-
     private async buildTemplateHint(
         document: vscode.TextDocument,
         context: CallContext,
@@ -785,7 +779,7 @@ export class KanagawaSignatureHelpProvider implements vscode.SignatureHelpProvid
         if (!argsNode) { return []; }
         return argsNode.namedChildren
             .filter(child => child.type !== ',')
-            .map(child => this.getNodeText(document, child)?.trim() ?? '');
+            .map(child => getNodeText(document, child)?.trim() ?? '');
     }
 
     private findTemplateArgsRecursive(node: Parser.SyntaxNode): Parser.SyntaxNode | undefined {

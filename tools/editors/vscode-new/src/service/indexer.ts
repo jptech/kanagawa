@@ -1013,6 +1013,15 @@ export class WorkspaceIndexer {
         return undefined;
     }
 
+    /**
+     * @deprecated Use `resolveWithContext()` instead for consistent resolution across providers.
+     * This method is kept for backward compatibility but will be removed in a future version.
+     * 
+     * `resolveWithContext()` provides:
+     * - Import-aware filtering
+     * - Confidence scoring
+     * - Consistent behavior with hover/definition/references
+     */
     public resolveSymbols(name: string, scopePath: string[], options?: ResolveOptions): SymbolInfo[] {
         let candidates = this.symbolIndex.get(name) ?? [];
         if (candidates.length === 0) {
@@ -1476,11 +1485,18 @@ export class WorkspaceIndexer {
 
         // Otherwise resolve as a free function call and get its return type
         const scopePath = this.getScopePathForNode(idNode);
-        const candidates = this.resolveSymbols(idNode.text, scopePath, {
+        // Use resolveWithContext for consistency with other providers
+        const resolution = this.resolveWithContext(idNode.text, scopePath, {
             uri: document.uri,
-            context: { kind: 'free' },
-            limit: 5
+            context: { kind: 'free' }
         });
+
+        // Collect all candidates (primary + alternatives)
+        const candidates: SymbolInfo[] = [];
+        if (resolution.primary) {
+            candidates.push(resolution.primary);
+        }
+        candidates.push(...resolution.alternatives);
 
         // Return the typeHint (return type) of the first matching function
         const match = candidates.find(candidate =>
@@ -2362,13 +2378,6 @@ export class WorkspaceIndexer {
             category,
             typeHint
         };
-    }
-
-    private getNodeText(document: vscode.TextDocument, node: Parser.SyntaxNode | null): string | undefined {
-        if (!node) { return undefined; }
-        const start = new vscode.Position(node.startPosition.row, node.startPosition.column);
-        const end = new vscode.Position(node.endPosition.row, node.endPosition.column);
-        return document.getText(new vscode.Range(start, end));
     }
 
     private stripInlineDocComments(text: string): string {

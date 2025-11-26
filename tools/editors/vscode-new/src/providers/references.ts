@@ -243,12 +243,20 @@ export class KanagawaReferencesProvider implements vscode.ReferenceProvider {
         if (!targets.length) {
             const scopePath = this.indexer.getScopePathForNode(identifier);
             const context: SymbolContextHint = { kind: 'free' };
-            const resolved = this.indexer.resolveSymbols(identifier.text, scopePath, {
+            // Use resolveWithContext for consistency with hover/definition
+            const resolution = this.indexer.resolveWithContext(identifier.text, scopePath, {
                 uri: document.uri,
-                context,
-                limit: 10
+                context
             });
-            for (const symbol of resolved) {
+            
+            // Collect primary and alternatives
+            const allCandidates: SymbolInfo[] = [];
+            if (resolution.primary) {
+                allCandidates.push(resolution.primary);
+            }
+            allCandidates.push(...resolution.alternatives);
+            
+            for (const symbol of allCandidates) {
                 if (symbol.category === 'function' || symbol.category === 'method') {
                     targets.push({ symbol, item: createCallHierarchyItemFromSymbol(symbol) });
                 }
@@ -281,11 +289,19 @@ export class KanagawaReferencesProvider implements vscode.ReferenceProvider {
                 }
             } else {
                 const scopePath = this.indexer.getScopePathForNode(candidate.identifier);
-                const resolved = this.indexer.resolveSymbols(candidate.identifier.text, scopePath, {
+                // Use resolveWithContext for consistency with hover/definition
+                const resolution = this.indexer.resolveWithContext(candidate.identifier.text, scopePath, {
                     uri: document.uri,
-                    context: { kind: 'free' },
-                    limit: 10
+                    context: { kind: 'free' }
                 });
+                
+                // Collect all resolved symbols
+                const resolved: SymbolInfo[] = [];
+                if (resolution.primary) {
+                    resolved.push(resolution.primary);
+                }
+                resolved.push(...resolution.alternatives);
+                
                 for (const target of targets) {
                     if (resolved.some(def => isSameLocation(def, target.symbol))) {
                         locations.push(this.locationFromNode(document, candidate.callExpression));
@@ -390,16 +406,20 @@ export class KanagawaCallHierarchyProvider implements vscode.CallHierarchyProvid
 
         for (const location of allLocations) {
             if (token.isCancellationRequested) { break; }
-            const doc = await vscode.workspace.openTextDocument(location.uri);
-            const treeForDoc = this.service.getTree(doc) ?? await this.service.parse(doc);
-            if (!treeForDoc) { continue; }
-            const node = treeForDoc.rootNode.descendantForPosition({ row: location.range.start.line, column: location.range.start.character });
-            const container = createCallHierarchyItemFromNode(doc, node);
-            const key = `${container.uri.toString()}#${container.selectionRange.start.line}:${container.selectionRange.start.character}`;
-            if (!grouped.has(key)) {
-                grouped.set(key, { item: container, ranges: [] });
+            try {
+                const doc = await vscode.workspace.openTextDocument(location.uri);
+                const treeForDoc = this.service.getTree(doc) ?? await this.service.parse(doc);
+                if (!treeForDoc) { continue; }
+                const node = treeForDoc.rootNode.descendantForPosition({ row: location.range.start.line, column: location.range.start.character });
+                const container = createCallHierarchyItemFromNode(doc, node);
+                const key = `${container.uri.toString()}#${container.selectionRange.start.line}:${container.selectionRange.start.character}`;
+                if (!grouped.has(key)) {
+                    grouped.set(key, { item: container, ranges: [] });
+                }
+                grouped.get(key)!.ranges.push(location.range);
+            } catch (e) {
+                // File may have been deleted or moved - skip it
             }
-            grouped.get(key)!.ranges.push(location.range);
         }
 
         const result: vscode.CallHierarchyIncomingCall[] = [];
@@ -445,11 +465,19 @@ export class KanagawaCallHierarchyProvider implements vscode.CallHierarchyProvid
                 }
             } else {
                 const scopePath = this.indexer.getScopePathForNode(candidate.identifier);
-                const defs = this.indexer.resolveSymbols(candidate.identifier.text, scopePath, {
+                // Use resolveWithContext for consistency with hover/definition
+                const resolution = this.indexer.resolveWithContext(candidate.identifier.text, scopePath, {
                     uri: doc.uri,
-                    context: { kind: 'free' },
-                    limit: 10
+                    context: { kind: 'free' }
                 });
+                
+                // Collect all resolved symbols
+                const defs: SymbolInfo[] = [];
+                if (resolution.primary) {
+                    defs.push(resolution.primary);
+                }
+                defs.push(...resolution.alternatives);
+                
                 for (const def of defs) {
                     if (def.category !== 'function' && def.category !== 'method') { continue; }
                     const chi = this.toCallHierarchyItem(createCallHierarchyItemFromSymbol(def));

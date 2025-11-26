@@ -207,6 +207,7 @@ export class KanagawaRenameProvider implements vscode.RenameProvider {
 
     /**
      * Collects occurrences of a symbol across all workspace files.
+     * Verifies each identifier resolves to the same definition for accuracy.
      */
     private async collectWorkspaceOccurrences(
         name: string,
@@ -225,8 +226,8 @@ export class KanagawaRenameProvider implements vscode.RenameProvider {
                 const tree = this.service.getTree(document) ?? await this.service.parse(document);
                 if (!tree) { continue; }
 
-                // Find all identifiers with this name
-                this.collectMatchingIdentifiers(tree.rootNode, name, definition, document, addLocation);
+                // Find all identifiers with this name and verify they resolve to the same definition
+                await this.collectMatchingIdentifiers(tree.rootNode, name, definition, document, addLocation, token);
             } catch (e) {
                 // Skip files that can't be opened
                 console.warn(`Rename: Could not process ${fileUri.toString()}:`, e);
@@ -279,25 +280,77 @@ export class KanagawaRenameProvider implements vscode.RenameProvider {
 
     /**
      * Collects identifiers that resolve to the given definition.
-     * Uses the indexer for precise matching when possible.
+     * Uses the indexer for precise matching to avoid renaming unrelated symbols with the same name.
      */
-    private collectMatchingIdentifiers(
+    private async collectMatchingIdentifiers(
         node: Parser.SyntaxNode,
         name: string,
         definition: SymbolInfo,
         document: vscode.TextDocument,
-        addLocation: (uri: vscode.Uri, range: vscode.Range) => void
-    ): void {
+        addLocation: (uri: vscode.Uri, range: vscode.Range) => void,
+        token: vscode.CancellationToken
+    ): Promise<void> {
+        if (token.isCancellationRequested) { return; }
+
         if ((node.type === 'identifier' || node.type === 'type_identifier') && node.text === name) {
-            // For simple cases, just match by name
-            // More sophisticated: could verify this identifier resolves to the same definition
-            // But for now, this provides reasonable accuracy for most use cases
-            addLocation(document.uri, nodeToRange(node));
+            // Verify this identifier resolves to the same definition
+            if (await this.resolvesToSameDefinition(node, definition, document)) {
+                addLocation(document.uri, nodeToRange(node));
+            }
         }
 
         for (const child of node.namedChildren) {
-            this.collectMatchingIdentifiers(child, name, definition, document, addLocation);
+            await this.collectMatchingIdentifiers(child, name, definition, document, addLocation, token);
         }
+    }
+
+    /**
+     * Checks if an identifier node resolves to the same definition.
+     * This prevents renaming unrelated symbols with the same name.
+     */
+    private async resolvesToSameDefinition(
+        node: Parser.SyntaxNode,
+        definition: SymbolInfo,
+        document: vscode.TextDocument
+    ): Promise<boolean> {
+        // For local variables, check if we're in the same scope
+        if (definition.category === 'variable') {
+            // Local variables are handled by collectLocalOccurrences, which is scope-bounded
+            // If we're here, it's a workspace search for a non-local, so match by name is ok
+            return true;
+        }
+
+        // Try member resolution first (for obj.member patterns)
+        if (node.parent?.type === 'member_expression') {
+            const memberMatches = await this.indexer.resolveMemberSymbol(document, node);
+            if (memberMatches && memberMatches.length > 0) {
+                return memberMatches.some(match => this.isSameSymbol(match, definition));
+            }
+        }
+
+        // Use context-aware resolution for consistency with hover/definition
+        const scopePath = this.indexer.getScopePathForNode(node);
+        const resolution = this.indexer.resolveWithContext(node.text, scopePath, {
+            uri: document.uri,
+            context: { kind: 'free' }
+        });
+
+        // Check if the resolution matches our target definition
+        if (resolution.primary && this.isSameSymbol(resolution.primary, definition)) {
+            return true;
+        }
+        
+        // Also check alternatives
+        return resolution.alternatives.some(alt => this.isSameSymbol(alt, definition));
+    }
+
+    /**
+     * Checks if two symbols refer to the same definition.
+     */
+    private isSameSymbol(a: SymbolInfo, b: SymbolInfo): boolean {
+        return a.uri.toString() === b.uri.toString() &&
+            a.range.start.line === b.range.start.line &&
+            a.range.start.character === b.range.start.character;
     }
 
     /**
