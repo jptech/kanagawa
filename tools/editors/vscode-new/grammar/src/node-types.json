@@ -2698,6 +2698,100 @@
     }
   },
   {
+    "type": "inspectable_decl",
+    "named": true,
+    "fields": {
+      "description": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "string_literal",
+            "named": true
+          }
+        ]
+      },
+      "variable": {
+        "multiple": true,
+        "required": true,
+        "types": [
+          {
+            "type": "(",
+            "named": false
+          },
+          {
+            "type": ")",
+            "named": false
+          },
+          {
+            "type": "assignment_expression",
+            "named": true
+          },
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "cast_operator",
+            "named": true
+          },
+          {
+            "type": "function_type",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "initializer",
+            "named": true
+          },
+          {
+            "type": "lambda_expression",
+            "named": true
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "qualified_identifier",
+            "named": true
+          },
+          {
+            "type": "subscript_expression",
+            "named": true
+          },
+          {
+            "type": "template_instantiation",
+            "named": true
+          },
+          {
+            "type": "ternary_expression",
+            "named": true
+          },
+          {
+            "type": "unary_expression",
+            "named": true
+          },
+          {
+            "type": "update_expression",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "lambda_expression",
     "named": true,
     "fields": {},
@@ -2876,6 +2970,10 @@
         },
         {
           "type": "function_template",
+          "named": true
+        },
+        {
+          "type": "inspectable_decl",
           "named": true
         },
         {
@@ -3490,10 +3588,6 @@
         },
         {
           "type": "qualified_identifier",
-          "named": true
-        },
-        {
-          "type": "scope_qualifier",
           "named": true
         },
         {
@@ -6076,6 +6170,10 @@
   },
   {
     "type": "inline",
+    "named": false
+  },
+  {
+    "type": "inspectable",
     "named": false
   },
   {

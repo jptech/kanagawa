@@ -1542,6 +1542,31 @@ export class WorkspaceIndexer {
                 const variable = symbols.find(sym => sym.category === 'variable' || sym.category === 'member');
                 inferred = variable?.typeHint;
             }
+        } else if (expression.type === 'qualified_identifier') {
+            // Handle scope-qualified identifiers like Foo::Bar::VALUE
+            // Extract all identifier segments and look up the member in the containing scope
+            const identifiers = expression.children.filter(c => c.type === 'identifier');
+            if (identifiers.length >= 2) {
+                // Build the scope path from all but the last identifier
+                const scopeParts = identifiers.slice(0, -1).map(id => id.text);
+                const memberName = identifiers[identifiers.length - 1].text;
+                const scopeType = scopeParts.join('::');
+                
+                // Look up the member in that scope
+                const member = this.getMemberInfo(scopeType, memberName);
+                if (member?.typeHint) {
+                    inferred = member.typeHint;
+                } else {
+                    // Fall back to looking up the full qualified name
+                    const fullName = expression.text.replace(/::/g, '::');
+                    const symbols = this.symbolIndex.get(memberName);
+                    const match = symbols?.find(sym => 
+                        sym.scopePath.join('::') === scopeType || 
+                        sym.qualifiedName === fullName
+                    );
+                    inferred = match?.typeHint;
+                }
+            }
         } else if (expression.type === 'template_instantiation') {
             const normalized = this.normalizeTypeName(expression.text);
             inferred = normalized.length ? normalized : undefined;

@@ -139,8 +139,25 @@ auto x = Config::HARTS;
       type: (primitive_type)
       name: (identifier)
       initializer: (qualified_identifier
-        (scope_qualifier
-          (identifier))
+        (identifier)
+        (identifier)))))
+
+================================================================================
+Chained scope qualifiers
+================================================================================
+
+auto x = spb::RxHdrType_t::RX_CPL_ERROR;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (variable_decl
+      type: (primitive_type)
+      name: (identifier)
+      initializer: (qualified_identifier
+        (identifier)
+        (identifier)
         (identifier)))))
 
 ================================================================================

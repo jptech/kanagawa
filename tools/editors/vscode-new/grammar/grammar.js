@@ -93,6 +93,7 @@ module.exports = grammar({
     [$._simple_type_specifier, $._templated_type_specifier, $.qualified_identifier],
     [$.scope_qualifier, $._primary_expression, $.template_instantiation],
     [$._primary_expression, $.template_instantiation],
+    [$.scope_qualifier, $.qualified_identifier],
   ],
 
   rules: {
@@ -278,9 +279,21 @@ module.exports = grammar({
       $.function_definition,
       $.function_template,
       seq($.variable_decl, ';'),
+      $.inspectable_decl,  // Built-in inspectable declaration
       $.default_initialization,
       $.static_if,
       $.declaration,
+    ),
+
+    // Built-in inspectable declaration for exposing variables for runtime inspection
+    inspectable_decl: $ => seq(
+      'inspectable',
+      '(',
+      field('variable', $._expression),
+      ',',
+      field('description', $.string_literal),
+      ')',
+      ';'
     ),
 
     default_initialization: $ => seq(
@@ -931,12 +944,18 @@ module.exports = grammar({
       '>'
     )),
 
-    qualified_identifier: $ => seq(
-      $.scope_qualifier,
+    // Qualified identifier handles paths like a::b::c or Foo<T>::Bar::method
+    qualified_identifier: $ => prec.left(seq(
       optional('template'),
       $.identifier,
-      optional(seq(token.immediate('<'), commaSep1($._template_arg_expression), '>'))
-    ),
+      optional(seq(token.immediate('<'), commaSep1($._template_arg_expression), '>')),
+      repeat1(seq(
+        token.immediate('::'),
+        optional('template'),
+        $.identifier,
+        optional(seq(token.immediate('<'), commaSep1($._template_arg_expression), '>'))
+      ))
+    )),
 
     // ----------------------------------------------------------------------------
     // Lambda Expressions

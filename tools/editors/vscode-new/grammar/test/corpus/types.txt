@@ -162,3 +162,32 @@ using Ptr = optional<T>;
       type: (type_specifier
         (identifier)
         (identifier)))))
+
+================================================================================
+Class with inspectable member
+================================================================================
+
+class Counter {
+    uint32 _errors = 0;
+    inspectable(_errors, "error count");
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (class_decl
+      name: (identifier)
+      (member_decl
+        (declaration
+          (variable_decl
+            type: (type_specifier
+              (identifier))
+            name: (identifier)
+            initializer: (literal
+              (integer_literal)))))
+      (member_decl
+        (inspectable_decl
+          variable: (identifier)
+          description: (string_literal
+            (string_content)))))))

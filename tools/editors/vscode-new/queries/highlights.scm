@@ -56,6 +56,7 @@
   "concat"
   "fan_out"
   "lutmul"
+  "inspectable"
 ] @function.builtin
 
 ; Literals
