@@ -31,26 +31,31 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
         range: vscode.Range,
         token: vscode.CancellationToken
     ): Promise<vscode.InlayHint[]> {
-        const config = this.getConfig();
-        
-        // Early exit if all hints are disabled
-        if (!config.typeHintsEnabled && !config.parameterNamesEnabled && !config.templateParameterNamesEnabled) {
+        try {
+            const config = this.getConfig();
+            
+            // Early exit if all hints are disabled
+            if (!config.typeHintsEnabled && !config.parameterNamesEnabled && !config.templateParameterNamesEnabled) {
+                return [];
+            }
+
+            const tree = this.service.getTree(document) ?? await this.service.parse(document);
+            if (!tree) { return []; }
+
+            const hints: vscode.InlayHint[] = [];
+
+            // Find nodes in the visible range
+            const startPoint = { row: range.start.line, column: range.start.character };
+            const endPoint = { row: range.end.line, column: range.end.character };
+
+            // Collect hints - now async to use indexer's type inference
+            await this.collectHints(document, tree.rootNode, startPoint, endPoint, hints, token, config);
+
+            return hints;
+        } catch (error) {
+            console.error('[InlayHints] Error providing hints:', error);
             return [];
         }
-
-        const tree = this.service.getTree(document) ?? await this.service.parse(document);
-        if (!tree) { return []; }
-
-        const hints: vscode.InlayHint[] = [];
-
-        // Find nodes in the visible range
-        const startPoint = { row: range.start.line, column: range.start.character };
-        const endPoint = { row: range.end.line, column: range.end.character };
-
-        // Collect hints - now async to use indexer's type inference
-        await this.collectHints(document, tree.rootNode, startPoint, endPoint, hints, token, config);
-
-        return hints;
     }
 
     private async collectHints(
@@ -82,13 +87,35 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
                 hints.push(...paramHints);
             }
             if (config.templateParameterNamesEnabled) {
-                hints.push(...this.createTemplateParameterHints(document, node));
+                const templateHints = await this.createTemplateParameterHints(document, node);
+                hints.push(...templateHints);
             }
         }
 
-        // Check for template instantiations in type context (e.g., `Foo<T> x;`)
-        if (config.templateParameterNamesEnabled && node.type === 'template_type') {
-            hints.push(...this.createTemplateTypeHints(document, node));
+        // Check for template instantiations in type context (e.g., `FIFO<uint32, 32> x;`)
+        // The grammar uses 'template_instantiation' for templated type specifiers
+        if (config.templateParameterNamesEnabled && 
+            (node.type === 'template_instantiation' || node.type === 'template_type')) {
+            const templateTypeHints = await this.createTemplateTypeHints(document, node);
+            hints.push(...templateTypeHints);
+        }
+
+        // Also check for type specifiers that contain template arguments
+        // The grammar may parse `Example<uint8>` as: identifier, <, identifier, > (without template_args node)
+        if (config.templateParameterNamesEnabled && node.type === 'type_specifier') {
+            const templateArgs = node.children.find(c => c.type === 'template_args');
+            if (templateArgs) {
+                const templateTypeHints = await this.createTemplateTypeHints(document, node);
+                hints.push(...templateTypeHints);
+            } else {
+                // Check for raw angle bracket tokens (identifier, <, args..., >)
+                const hasAngleBrackets = node.children.some(c => c.text === '<') && 
+                                         node.children.some(c => c.text === '>');
+                if (hasAngleBrackets) {
+                    const templateTypeHints = await this.createTemplateTypeHintsFromRawTokens(document, node);
+                    hints.push(...templateTypeHints);
+                }
+            }
         }
 
         // Recurse into children
@@ -277,97 +304,272 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
     /**
      * Creates template parameter name hints for template instantiations in call expressions.
      * Example: `foo<T, N>(...)` → shows `T:` and `N:` before template arguments
+     * 
+     * Uses the indexer's getTemplateParametersForSymbol for accurate parameter names.
      */
-    private createTemplateParameterHints(
+    private async createTemplateParameterHints(
         document: vscode.TextDocument,
         node: Parser.SyntaxNode
-    ): vscode.InlayHint[] {
+    ): Promise<vscode.InlayHint[]> {
         const results: vscode.InlayHint[] = [];
         
-        // Get the function being called
-        const funcNode = node.childForFieldName('function') ?? node.namedChild(0);
-        if (!funcNode) { return results; }
+        try {
+            // Get the function being called
+            const funcNode = node.childForFieldName('function') ?? node.namedChild(0);
+            if (!funcNode) { return results; }
 
-        // Look for template_args within the callee
-        const templateArgs = this.findTemplateArgs(funcNode);
-        if (!templateArgs) { return results; }
+            // Look for template_args within the callee
+            const templateArgs = this.findTemplateArgs(funcNode);
+            if (!templateArgs) { return results; }
 
-        // Get the base function name (without template args)
-        const baseName = this.getBaseFunctionName(funcNode);
-        if (!baseName) { return results; }
+            // Get the base function name (without template args)
+            const baseName = this.getBaseFunctionName(funcNode);
+            if (!baseName) { return results; }
 
-        // Look up the template definition to get parameter names
-        const symbols = this.indexer.getSymbols(baseName);
-        const templateSymbol = symbols?.find(s => s.detail && s.detail.includes('template'));
-        
-        if (!templateSymbol) { return results; }
+            // Look up the template definition to get parameter names
+            const symbols = this.indexer.getSymbols(baseName);
+            if (!symbols || symbols.length === 0) { return results; }
 
-        // Parse template parameter names from the detail/signature
-        const paramNames = this.parseTemplateParameterNames(templateSymbol.detail ?? templateSymbol.signature ?? '');
-        if (paramNames.length === 0) { return results; }
+            // Find a template symbol
+            let templateSymbol = symbols.find(s => s.detail && s.detail.includes('template'));
+            
+            // If not found by detail, try to get template parameters directly
+            if (!templateSymbol) {
+                for (const sym of symbols) {
+                    const params = await this.indexer.getTemplateParametersForSymbol(sym);
+                    if (params.length > 0) {
+                        templateSymbol = sym;
+                        break;
+                    }
+                }
+            }
 
-        // Get template arguments (skip < > and commas)
-        const args = templateArgs.children.filter(c => 
-            c.type !== '<' && c.type !== '>' && c.type !== ',' && c.text !== '<' && c.text !== '>'
-        );
+            if (!templateSymbol) { return results; }
 
-        // Create hints for each template argument
-        for (let i = 0; i < args.length && i < paramNames.length; i++) {
-            const arg = args[i];
-            const paramName = paramNames[i];
+            // Get template parameters using the indexer's accurate AST-based method
+            const templateParams = await this.indexer.getTemplateParametersForSymbol(templateSymbol);
+            if (templateParams.length === 0) {
+                // Fallback to parsing from detail string
+                const paramNames = this.parseTemplateParameterNames(templateSymbol.detail ?? templateSymbol.signature ?? '');
+                if (paramNames.length === 0) { return results; }
+                return this.createHintsForTemplateArgs(templateArgs, paramNames);
+            }
 
-            // Skip if argument text already matches parameter name
-            if (arg.text.trim() === paramName) { continue; }
-
-            const position = new vscode.Position(
-                arg.startPosition.row,
-                arg.startPosition.column
-            );
-
-            const hint = new vscode.InlayHint(
-                position,
-                `${paramName}:`,
-                vscode.InlayHintKind.Parameter
-            );
-            hint.paddingLeft = false;
-            hint.paddingRight = true;
-
-            results.push(hint);
+            // Extract parameter names from the SymbolInfo objects
+            const paramNames = templateParams.map(p => p.name);
+            return this.createHintsForTemplateArgs(templateArgs, paramNames);
+        } catch (error) {
+            console.error('[InlayHints] Error creating template parameter hints:', error);
+            return results;
         }
-        
-        return results;
     }
 
     /**
      * Creates template parameter name hints for template types.
      * Example: `Foo<int32, 10>` → shows `T:` and `N:` before arguments
+     * 
+     * Uses the indexer's getTemplateParametersForSymbol for accurate parameter names.
      */
-    private createTemplateTypeHints(
+    private async createTemplateTypeHints(
         document: vscode.TextDocument,
         node: Parser.SyntaxNode
-    ): vscode.InlayHint[] {
+    ): Promise<vscode.InlayHint[]> {
         const results: vscode.InlayHint[] = [];
         
-        // template_type should have identifier and template_args children
-        const nameNode = node.children.find(c => c.type === 'identifier' || c.type === 'type_identifier');
-        const templateArgs = node.children.find(c => c.type === 'template_args');
-        
-        if (!nameNode || !templateArgs) { return results; }
+        try {
+            // Handle both 'template_type' and 'template_instantiation' node types
+            // template_instantiation: identifier followed by template_args
+            // template_type: type_identifier followed by template_args
+            let nameNode = node.children.find(c => 
+                c.type === 'identifier' || c.type === 'type_identifier'
+            );
+            let templateArgs = node.children.find(c => c.type === 'template_args');
+            
+            // For template_instantiation, the first child might be the identifier directly
+            if (!nameNode && node.namedChildCount > 0) {
+                const firstChild = node.namedChild(0);
+                if (firstChild && (firstChild.type === 'identifier' || firstChild.type === 'type_identifier')) {
+                    nameNode = firstChild;
+                }
+            }
+            
+            if (!nameNode || !templateArgs) { return results; }
 
-        const typeName = nameNode.text;
+            const typeName = nameNode.text;
 
-        // Look up the template definition
-        const symbols = this.indexer.getSymbols(typeName);
-        const templateSymbol = symbols?.find(s => 
-            (s.category === 'class' || s.category === 'struct' || s.category === 'alias') && 
-            s.detail && s.detail.includes('template')
-        );
-        
-        if (!templateSymbol) { return results; }
+            // Look up the template definition
+            const symbols = this.indexer.getSymbols(typeName);
+            if (!symbols || symbols.length === 0) { return results; }
 
-        // Parse template parameter names
-        const paramNames = this.parseTemplateParameterNames(templateSymbol.detail ?? templateSymbol.signature ?? '');
-        if (paramNames.length === 0) { return results; }
+            // Find a template symbol (class, struct, or alias)
+            let templateSymbol = symbols.find(s => 
+                (s.category === 'class' || s.category === 'struct' || s.category === 'alias') && 
+                s.detail && s.detail.includes('template')
+            );
+            
+            // If not found by detail, try to get template parameters directly
+            if (!templateSymbol) {
+                for (const sym of symbols) {
+                    if (sym.category === 'class' || sym.category === 'struct' || sym.category === 'alias') {
+                        const params = await this.indexer.getTemplateParametersForSymbol(sym);
+                        if (params.length > 0) {
+                            templateSymbol = sym;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (!templateSymbol) { return results; }
+
+            // Get template parameters using the indexer's accurate AST-based method
+            const templateParams = await this.indexer.getTemplateParametersForSymbol(templateSymbol);
+            if (templateParams.length === 0) {
+                // Fallback to parsing from detail string
+                const paramNames = this.parseTemplateParameterNames(templateSymbol.detail ?? templateSymbol.signature ?? '');
+                if (paramNames.length === 0) { return results; }
+                return this.createHintsForTemplateArgs(templateArgs, paramNames);
+            }
+
+            // Extract parameter names from the SymbolInfo objects
+            const paramNames = templateParams.map(p => p.name);
+            return this.createHintsForTemplateArgs(templateArgs, paramNames);
+        } catch (error) {
+            console.error('[InlayHints] Error creating template type hints:', error);
+            return results;
+        }
+    }
+
+    /**
+     * Creates template parameter hints when the grammar parses as raw tokens.
+     * Handles: `Example<uint8>` parsed as children: [identifier, <, identifier, >]
+     * instead of [identifier, template_args]
+     */
+    private async createTemplateTypeHintsFromRawTokens(
+        document: vscode.TextDocument,
+        node: Parser.SyntaxNode
+    ): Promise<vscode.InlayHint[]> {
+        const results: vscode.InlayHint[] = [];
+
+        try {
+            // Find the type name (first identifier before '<')
+            const children = node.children;
+            let typeNameNode: Parser.SyntaxNode | undefined;
+            let openBracketIndex = -1;
+            let closeBracketIndex = -1;
+
+            for (let i = 0; i < children.length; i++) {
+                const child = children[i];
+                if (child.text === '<') {
+                    openBracketIndex = i;
+                    // Type name should be the identifier just before '<'
+                    if (i > 0 && (children[i - 1].type === 'identifier' || children[i - 1].type === 'type_identifier')) {
+                        typeNameNode = children[i - 1];
+                    }
+                } else if (child.text === '>') {
+                    closeBracketIndex = i;
+                    break;
+                }
+            }
+
+            if (!typeNameNode || openBracketIndex < 0 || closeBracketIndex < 0) {
+                return results;
+            }
+
+            const typeName = typeNameNode.text;
+
+            // Extract argument nodes (everything between < and >)
+            const argNodes: Parser.SyntaxNode[] = [];
+            for (let i = openBracketIndex + 1; i < closeBracketIndex; i++) {
+                const child = children[i];
+                // Skip commas
+                if (child.type !== ',' && child.text !== ',') {
+                    argNodes.push(child);
+                }
+            }
+
+            if (argNodes.length === 0) { return results; }
+
+            // Look up the template definition
+            const symbols = this.indexer.getSymbols(typeName);
+            if (!symbols || symbols.length === 0) { return results; }
+
+            // Find a template symbol
+            let templateSymbol = symbols.find(s =>
+                (s.category === 'class' || s.category === 'struct' || s.category === 'alias') &&
+                s.detail && s.detail.includes('template')
+            );
+
+            if (!templateSymbol) {
+                for (const sym of symbols) {
+                    if (sym.category === 'class' || sym.category === 'struct' || sym.category === 'alias') {
+                        const params = await this.indexer.getTemplateParametersForSymbol(sym);
+                        if (params.length > 0) {
+                            templateSymbol = sym;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (!templateSymbol) { return results; }
+
+            // Get template parameters
+            const templateParams = await this.indexer.getTemplateParametersForSymbol(templateSymbol);
+            let paramNames: string[];
+
+            if (templateParams.length > 0) {
+                paramNames = templateParams.map(p => p.name);
+            } else {
+                paramNames = this.parseTemplateParameterNames(templateSymbol.detail ?? templateSymbol.signature ?? '');
+            }
+
+            if (paramNames.length === 0) { return results; }
+
+            // Create hints for each argument
+            for (let i = 0; i < argNodes.length && i < paramNames.length; i++) {
+                const arg = argNodes[i];
+                const paramName = paramNames[i];
+
+                // Skip if argument text matches parameter name
+                if (arg.text.trim() === paramName) { continue; }
+
+                // Skip single-letter params for numeric literals
+                const argText = arg.text.trim();
+                if (/^\d+$/.test(argText) && paramName.length <= 1) { continue; }
+
+                const position = new vscode.Position(
+                    arg.startPosition.row,
+                    arg.startPosition.column
+                );
+
+                const hint = new vscode.InlayHint(
+                    position,
+                    `${paramName}:`,
+                    vscode.InlayHintKind.Parameter
+                );
+                hint.paddingLeft = false;
+                hint.paddingRight = true;
+
+                results.push(hint);
+            }
+
+            return results;
+        } catch (error) {
+            console.error('[InlayHints] Error creating template hints from raw tokens:', error);
+            return results;
+        }
+    }
+
+    /**
+     * Creates inlay hints for template arguments given parameter names.
+     * Shared helper used by both createTemplateParameterHints and createTemplateTypeHints.
+     */
+    private createHintsForTemplateArgs(
+        templateArgs: Parser.SyntaxNode,
+        paramNames: string[]
+    ): vscode.InlayHint[] {
+        const results: vscode.InlayHint[] = [];
 
         // Get template arguments (skip < > and commas)
         const args = templateArgs.children.filter(c => 
@@ -381,6 +583,11 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
 
             // Skip if argument text already matches parameter name
             if (arg.text.trim() === paramName) { continue; }
+
+            // Skip numeric literals that match common pattern names like "N", "Size", etc.
+            // (they're self-explanatory for value parameters)
+            const argText = arg.text.trim();
+            if (/^\d+$/.test(argText) && paramName.length <= 1) { continue; }
 
             const position = new vscode.Position(
                 arg.startPosition.row,
@@ -397,7 +604,7 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
 
             results.push(hint);
         }
-        
+
         return results;
     }
 

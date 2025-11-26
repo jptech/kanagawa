@@ -19,6 +19,7 @@ import { OutlineFilterManager } from './service/outlineFilters';
 import { KeyedDebouncer, DEBOUNCE_DELAYS } from './utils/debounce';
 import { perfLogger, PerfLogLevel } from './utils/perfLogger';
 import { registerDependencyGraphCommands } from './views/dependencyGraph';
+import { IndexStatusBar } from './views/statusBar';
 
 export async function activate(context: vscode.ExtensionContext) {
     console.log('Kanagawa "LSP-Lite" is activating...');
@@ -39,10 +40,21 @@ export async function activate(context: vscode.ExtensionContext) {
     ]);
 
     const outlineFilters = new OutlineFilterManager();
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    const indexer = new WorkspaceIndexer(service, queryManager, workspaceFolder);
+    
+    // Support multi-root workspaces - pass all workspace folders
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    const indexer = new WorkspaceIndexer(service, queryManager, workspaceFolders);
     await indexer.init(context);
     const diagnosticsProvider = new KanagawaDiagnosticsProvider(service);
+    
+    // Create status bar for index visibility
+    const statusBar = new IndexStatusBar();
+    context.subscriptions.push(statusBar);
+    
+    // Connect indexer status to status bar
+    indexer.setStatusCallback((state, symbolCount, fileCount, error) => {
+        statusBar.update({ state, symbolCount, fileCount, errorMessage: error });
+    });
     
     // Debouncer for document change events - prevents excessive parsing during rapid typing
     const parseDebouncer = new KeyedDebouncer<string>(DEBOUNCE_DELAYS.DOCUMENT_CHANGE);

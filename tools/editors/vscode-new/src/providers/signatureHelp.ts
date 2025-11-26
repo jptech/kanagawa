@@ -872,8 +872,8 @@ export class KanagawaSignatureHelpProvider implements vscode.SignatureHelpProvid
                 }
             }
 
-            // Check for template_type or template_call
-            if (current.type === 'template_type' || current.type === 'template_call') {
+            // Check for template_type, template_call, or template_instantiation
+            if (current.type === 'template_type' || current.type === 'template_call' || current.type === 'template_instantiation') {
                 const templateArgs = current.children.find(c => c.type === 'template_args');
                 const baseName = this.extractTemplateBaseName(current);
                 if (templateArgs && baseName) {
@@ -996,6 +996,14 @@ export class KanagawaSignatureHelpProvider implements vscode.SignatureHelpProvid
         // For template_call: look for identifier
         if (node.type === 'template_call') {
             const ident = node.children.find(c => c.type === 'identifier');
+            return ident?.text;
+        }
+
+        // For template_instantiation: first child is usually the identifier
+        if (node.type === 'template_instantiation') {
+            const ident = node.children.find(c =>
+                c.type === 'identifier' || c.type === 'type_identifier'
+            );
             return ident?.text;
         }
 

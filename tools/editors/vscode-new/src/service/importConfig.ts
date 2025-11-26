@@ -4,7 +4,11 @@ import * as path from 'path';
 export interface ImportConfiguration {
     importPaths: string[];
     stdlibPath?: string;
+    excludePatterns: string[];
 }
+
+// Re-export for backwards compatibility
+export { matchesGlobPattern } from '../utils/globUtils';
 
 export class ImportConfigService {
     private cachedConfig: ImportConfiguration | undefined;
@@ -26,7 +30,8 @@ export class ImportConfigService {
 
         const configListener = vscode.workspace.onDidChangeConfiguration(event => {
             if (event.affectsConfiguration('kanagawa.compiler.importPaths') ||
-                event.affectsConfiguration('kanagawa.compiler.stdlibPath')) {
+                event.affectsConfiguration('kanagawa.compiler.stdlibPath') ||
+                event.affectsConfiguration('kanagawa.index.exclude')) {
                 this.invalidate();
             }
         });
@@ -42,13 +47,14 @@ export class ImportConfigService {
     async resolveImportConfiguration(): Promise<ImportConfiguration> {
         if (this.cachedConfig) { return this.cachedConfig; }
 
-        const base: ImportConfiguration = { importPaths: [] };
+        const base: ImportConfiguration = { importPaths: [], excludePatterns: [] };
         const workspace = await this.readWorkspaceConfig();
         const userSettings = this.readUserSettings();
 
         const merged: ImportConfiguration = {
             importPaths: this.mergePaths(base.importPaths, workspace.importPaths, userSettings.importPaths),
-            stdlibPath: userSettings.stdlibPath ?? workspace.stdlibPath ?? base.stdlibPath
+            stdlibPath: userSettings.stdlibPath ?? workspace.stdlibPath ?? base.stdlibPath,
+            excludePatterns: this.mergePatterns(workspace.excludePatterns, userSettings.excludePatterns)
         };
 
         this.cachedConfig = merged;
@@ -56,28 +62,47 @@ export class ImportConfigService {
     }
 
     private async readWorkspaceConfig(): Promise<ImportConfiguration> {
-        if (!this.workspaceFolder) { return { importPaths: [] }; }
+        if (!this.workspaceFolder) { return { importPaths: [], excludePatterns: [] }; }
         const uri = vscode.Uri.joinPath(this.workspaceFolder.uri, 'kanagawa.config.json');
         try {
             const data = await vscode.workspace.fs.readFile(uri);
             const parsed = JSON.parse(Buffer.from(data).toString('utf8'));
             return {
                 importPaths: this.normalizePaths(this.ensureStringArray(parsed.importPaths)),
-                stdlibPath: parsed.stdlibPath ? this.toAbsolute(parsed.stdlibPath) : undefined
+                stdlibPath: parsed.stdlibPath ? this.toAbsolute(parsed.stdlibPath) : undefined,
+                excludePatterns: this.ensureStringArray(parsed.exclude)
             };
         } catch {
-            return { importPaths: [] };
+            return { importPaths: [], excludePatterns: [] };
         }
     }
 
     private readUserSettings(): ImportConfiguration {
         const config = vscode.workspace.getConfiguration('kanagawa.compiler');
+        const indexConfig = vscode.workspace.getConfiguration('kanagawa.index');
         const importPaths = this.ensureStringArray(config.get('importPaths'));
         const stdlibPath = config.get<string>('stdlibPath', '').trim();
+        const excludePatterns = this.ensureStringArray(indexConfig.get('exclude'));
         return {
             importPaths: this.normalizePaths(importPaths),
-            stdlibPath: stdlibPath.length ? this.toAbsolute(stdlibPath) : undefined
+            stdlibPath: stdlibPath.length ? this.toAbsolute(stdlibPath) : undefined,
+            excludePatterns
         };
+    }
+
+    private mergePatterns(...sources: (string[] | undefined)[]): string[] {
+        const seen = new Set<string>();
+        const result: string[] = [];
+        for (const source of sources) {
+            if (!source) { continue; }
+            for (const entry of source) {
+                if (!entry.length) { continue; }
+                if (seen.has(entry)) { continue; }
+                seen.add(entry);
+                result.push(entry);
+            }
+        }
+        return result;
     }
 
     private mergePaths(...sources: (string[] | undefined)[]): string[] {

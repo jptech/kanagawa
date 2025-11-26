@@ -4,6 +4,7 @@ import * as path from 'path';
 import { TreeSitterService } from './treeSitter';
 import { QueryManager } from './query';
 import { ImportConfigService, ImportConfiguration } from './importConfig';
+import { matchesGlobPattern } from '../utils/globUtils';
 import { perfLogger, PerfOps } from '../utils/perfLogger';
 import {
     normalizeTypeName as normalizeTypeNameUtil,
@@ -138,28 +139,105 @@ export class WorkspaceIndexer {
     private readonly templateInstantiationCache: Map<string, TemplateInstantiation> = new Map();
     /** Cache for template parameters by type: baseType → TemplateParameter[] */
     private readonly templateParameterCache: Map<string, TemplateParameter[]> = new Map();
-    private readonly importConfig: ImportConfigService;
+    private readonly importConfigServices: Map<string, ImportConfigService> = new Map();
     private pendingRescan = false;
+    /** Set of indexed file URIs for stats tracking */
+    private indexedFiles: Set<string> = new Set();
+    /** Callback for status updates during indexing */
+    private onStatusChange?: (state: 'idle' | 'indexing' | 'error', symbolCount: number, fileCount: number, error?: string) => void;
 
     constructor(
         private service: TreeSitterService,
         private queryManager: QueryManager,
-        workspaceFolder?: vscode.WorkspaceFolder
+        private workspaceFolders?: readonly vscode.WorkspaceFolder[]
     ) {
-        this.importConfig = new ImportConfigService(workspaceFolder);
+        // Create import config service for each workspace folder
+        if (workspaceFolders) {
+            for (const folder of workspaceFolders) {
+                this.importConfigServices.set(folder.uri.toString(), new ImportConfigService(folder));
+            }
+        }
+        // Fallback for no workspace folders
+        if (this.importConfigServices.size === 0) {
+            this.importConfigServices.set('default', new ImportConfigService(undefined));
+        }
+    }
+
+    /**
+     * Sets a callback to receive status updates during indexing.
+     */
+    setStatusCallback(callback: (state: 'idle' | 'indexing' | 'error', symbolCount: number, fileCount: number, error?: string) => void): void {
+        this.onStatusChange = callback;
+    }
+
+    private notifyStatus(state: 'idle' | 'indexing' | 'error', error?: string): void {
+        this.onStatusChange?.(state, this.symbolIndex.size, this.indexedFiles.size, error);
     }
 
     async init(context: vscode.ExtensionContext): Promise<void> {
-        await this.importConfig.init(context);
-        context.subscriptions.push(this.importConfig.onDidChange(() => {
-            this.memberCache.clear();
-            this.typeInferenceCache.clear();
-            this.handleImportConfigurationChanged();
-        }));
+        for (const importConfig of this.importConfigServices.values()) {
+            await importConfig.init(context);
+            context.subscriptions.push(importConfig.onDidChange(() => {
+                this.memberCache.clear();
+                this.typeInferenceCache.clear();
+                this.handleImportConfigurationChanged();
+            }));
+        }
+        
+        // Listen for workspace folder changes
+        context.subscriptions.push(
+            vscode.workspace.onDidChangeWorkspaceFolders((event) => {
+                // Add new folders
+                for (const folder of event.added) {
+                    const config = new ImportConfigService(folder);
+                    this.importConfigServices.set(folder.uri.toString(), config);
+                    config.init(context).catch(err => 
+                        console.error('Kanagawa: Failed to init import config for folder:', err)
+                    );
+                }
+                // Remove old folders
+                for (const folder of event.removed) {
+                    this.importConfigServices.delete(folder.uri.toString());
+                }
+                // Trigger rescan
+                this.handleImportConfigurationChanged();
+            })
+        );
     }
 
     async getImportConfiguration(): Promise<ImportConfiguration> {
-        return this.importConfig.resolveImportConfiguration();
+        // Merge configurations from all workspace folders
+        const configs = await Promise.all(
+            Array.from(this.importConfigServices.values()).map(s => s.resolveImportConfiguration())
+        );
+        
+        const merged: ImportConfiguration = {
+            importPaths: [],
+            excludePatterns: []
+        };
+        
+        const seenPaths = new Set<string>();
+        const seenPatterns = new Set<string>();
+        
+        for (const config of configs) {
+            for (const p of config.importPaths) {
+                if (!seenPaths.has(p)) {
+                    seenPaths.add(p);
+                    merged.importPaths.push(p);
+                }
+            }
+            for (const p of config.excludePatterns) {
+                if (!seenPatterns.has(p)) {
+                    seenPatterns.add(p);
+                    merged.excludePatterns.push(p);
+                }
+            }
+            if (config.stdlibPath && !merged.stdlibPath) {
+                merged.stdlibPath = config.stdlibPath;
+            }
+        }
+        
+        return merged;
     }
 
     /**
@@ -203,7 +281,8 @@ export class WorkspaceIndexer {
 
             if (effectiveToken.isCancellationRequested) { return; }
 
-            const importConfiguration = await this.importConfig.resolveImportConfiguration();
+            this.notifyStatus('indexing');
+            const importConfiguration = await this.getImportConfiguration();
 
             // Ensure query is loaded and cached inside the query manager
             const queryString = await this.queryManager.loadQuery('definitions');
@@ -214,7 +293,7 @@ export class WorkspaceIndexer {
 
             if (effectiveToken.isCancellationRequested) { return; }
 
-            const files = await this.collectSourceFiles(importConfiguration.importPaths);
+            const files = await this.collectSourceFiles(importConfiguration.importPaths, importConfiguration.excludePatterns);
             
             // Pre-load all documents in parallel (I/O bound)
             // This is much faster than loading one-by-one during indexing
@@ -271,6 +350,8 @@ export class WorkspaceIndexer {
             if (this.verbose) {
                 console.log(`Kanagawa: Indexed ${this.symbolIndex.size} symbol names from ${files.length} files.`);
             }
+            
+            this.notifyStatus('idle');
 
             // Check if a rescan was requested while we were indexing
             shouldRescan = this.pendingRescan;
@@ -278,6 +359,7 @@ export class WorkspaceIndexer {
 
         } catch (e) {
             console.error('Kanagawa: Error during workspace scan:', e);
+            this.notifyStatus('error', String(e));
         } finally {
             // Always reset indexing state, even on error
             this.isIndexing = false;
@@ -345,9 +427,6 @@ export class WorkspaceIndexer {
         }
     }
 
-    /** Set of URIs that have been indexed (for priority indexing) */
-    private indexedFiles = new Set<string>();
-
     /**
      * Ensures a file is indexed. Called when a file is opened to provide
      * immediate hover/go-to-definition support even before full workspace scan completes.
@@ -399,7 +478,7 @@ export class WorkspaceIndexer {
      */
     private async resolveImportToUri(importPath: string): Promise<vscode.Uri | undefined> {
         try {
-            const config = await this.importConfig.resolveImportConfiguration();
+            const config = await this.getImportConfiguration();
             const parts = importPath.split('.');
             const fileName = parts[parts.length - 1] + '.k';
             const dirPath = parts.slice(0, -1).join('/');
@@ -1238,20 +1317,46 @@ export class WorkspaceIndexer {
         void this.scanWorkspace();
     }
 
-    private async collectSourceFiles(extraPaths: string[]): Promise<vscode.Uri[]> {
+    private async collectSourceFiles(extraPaths: string[], excludePatterns: string[]): Promise<vscode.Uri[]> {
         const workspaceFiles = await vscode.workspace.findFiles('**/*.k', '**/node_modules/**');
-        const externalFiles = await this.collectExternalSourceFiles(extraPaths);
+        const externalFiles = await this.collectExternalSourceFiles(extraPaths, excludePatterns);
         const uriMap = new Map<string, vscode.Uri>();
-        for (const uri of [...workspaceFiles, ...externalFiles]) {
+        
+        // Apply exclude patterns to workspace files
+        for (const uri of workspaceFiles) {
+            if (!this.isExcluded(uri, excludePatterns)) {
+                const key = uri.toString();
+                if (!uriMap.has(key)) {
+                    uriMap.set(key, uri);
+                }
+            }
+        }
+        
+        // External files already filtered during collection
+        for (const uri of externalFiles) {
             const key = uri.toString();
             if (!uriMap.has(key)) {
                 uriMap.set(key, uri);
             }
         }
+        
         return Array.from(uriMap.values());
     }
 
-    private async collectExternalSourceFiles(paths: string[]): Promise<vscode.Uri[]> {
+    private isExcluded(uri: vscode.Uri, excludePatterns: string[]): boolean {
+        if (excludePatterns.length === 0) { return false; }
+        
+        const relativePath = vscode.workspace.asRelativePath(uri, false);
+        
+        for (const pattern of excludePatterns) {
+            if (matchesGlobPattern(relativePath, pattern)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private async collectExternalSourceFiles(paths: string[], excludePatterns: string[]): Promise<vscode.Uri[]> {
         const results: vscode.Uri[] = [];
         const visitedRoots = new Set<string>();
         const visitedDirs = new Set<string>();
@@ -1263,7 +1368,7 @@ export class WorkspaceIndexer {
             visitedRoots.add(normalized);
 
             const rootUri = vscode.Uri.file(normalized);
-            await this.walkKanagawaDirectory(rootUri, results, visitedDirs);
+            await this.walkKanagawaDirectory(rootUri, results, visitedDirs, excludePatterns, normalized);
         }
 
         return results;
@@ -1272,7 +1377,9 @@ export class WorkspaceIndexer {
     private async walkKanagawaDirectory(
         rootUri: vscode.Uri,
         results: vscode.Uri[],
-        visitedDirs: Set<string>
+        visitedDirs: Set<string>,
+        excludePatterns: string[],
+        baseDir: string
     ): Promise<void> {
         const dirKey = rootUri.fsPath;
         if (visitedDirs.has(dirKey)) { return; }
@@ -1292,7 +1399,18 @@ export class WorkspaceIndexer {
 
             if ((type & vscode.FileType.File) !== 0) {
                 if (name.endsWith('.k')) {
-                    results.push(entryUri);
+                    // Check exclude patterns for external files
+                    const relativePath = entryUri.fsPath.substring(baseDir.length + 1).replace(/\\/g, '/');
+                    let excluded = false;
+                    for (const pattern of excludePatterns) {
+                        if (matchesGlobPattern(relativePath, pattern)) {
+                            excluded = true;
+                            break;
+                        }
+                    }
+                    if (!excluded) {
+                        results.push(entryUri);
+                    }
                 }
                 continue;
             }
@@ -1300,7 +1418,7 @@ export class WorkspaceIndexer {
             if ((type & vscode.FileType.Directory) === 0) { continue; }
 
             if (this.shouldSkipDirectory(name)) { continue; }
-            await this.walkKanagawaDirectory(entryUri, results, visitedDirs);
+            await this.walkKanagawaDirectory(entryUri, results, visitedDirs, excludePatterns, baseDir);
         }
     }
 

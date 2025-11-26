@@ -113,6 +113,12 @@
         "category": "Kanagawa"
       }
     ],
+    "jsonValidation": [
+      {
+        "fileMatch": "kanagawa.config.json",
+        "url": "./kanagawa.config.schema.json"
+      }
+    ],
     "configuration": {
       "title": "Kanagawa",
       "properties": {
@@ -185,6 +191,18 @@
           "scope": "resource",
           "default": "",
           "markdownDescription": "Optional override for the standard library location. Relative paths are resolved against the workspace folder. Values in these settings take precedence over workspace kanagawa.config.json entries.",
+          "tags": [
+            "kanagawa"
+          ]
+        },
+        "kanagawa.index.exclude": {
+          "type": "array",
+          "scope": "resource",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Glob patterns for files and folders to exclude from indexing. Patterns are matched against paths relative to the workspace folder. Examples: `**/generated/**`, `**/*.gen.k`, `test_vectors/**`.",
           "tags": [
             "kanagawa"
           ]
