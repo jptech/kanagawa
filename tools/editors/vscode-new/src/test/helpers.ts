@@ -18,11 +18,24 @@ export async function initParser(): Promise<void> {
 
     await Parser.init();
     
-    // Load the WASM from the dist folder
-    const wasmPath = path.join(__dirname, '..', '..', 'dist', 'tree-sitter-kanagawa.wasm');
+    // Try multiple possible locations for the WASM file
+    // The path varies depending on which tsconfig compiled the test
+    const possiblePaths = [
+        path.join(__dirname, '..', '..', 'dist', 'tree-sitter-kanagawa.wasm'),           // from out/test/src/test/
+        path.join(__dirname, '..', '..', '..', 'dist', 'tree-sitter-kanagawa.wasm'),     // from out/test/unit/
+        path.join(__dirname, '..', '..', '..', '..', 'dist', 'tree-sitter-kanagawa.wasm'), // deeper nesting
+    ];
     
-    if (!fs.existsSync(wasmPath)) {
-        throw new Error(`Tree-sitter WASM not found at ${wasmPath}. Run the grammar build first.`);
+    let wasmPath: string | undefined;
+    for (const candidate of possiblePaths) {
+        if (fs.existsSync(candidate)) {
+            wasmPath = candidate;
+            break;
+        }
+    }
+    
+    if (!wasmPath) {
+        throw new Error(`Tree-sitter WASM not found. Tried:\n${possiblePaths.join('\n')}\nRun the grammar build first.`);
     }
     
     const wasmBytes = fs.readFileSync(wasmPath);

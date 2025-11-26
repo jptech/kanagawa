@@ -238,10 +238,52 @@ class Buffer {
             assert.ok(importDecl?.childForFieldName('alias'), 'Should have alias field');
         });
 
+        it('should parse built-in import (.cmdargs)', () => {
+            const tree = assertParsesCleanly('import .cmdargs');
+            const importDecl = findNodeByType(tree.rootNode, 'import_decl');
+            assert.ok(importDecl, 'Should find import_decl node');
+            const moduleName = findNodeByType(importDecl!, 'module_name');
+            assert.ok(moduleName, 'Should have module_name');
+            assert.strictEqual(moduleName.text, '.cmdargs');
+        });
+
+        it('should parse built-in import with alias', () => {
+            const tree = assertParsesCleanly('import .cmdargs as Config');
+            const importDecl = findNodeByType(tree.rootNode, 'import_decl');
+            assert.ok(importDecl?.childForFieldName('alias'), 'Should have alias field');
+            assert.strictEqual(importDecl!.childForFieldName('alias')?.text, 'Config');
+        });
+
         it('should parse module declaration', () => {
             const tree = assertParsesCleanly('module data.fifo');
             const moduleDecl = findNodeByType(tree.rootNode, 'module_decl');
             assert.ok(moduleDecl, 'Should find module_decl node');
+        });
+
+        it('should parse scope qualifier (::) in expressions', () => {
+            const tree = assertParsesCleanly('auto x = Config::HARTS;');
+            const qualifiedId = findNodeByType(tree.rootNode, 'qualified_identifier');
+            assert.ok(qualifiedId, 'Should find qualified_identifier node');
+            const scopeQual = findNodeByType(qualifiedId!, 'scope_qualifier');
+            assert.ok(scopeQual, 'Should find scope_qualifier node');
+        });
+
+        it('should parse attributed export with template type', () => {
+            const tree = assertParsesCleanly('[[name("Foo")]] export Bar<uint32>;');
+            const exportDecl = findNodeByType(tree.rootNode, 'export_decl');
+            assert.ok(exportDecl, 'Should find export_decl node');
+            const attrs = findNodeByType(exportDecl!, 'attributes');
+            assert.ok(attrs, 'Should have attributes');
+        });
+
+        it('should parse complex export with scope operators', () => {
+            const source = `[[name("risc_v_wrapper")]]
+export risc_v_wrapper<Config::HARTS, ENABLE_M ? Extension::M : Extension::None>;`;
+            const tree = assertParsesCleanly(source);
+            const exportDecl = findNodeByType(tree.rootNode, 'export_decl');
+            assert.ok(exportDecl, 'Should find export_decl node');
+            const qualifiedIds = findAllNodesByType(tree.rootNode, 'qualified_identifier');
+            assert.ok(qualifiedIds.length >= 2, 'Should have multiple qualified identifiers with ::');
         });
     });
 
@@ -279,6 +321,20 @@ class Buffer {
         it('should parse do-while loop', () => {
             const tree = assertParsesCleanly('void f() { do { x++; } while (x < 10); }');
             const doWhile = findNodeByType(tree.rootNode, 'do_while_statement');
+            assert.ok(doWhile, 'Should find do_while_statement node');
+        });
+
+        it('should parse do-while loop without trailing semicolon', () => {
+            const tree = assertParsesCleanly('void f() { do { x++; } while (x < 10) }');
+            const doWhile = findNodeByType(tree.rootNode, 'do_while_statement');
+            assert.ok(doWhile, 'Should find do_while_statement node');
+        });
+
+        it('should parse atomic do-while without semicolon', () => {
+            const tree = assertParsesCleanly('void f() { atomic do {} while (!done) }');
+            const atomic = findNodeByType(tree.rootNode, 'atomic_statement');
+            const doWhile = findNodeByType(tree.rootNode, 'do_while_statement');
+            assert.ok(atomic, 'Should find atomic_statement node');
             assert.ok(doWhile, 'Should find do_while_statement node');
         });
 

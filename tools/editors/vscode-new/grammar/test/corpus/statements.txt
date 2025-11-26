@@ -1,0 +1,126 @@
+================================================================================
+Do-while with semicolon
+================================================================================
+
+void f() { do { x++; } while (x < 10); }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (function_definition
+      return_type: (primitive_type)
+      name: (identifier)
+      parameters: (parameter_list)
+      (block
+        (do_while_statement
+          (block
+            (expression_statement
+              (update_expression
+                (identifier))))
+          (binary_expression
+            (identifier)
+            (literal
+              (integer_literal))))))))
+
+================================================================================
+Do-while without semicolon
+================================================================================
+
+void f() { do { x++; } while (x < 10) }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (function_definition
+      return_type: (primitive_type)
+      name: (identifier)
+      parameters: (parameter_list)
+      (block
+        (do_while_statement
+          (block
+            (expression_statement
+              (update_expression
+                (identifier))))
+          (binary_expression
+            (identifier)
+            (literal
+              (integer_literal))))))))
+
+================================================================================
+Atomic do-while without semicolon
+================================================================================
+
+void f() { atomic do {} while (!done) }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (function_definition
+      return_type: (primitive_type)
+      name: (identifier)
+      parameters: (parameter_list)
+      (block
+        (atomic_statement
+          (do_while_statement
+            (block)
+            (unary_expression
+              (identifier))))))))
+
+================================================================================
+Range for loop
+================================================================================
+
+void f() { for (const uint32 i : 10) { } }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (function_definition
+      return_type: (primitive_type)
+      name: (identifier)
+      parameters: (parameter_list)
+      (block
+        (range_for_statement
+          (type_specifier
+            (identifier))
+          (identifier)
+          (literal
+            (integer_literal))
+          (block))))))
+
+================================================================================
+If-else statement
+================================================================================
+
+void f() { if (x > 0) { y = 1; } else { y = 0; } }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (function_definition
+      return_type: (primitive_type)
+      name: (identifier)
+      parameters: (parameter_list)
+      (block
+        (if_statement
+          (binary_expression
+            (identifier)
+            (literal
+              (integer_literal)))
+          (block
+            (expression_statement
+              (assignment_expression
+                (identifier)
+                (literal
+                  (integer_literal)))))
+          (block
+            (expression_statement
+              (assignment_expression
+                (identifier)
+                (literal
+                  (integer_literal))))))))))

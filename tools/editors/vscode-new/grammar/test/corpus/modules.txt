@@ -99,3 +99,67 @@ uint32 abs(int32 x) {
                   (identifier)))))
           (return_statement
             (identifier)))))))
+
+================================================================================
+Built-in import (.cmdargs)
+================================================================================
+
+import .cmdargs
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (import_decl
+    path: (module_name)))
+
+================================================================================
+Built-in import with alias
+================================================================================
+
+import .cmdargs as Config
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (import_decl
+    path: (module_name)
+    alias: (identifier)))
+
+================================================================================
+Scope qualifier in expression
+================================================================================
+
+auto x = Config::HARTS;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (variable_decl
+      type: (primitive_type)
+      name: (identifier)
+      initializer: (qualified_identifier
+        (scope_qualifier
+          (identifier))
+        (identifier)))))
+
+================================================================================
+Attributed export with template type
+================================================================================
+
+[[name("Foo")]] export Bar<uint32>;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declaration
+    (export_decl
+      (attributes
+        (attribute
+          (identifier)
+          (literal
+            (string_literal
+              (string_content)))))
+      (type_specifier
+        (identifier)
+        (identifier)))))

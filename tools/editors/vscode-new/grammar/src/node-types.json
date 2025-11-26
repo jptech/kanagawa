@@ -2025,7 +2025,7 @@
     "named": true,
     "fields": {},
     "children": {
-      "multiple": false,
+      "multiple": true,
       "required": true,
       "types": [
         {
@@ -2034,6 +2034,10 @@
         },
         {
           "type": "attributed_type",
+          "named": true
+        },
+        {
+          "type": "attributes",
           "named": true
         },
         {

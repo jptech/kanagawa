@@ -357,6 +357,7 @@ module.exports = grammar({
     )),
 
     export_decl: $ => seq(
+      optional($.attributes),
       'export',
       choice(
         $.class_decl,
@@ -737,7 +738,7 @@ module.exports = grammar({
       $._statement
     ),
 
-    do_while_statement: $ => seq(
+    do_while_statement: $ => prec.right(seq(
       optional($.loop_attributes),
       'do',
       $._statement,
@@ -745,8 +746,8 @@ module.exports = grammar({
       '(',
       $._expression,
       ')',
-      ';'
-    ),
+      optional(';')
+    )),
 
     // ============================================================================
     // Expressions
