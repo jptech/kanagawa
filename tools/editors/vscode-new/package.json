@@ -31,7 +31,8 @@
           "kanagawa"
         ],
         "extensions": [
-          ".k"
+          ".k",
+          ".pd"
         ],
         "configuration": "./language-configuration.json"
       }

@@ -2,6 +2,13 @@ import * as vscode from 'vscode';
 import * as Parser from 'web-tree-sitter';
 import { TreeSitterService } from '../service/treeSitter';
 import { WorkspaceIndexer } from '../service/indexer';
+import { 
+    stripAttributes, 
+    extractFunctionParameters, 
+    splitParameters, 
+    isTypeName,
+    parseParameterNames 
+} from '../utils/signatureUtils';
 
 /**
  * Inlay Hints Provider for Kanagawa.
@@ -264,8 +271,8 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
 
         if (!funcSymbol?.signature) { return results; }
 
-        // Parse parameter names from signature
-        const paramNames = this.parseParameterNames(funcSymbol.signature);
+        // Parse parameter names from signature using shared utility
+        const paramNames = parseParameterNames(funcSymbol.signature);
 
         // Create hints for each argument
         for (let i = 0; i < args.length && i < paramNames.length; i++) {
@@ -478,15 +485,10 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
 
             const typeName = typeNameNode.text;
 
-            // Extract argument nodes (everything between < and >)
-            const argNodes: Parser.SyntaxNode[] = [];
-            for (let i = openBracketIndex + 1; i < closeBracketIndex; i++) {
-                const child = children[i];
-                // Skip commas
-                if (child.type !== ',' && child.text !== ',') {
-                    argNodes.push(child);
-                }
-            }
+            // Extract argument nodes between < and >, grouped by comma separators
+            // This handles expressions like `Width * 8` correctly
+            const argSlice = children.slice(openBracketIndex + 1, closeBracketIndex);
+            const argNodes = this.groupTemplateArguments(argSlice);
 
             if (argNodes.length === 0) { return results; }
 
@@ -564,6 +566,9 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
     /**
      * Creates inlay hints for template arguments given parameter names.
      * Shared helper used by both createTemplateParameterHints and createTemplateTypeHints.
+     * 
+     * Handles expressions in template arguments (e.g., `Width * 8`) by grouping tokens
+     * between commas rather than treating each token as a separate argument.
      */
     private createHintsForTemplateArgs(
         templateArgs: Parser.SyntaxNode,
@@ -571,10 +576,9 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
     ): vscode.InlayHint[] {
         const results: vscode.InlayHint[] = [];
 
-        // Get template arguments (skip < > and commas)
-        const args = templateArgs.children.filter(c => 
-            c.type !== '<' && c.type !== '>' && c.type !== ',' && c.text !== '<' && c.text !== '>'
-        );
+        // Group children by comma separators to handle expressions like `Width * 8`
+        // The grammar may parse these as multiple tokens rather than a single expression node
+        const args = this.groupTemplateArguments(templateArgs.children);
 
         // Create hints for each template argument
         for (let i = 0; i < args.length && i < paramNames.length; i++) {
@@ -609,6 +613,52 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
     }
 
     /**
+     * Groups template argument children by comma separators.
+     * Returns the first significant token of each argument group.
+     * Skips comments and other non-significant tokens.
+     * 
+     * For example, given children: [<, identifier, *, number, ,, comment, identifier, >]
+     * Returns: [identifier (first arg), identifier (second arg)]
+     */
+    private groupTemplateArguments(children: Parser.SyntaxNode[]): Parser.SyntaxNode[] {
+        const args: Parser.SyntaxNode[] = [];
+        let currentArgStart: Parser.SyntaxNode | undefined;
+
+        for (const child of children) {
+            // Skip opening/closing angle brackets
+            if (child.text === '<' || child.text === '>') {
+                continue;
+            }
+
+            // Comma marks the end of current argument and start of next
+            if (child.text === ',') {
+                currentArgStart = undefined;
+                continue;
+            }
+
+            // Skip comments - they should not be treated as arguments
+            if (child.type === 'comment') {
+                continue;
+            }
+
+            // Skip whitespace-only or empty tokens
+            if (!child.text.trim()) {
+                continue;
+            }
+
+            // First non-trivial token after comma or start is the argument's start
+            if (!currentArgStart) {
+                currentArgStart = child;
+                args.push(child);
+            }
+            // Otherwise, this token is part of the current argument (e.g., `*`, `8` in `Width * 8`)
+            // We don't add it to args since we only want the first token for positioning
+        }
+
+        return args;
+    }
+
+    /**
      * Parses template parameter names from a template declaration.
      * Example: "template <typename T, auto N>" → ["T", "N"]
      */
@@ -620,7 +670,7 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
         if (!match) { return names; }
 
         const params = match[1];
-        const paramList = this.splitParameters(params);
+        const paramList = splitParameters(params);
 
         for (const param of paramList) {
             const trimmed = param.trim();
@@ -710,85 +760,6 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
             }
         }
         return undefined;
-    }
-
-    /**
-     * Parses parameter names from a function signature.
-     * Example: "void push(T value, bool block)" → ["value", "block"]
-     */
-    private parseParameterNames(signature: string): string[] {
-        const names: string[] = [];
-        
-        // Find the parameter list (between parentheses)
-        const match = signature.match(/\(([^)]*)\)/);
-        if (!match) { return names; }
-
-        const params = match[1];
-        if (!params.trim()) { return names; }
-
-        // Split by comma, handling nested templates
-        const paramList = this.splitParameters(params);
-
-        for (const param of paramList) {
-            // Extract the parameter name (last identifier before any default value)
-            const trimmed = param.trim();
-            
-            // Remove default value
-            const withoutDefault = trimmed.split('=')[0].trim();
-            
-            // Find the last word (parameter name)
-            const parts = withoutDefault.split(/\s+/);
-            if (parts.length > 0) {
-                const name = parts[parts.length - 1]
-                    .replace(/[&*\[\]]/g, '') // Remove pointer/reference/array markers
-                    .trim();
-                if (name && !this.isTypeName(name)) {
-                    names.push(name);
-                }
-            }
-        }
-
-        return names;
-    }
-
-    /**
-     * Splits parameters handling nested templates.
-     */
-    private splitParameters(params: string): string[] {
-        const result: string[] = [];
-        let current = '';
-        let depth = 0;
-
-        for (const char of params) {
-            if (char === '<' || char === '(') {
-                depth++;
-                current += char;
-            } else if (char === '>' || char === ')') {
-                depth--;
-                current += char;
-            } else if (char === ',' && depth === 0) {
-                result.push(current);
-                current = '';
-            } else {
-                current += char;
-            }
-        }
-
-        if (current.trim()) {
-            result.push(current);
-        }
-
-        return result;
-    }
-
-    /**
-     * Checks if a name looks like a type name.
-     */
-    private isTypeName(name: string): boolean {
-        const types = ['void', 'bool', 'int', 'uint', 'auto', 'char', 'float', 'double'];
-        return types.includes(name) || 
-               /^(u?int\d+|uint\d+_t|float\d+)$/.test(name) ||
-               /^[A-Z]/.test(name); // PascalCase is likely a type
     }
 
     /**

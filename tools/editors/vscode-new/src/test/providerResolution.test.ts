@@ -30,6 +30,14 @@ import {
     createInstantiation
 } from '../utils/templateUtils';
 
+import {
+    stripAttributes,
+    extractFunctionParameters,
+    splitParameters,
+    isTypeName,
+    parseParameterNames
+} from '../utils/signatureUtils';
+
 describe('Provider Resolution Consistency', function() {
     this.timeout(10000);
 
@@ -209,65 +217,8 @@ describe('Provider Resolution Consistency', function() {
     });
 
     describe('Parameter Name Extraction', () => {
-        // Helper function matching the one in providers
-        function parseParameterNames(signature: string): string[] {
-            const names: string[] = [];
-            const match = signature.match(/\(([^)]*)\)/);
-            if (!match) { return names; }
-
-            const params = match[1];
-            if (!params.trim()) { return names; }
-
-            // Simple split, not handling nested templates fully
-            const paramList = splitParameters(params);
-
-            for (const param of paramList) {
-                const trimmed = param.trim();
-                const withoutDefault = trimmed.split('=')[0].trim();
-                const parts = withoutDefault.split(/\s+/);
-                if (parts.length > 0) {
-                    const name = parts[parts.length - 1]
-                        .replace(/[&*\[\]]/g, '')
-                        .trim();
-                    if (name && !isTypeName(name)) {
-                        names.push(name);
-                    }
-                }
-            }
-            return names;
-        }
-
-        function splitParameters(params: string): string[] {
-            const result: string[] = [];
-            let current = '';
-            let depth = 0;
-
-            for (const char of params) {
-                if (char === '<' || char === '(') {
-                    depth++;
-                    current += char;
-                } else if (char === '>' || char === ')') {
-                    depth--;
-                    current += char;
-                } else if (char === ',' && depth === 0) {
-                    result.push(current);
-                    current = '';
-                } else {
-                    current += char;
-                }
-            }
-
-            if (current.trim()) {
-                result.push(current);
-            }
-            return result;
-        }
-
-        function isTypeName(name: string): boolean {
-            const types = ['void', 'bool', 'int', 'uint', 'auto', 'char', 'float', 'double'];
-            return types.includes(name) || 
-                   /^(u?int\d+|uint\d+_t|float\d+)$/.test(name);
-        }
+        // Tests use shared utility functions from signatureUtils.ts
+        // This ensures the tests validate the same code used by the providers
 
         it('should extract parameter names from simple signature', () => {
             const names = parseParameterNames('void push(T value, bool block)');
@@ -287,6 +238,95 @@ describe('Provider Resolution Consistency', function() {
         it('should handle empty parameter list', () => {
             const names = parseParameterNames('int getValue()');
             assert.deepStrictEqual(names, []);
+        });
+
+        it('should handle functions with [[...]] attributes', () => {
+            const names = parseParameterNames('[[max_threads(1)]] optional<lqd_control_data_t> control(LqdControlOp opcode, lqd_control_address_t address, lqd_control_data_t data)');
+            assert.deepStrictEqual(names, ['opcode', 'address', 'data']);
+        });
+
+        it('should handle multiple attributes', () => {
+            const names = parseParameterNames('[[inline]] [[deprecated]] void process(int value)');
+            assert.deepStrictEqual(names, ['value']);
+        });
+
+        it('should handle nested attribute parentheses', () => {
+            const names = parseParameterNames('[[attr(foo(1, 2))]] void func(string name)');
+            assert.deepStrictEqual(names, ['name']);
+        });
+
+        it('should handle template return types with attributes', () => {
+            const names = parseParameterNames('[[nodiscard]] optional<Result<T>> compute(Input input)');
+            assert.deepStrictEqual(names, ['input']);
+        });
+
+        // Additional tests for stripAttributes
+        describe('stripAttributes helper', () => {
+            it('should strip single attribute', () => {
+                assert.strictEqual(stripAttributes('[[inline]] void f()'), 'void f()');
+            });
+
+            it('should strip multiple attributes', () => {
+                assert.strictEqual(stripAttributes('[[a]] [[b]] void f()'), 'void f()');
+            });
+
+            it('should handle attributes with parentheses', () => {
+                assert.strictEqual(stripAttributes('[[max_threads(1)]] void f()'), 'void f()');
+            });
+
+            it('should handle no attributes', () => {
+                assert.strictEqual(stripAttributes('void f()'), 'void f()');
+            });
+        });
+
+        // Additional tests for extractFunctionParameters
+        describe('extractFunctionParameters helper', () => {
+            it('should extract simple parameters', () => {
+                assert.strictEqual(extractFunctionParameters('void f(int a, int b)'), 'int a, int b');
+            });
+
+            it('should handle template return types', () => {
+                assert.strictEqual(extractFunctionParameters('optional<T> f(int a)'), 'int a');
+            });
+
+            it('should return undefined for no parentheses', () => {
+                assert.strictEqual(extractFunctionParameters('void f'), undefined);
+            });
+        });
+
+        // Additional tests for splitParameters
+        describe('splitParameters helper', () => {
+            it('should split simple parameters', () => {
+                assert.deepStrictEqual(splitParameters('int a, int b'), ['int a', ' int b']);
+            });
+
+            it('should handle template types', () => {
+                assert.deepStrictEqual(splitParameters('Map<K,V> m, int n'), ['Map<K,V> m', ' int n']);
+            });
+        });
+
+        // Additional tests for isTypeName
+        describe('isTypeName helper', () => {
+            it('should identify basic types', () => {
+                assert.strictEqual(isTypeName('void'), true);
+                assert.strictEqual(isTypeName('int'), true);
+                assert.strictEqual(isTypeName('bool'), true);
+            });
+
+            it('should identify sized types', () => {
+                assert.strictEqual(isTypeName('int32'), true);
+                assert.strictEqual(isTypeName('uint64'), true);
+            });
+
+            it('should identify PascalCase as types', () => {
+                assert.strictEqual(isTypeName('MyClass'), true);
+                assert.strictEqual(isTypeName('String'), true);
+            });
+
+            it('should not identify lowercase names as types', () => {
+                assert.strictEqual(isTypeName('value'), false);
+                assert.strictEqual(isTypeName('name'), false);
+            });
         });
     });
 });

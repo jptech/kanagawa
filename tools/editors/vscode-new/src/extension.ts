@@ -93,6 +93,13 @@ export async function activate(context: vscode.ExtensionContext) {
             await indexer.scanWorkspace();
         }).then(undefined, (err) => {
             console.error('Kanagawa: Background indexing failed:', err);
+            // Ensure status bar shows error state
+            statusBar.update({ 
+                state: 'error', 
+                symbolCount: 0, 
+                fileCount: 0, 
+                errorMessage: String(err) 
+            });
         });
     }, 100); // 100ms delay lets VS Code finish loading
 

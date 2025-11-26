@@ -4,6 +4,7 @@ import {
     parseTemplateType,
     findMatchingCloseBracket,
     parseTemplateArguments,
+    stripComments,
     extractBaseType,
     createInstantiation,
     substituteParameters,
@@ -152,6 +153,81 @@ describe('Template Utilities', () => {
 
         it('handles value arguments', () => {
             expect(parseTemplateArguments('uint32, 32, true')).to.deep.equal(['uint32', '32', 'true']);
+        });
+
+        it('handles expressions with operators', () => {
+            expect(parseTemplateArguments('Width * 8, Depth')).to.deep.equal(['Width * 8', 'Depth']);
+        });
+
+        it('handles expressions with parentheses', () => {
+            expect(parseTemplateArguments('(Width + 1) * 8, Depth')).to.deep.equal(['(Width + 1) * 8', 'Depth']);
+        });
+
+        it('handles complex expressions', () => {
+            expect(parseTemplateArguments('uint32, Width * 8, Depth / 2')).to.deep.equal(['uint32', 'Width * 8', 'Depth / 2']);
+        });
+
+        it('handles line comments between arguments', () => {
+            expect(parseTemplateArguments('A, // comment\nB')).to.deep.equal(['A', 'B']);
+        });
+
+        it('handles line comments after arguments', () => {
+            expect(parseTemplateArguments('128, // Fixed message size\nLqdChannelDirection')).to.deep.equal(['128', 'LqdChannelDirection']);
+        });
+
+        it('handles block comments between arguments', () => {
+            expect(parseTemplateArguments('A, /* comment */ B')).to.deep.equal(['A', 'B']);
+        });
+
+        it('handles multi-line template args with comments', () => {
+            const input = `128,                        // MessageSize
+LqdChannelDirection::LqdChannelDirectionUpstream, // ChannelDirection
+01234,                      // ChannelID
+64`;
+            expect(parseTemplateArguments(input)).to.deep.equal([
+                '128',
+                'LqdChannelDirection::LqdChannelDirectionUpstream',
+                '01234',
+                '64'
+            ]);
+        });
+
+        it('handles comments inside expressions', () => {
+            expect(parseTemplateArguments('Width /* width */ * 8, Depth')).to.deep.equal(['Width  * 8', 'Depth']);
+        });
+    });
+
+    describe('stripComments', () => {
+        it('strips line comments', () => {
+            expect(stripComments('a // comment')).to.equal('a ');
+        });
+
+        it('strips line comments and preserves newline', () => {
+            expect(stripComments('a // comment\nb')).to.equal('a \nb');
+        });
+
+        it('strips block comments', () => {
+            expect(stripComments('a /* comment */ b')).to.equal('a  b');
+        });
+
+        it('strips multi-line block comments', () => {
+            expect(stripComments('a /* line1\nline2 */ b')).to.equal('a  b');
+        });
+
+        it('handles multiple comments', () => {
+            expect(stripComments('a // c1\nb /* c2 */ c')).to.equal('a \nb  c');
+        });
+
+        it('handles no comments', () => {
+            expect(stripComments('a + b')).to.equal('a + b');
+        });
+
+        it('handles empty string', () => {
+            expect(stripComments('')).to.equal('');
+        });
+
+        it('handles comment at end of string', () => {
+            expect(stripComments('value // comment')).to.equal('value ');
         });
     });
 

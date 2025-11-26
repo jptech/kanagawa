@@ -108,28 +108,86 @@ export function findMatchingCloseBracket(text: string, openPos: number): number 
 }
 
 /**
+ * Strips comments from a string.
+ * Handles line comments (starting with //) and block comments (enclosed in slash-star pairs).
+ * 
+ * @example
+ * stripComments("a, // comment\nb") returns "a, \nb"
+ * stripComments("a block b") returns "a  b" (where block is a slash-star comment)
+ */
+export function stripComments(text: string): string {
+    let result = '';
+    let i = 0;
+    
+    while (i < text.length) {
+        // Check for line comment
+        if (i + 1 < text.length && text[i] === '/' && text[i + 1] === '/') {
+            // Skip until end of line
+            while (i < text.length && text[i] !== '\n') {
+                i++;
+            }
+            // Keep the newline if present
+            if (i < text.length && text[i] === '\n') {
+                result += '\n';
+                i++;
+            }
+            continue;
+        }
+        
+        // Check for block comment
+        if (i + 1 < text.length && text[i] === '/' && text[i + 1] === '*') {
+            i += 2; // Skip /*
+            // Skip until */
+            while (i + 1 < text.length && !(text[i] === '*' && text[i + 1] === '/')) {
+                i++;
+            }
+            i += 2; // Skip */
+            continue;
+        }
+        
+        result += text[i];
+        i++;
+    }
+    
+    return result;
+}
+
+/**
  * Parses template arguments from a comma-separated string.
- * Handles nested templates correctly.
+ * Handles nested templates, parenthesized expressions, and comments correctly.
+ * Also handles expressions with operators like `a * b` or `a + b`.
  * 
  * @example
  * parseTemplateArguments("uint32, 32") → ["uint32", "32"]
  * parseTemplateArguments("string, List<int>") → ["string", "List<int>"]
+ * parseTemplateArguments("Width * 8, Depth") → ["Width * 8", "Depth"]
+ * parseTemplateArguments("A, // comment\nB") → ["A", "B"]
  */
 export function parseTemplateArguments(argsString: string): string[] {
+    // First strip comments to avoid them being parsed as arguments
+    const cleanedString = stripComments(argsString);
+    
     const args: string[] = [];
-    let depth = 0;
+    let angleDepth = 0;
+    let parenDepth = 0;
     let currentArg = '';
     
-    for (let i = 0; i < argsString.length; i++) {
-        const ch = argsString[i];
+    for (let i = 0; i < cleanedString.length; i++) {
+        const ch = cleanedString[i];
         
         if (ch === '<') {
-            depth++;
+            angleDepth++;
             currentArg += ch;
         } else if (ch === '>') {
-            depth--;
+            angleDepth--;
             currentArg += ch;
-        } else if (ch === ',' && depth === 0) {
+        } else if (ch === '(') {
+            parenDepth++;
+            currentArg += ch;
+        } else if (ch === ')') {
+            parenDepth--;
+            currentArg += ch;
+        } else if (ch === ',' && angleDepth === 0 && parenDepth === 0) {
             const trimmed = currentArg.trim();
             if (trimmed) {
                 args.push(trimmed);

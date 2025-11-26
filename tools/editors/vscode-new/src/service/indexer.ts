@@ -293,7 +293,12 @@ export class WorkspaceIndexer {
 
             if (effectiveToken.isCancellationRequested) { return; }
 
-            const files = await this.collectSourceFiles(importConfiguration.importPaths, importConfiguration.excludePatterns);
+            // Include stdlibPath in the paths to scan (it should be treated as an import path)
+            const allImportPaths = [...importConfiguration.importPaths];
+            if (importConfiguration.stdlibPath) {
+                allImportPaths.push(importConfiguration.stdlibPath);
+            }
+            const files = await this.collectSourceFiles(allImportPaths, importConfiguration.excludePatterns);
             
             // Pre-load all documents in parallel (I/O bound)
             // This is much faster than loading one-by-one during indexing
@@ -370,7 +375,10 @@ export class WorkspaceIndexer {
 
         // Trigger rescan outside of try/finally to avoid re-entrancy issues
         if (shouldRescan) {
-            void this.scanWorkspace();
+            this.scanWorkspace().catch((err) => {
+                console.error('Kanagawa: Error during pending rescan:', err);
+                this.notifyStatus('error', String(err));
+            });
         }
     }
 
@@ -480,17 +488,21 @@ export class WorkspaceIndexer {
         try {
             const config = await this.getImportConfiguration();
             const parts = importPath.split('.');
-            const fileName = parts[parts.length - 1] + '.k';
+            const baseName = parts[parts.length - 1];
+            // Try .k first, then .pd
+            const possibleFileNames = [baseName + '.k', baseName + '.pd'];
             const dirPath = parts.slice(0, -1).join('/');
 
             for (const basePath of config.importPaths) {
-                const fullPath = dirPath ? `${basePath}/${dirPath}/${fileName}` : `${basePath}/${fileName}`;
-                const uri = vscode.Uri.file(fullPath);
-                try {
-                    await vscode.workspace.fs.stat(uri);
-                    return uri;
-                } catch {
-                    // File doesn't exist at this path, try next
+                for (const fileName of possibleFileNames) {
+                    const fullPath = dirPath ? `${basePath}/${dirPath}/${fileName}` : `${basePath}/${fileName}`;
+                    const uri = vscode.Uri.file(fullPath);
+                    try {
+                        await vscode.workspace.fs.stat(uri);
+                        return uri;
+                    } catch {
+                        // File doesn't exist at this path, try next
+                    }
                 }
             }
         } catch {
@@ -1314,11 +1326,14 @@ export class WorkspaceIndexer {
             this.pendingRescan = true;
             return;
         }
-        void this.scanWorkspace();
+        this.scanWorkspace().catch((err) => {
+            console.error('Kanagawa: Error during import configuration change rescan:', err);
+            this.notifyStatus('error', String(err));
+        });
     }
 
     private async collectSourceFiles(extraPaths: string[], excludePatterns: string[]): Promise<vscode.Uri[]> {
-        const workspaceFiles = await vscode.workspace.findFiles('**/*.k', '**/node_modules/**');
+        const workspaceFiles = await vscode.workspace.findFiles('**/*.{k,pd}', '**/node_modules/**');
         const externalFiles = await this.collectExternalSourceFiles(extraPaths, excludePatterns);
         const uriMap = new Map<string, vscode.Uri>();
         
@@ -1398,7 +1413,7 @@ export class WorkspaceIndexer {
             if ((type & vscode.FileType.SymbolicLink) !== 0) { continue; }
 
             if ((type & vscode.FileType.File) !== 0) {
-                if (name.endsWith('.k')) {
+                if (name.endsWith('.k') || name.endsWith('.pd')) {
                     // Check exclude patterns for external files
                     const relativePath = entryUri.fsPath.substring(baseDir.length + 1).replace(/\\/g, '/');
                     let excluded = false;

@@ -67,11 +67,27 @@ export class ImportConfigService {
         try {
             const data = await vscode.workspace.fs.readFile(uri);
             const parsed = JSON.parse(Buffer.from(data).toString('utf8'));
-            return {
+            const config = {
                 importPaths: this.normalizePaths(this.ensureStringArray(parsed.importPaths)),
                 stdlibPath: parsed.stdlibPath ? this.toAbsolute(parsed.stdlibPath) : undefined,
                 excludePatterns: this.ensureStringArray(parsed.exclude)
             };
+            
+            // Log successful config load
+            const pathCount = config.importPaths.length;
+            const excludeCount = config.excludePatterns.length;
+            const parts = [
+                `${pathCount} import path${pathCount !== 1 ? 's' : ''}`
+            ];
+            if (config.stdlibPath) {
+                parts.push(`stdlib: ${config.stdlibPath}`);
+            }
+            if (excludeCount > 0) {
+                parts.push(`${excludeCount} exclude pattern${excludeCount !== 1 ? 's' : ''}`);
+            }
+            console.log(`Kanagawa: Loaded kanagawa.config.json from ${this.workspaceFolder.name}: ${parts.join(', ')}`);
+            
+            return config;
         } catch {
             return { importPaths: [], excludePatterns: [] };
         }
