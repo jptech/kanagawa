@@ -2,7 +2,7 @@
   "name": "kanagawa-vscode",
   "displayName": "Kanagawa Language Support",
   "description": "Language support for Kanagawa (LSP-Lite)",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "microsoft",
   "repository": {
     "type": "git",
@@ -144,8 +144,60 @@
     "configuration": {
       "title": "Kanagawa",
       "properties": {
+        "kanagawa.compiler.importPaths": {
+          "type": "array",
+          "scope": "resource",
+          "order": 1,
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Additional search paths for Kanagawa imports. Relative paths are resolved against the workspace folder.\n\n**Merged** with `kanagawa.config.json` entries (both sources are combined)."
+        },
+        "kanagawa.compiler.stdlibPath": {
+          "type": "string",
+          "scope": "resource",
+          "order": 2,
+          "default": "",
+          "markdownDescription": "Standard library location. Relative paths are resolved against the workspace folder.\n\n**Overrides** `kanagawa.config.json` if set here."
+        },
+        "kanagawa.index.exclude": {
+          "type": "array",
+          "scope": "resource",
+          "order": 3,
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Glob patterns for files and folders to exclude from indexing. Patterns are matched against paths relative to the workspace folder.\n\n**Merged** with `kanagawa.config.json` entries.\n\nExamples: `**/generated/**`, `**/*.gen.k`, `test_vectors/**`"
+        },
+        "kanagawa.inlayHints.typeHints.enabled": {
+          "type": "boolean",
+          "order": 10,
+          "default": true,
+          "markdownDescription": "Show inferred type hints for `auto` variable declarations.\n\nExample: `auto x = getValue();` shows `: int32` after `x`."
+        },
+        "kanagawa.inlayHints.parameterNames.enabled": {
+          "type": "boolean",
+          "order": 11,
+          "default": true,
+          "markdownDescription": "Show parameter name hints at function call sites.\n\nExample: `process(data, true)` shows `buffer:` and `async:` before arguments."
+        },
+        "kanagawa.inlayHints.templateParameterNames.enabled": {
+          "type": "boolean",
+          "order": 12,
+          "default": true,
+          "markdownDescription": "Show template parameter name hints at template instantiation sites.\n\nExample: `Vector<int32, 16>` shows `T:` and `N:` before arguments."
+        },
+        "kanagawa.signatureHelp.templateParameters.enabled": {
+          "type": "boolean",
+          "order": 13,
+          "default": true,
+          "markdownDescription": "Show template parameter signature help when typing template arguments (triggered by `<`)."
+        },
         "kanagawa.outline.categoryFilter": {
           "type": "array",
+          "order": 20,
           "items": {
             "type": "string",
             "enum": [
@@ -161,73 +213,36 @@
               "constant",
               "alias",
               "other"
+            ],
+            "enumDescriptions": [
+              "Module declarations",
+              "Class definitions",
+              "Struct definitions",
+              "Union definitions",
+              "Enum definitions",
+              "Function definitions",
+              "Method definitions (inside classes)",
+              "Variable declarations",
+              "Member fields (inside classes/structs)",
+              "Constant declarations",
+              "Type aliases",
+              "Other symbols"
             ]
           },
           "default": [],
-          "description": "Outline categories to display. Leave empty to show all categories."
+          "markdownDescription": "Filter which symbol categories appear in the document outline. Leave empty to show all categories.\n\nUse the command `Kanagawa: Select Outline Categories` for an interactive picker."
         },
         "kanagawa.outline.modulePrefix": {
           "type": "string",
+          "order": 21,
           "default": "",
-          "description": "Only show symbols whose module path starts with this prefix."
+          "markdownDescription": "Only show symbols whose module path starts with this prefix.\n\nExample: `data.` shows only symbols from `data.*` modules."
         },
         "kanagawa.typePeek.enabled": {
           "type": "boolean",
+          "order": 30,
           "default": false,
-          "description": "Show 'type: ...' CodeLens above 'auto' variable declarations. Disabled by default since inlay hints provide the same information inline."
-        },
-        "kanagawa.inlayHints.typeHints.enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show inferred type hints for 'auto' variable declarations."
-        },
-        "kanagawa.inlayHints.parameterNames.enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show parameter name hints at function call sites."
-        },
-        "kanagawa.inlayHints.templateParameterNames.enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show template parameter name hints at template instantiation sites."
-        },
-        "kanagawa.signatureHelp.templateParameters.enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show template parameter signature help when typing template arguments (triggered by '<')."
-        },
-        "kanagawa.compiler.importPaths": {
-          "type": "array",
-          "scope": "resource",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "markdownDescription": "Additional search paths for Kanagawa imports. Relative paths are resolved against the workspace folder. Workspace kanagawa.config.json entries are merged first, followed by these settings.",
-          "tags": [
-            "kanagawa"
-          ]
-        },
-        "kanagawa.compiler.stdlibPath": {
-          "type": "string",
-          "scope": "resource",
-          "default": "",
-          "markdownDescription": "Optional override for the standard library location. Relative paths are resolved against the workspace folder. Values in these settings take precedence over workspace kanagawa.config.json entries.",
-          "tags": [
-            "kanagawa"
-          ]
-        },
-        "kanagawa.index.exclude": {
-          "type": "array",
-          "scope": "resource",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "markdownDescription": "Glob patterns for files and folders to exclude from indexing. Patterns are matched against paths relative to the workspace folder. Examples: `**/generated/**`, `**/*.gen.k`, `test_vectors/**`.",
-          "tags": [
-            "kanagawa"
-          ]
+          "markdownDescription": "Show `type: ...` CodeLens above `auto` variable declarations.\n\nDisabled by default since inlay hints provide the same information inline."
         }
       }
     }
