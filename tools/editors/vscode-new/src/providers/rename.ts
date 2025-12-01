@@ -5,6 +5,21 @@ import { WorkspaceIndexer, SymbolInfo } from '../service/indexer';
 import { findIdentifierNode, nodeToRange } from '../utils/nodeUtils';
 
 /**
+ * Represents a scope in the scope tree for tracking variable declarations.
+ * Used to correctly handle shadowing during rename operations.
+ */
+interface ScopeNode {
+    /** The AST node that defines this scope (block, function, etc.) */
+    node: Parser.SyntaxNode;
+    /** Declarations in this scope: name → declaration node */
+    declarations: Map<string, Parser.SyntaxNode>;
+    /** Parent scope (undefined for root) */
+    parent?: ScopeNode;
+    /** Child scopes */
+    children: ScopeNode[];
+}
+
+/**
  * Provides rename functionality for Kanagawa symbols.
  * 
  * Supports renaming:
@@ -186,6 +201,7 @@ export class KanagawaRenameProvider implements vscode.RenameProvider {
 
     /**
      * Collects occurrences of a local symbol within its containing scope.
+     * Uses scope-aware collection to avoid renaming shadowed variables.
      */
     private async collectLocalOccurrences(
         document: vscode.TextDocument,
@@ -201,8 +217,19 @@ export class KanagawaRenameProvider implements vscode.RenameProvider {
         const scopeNode = this.findContainingScope(tree, definition.range.start);
         if (!scopeNode) { return; }
 
-        // Collect all identifiers within that scope
-        this.collectIdentifiersInNode(scopeNode, name, document.uri, addLocation);
+        // Build scope tree to track declarations and shadowing
+        const scopeTree = this.buildScopeTree(scopeNode);
+        
+        // Find which scope contains our target declaration
+        const targetDeclarationScope = this.findDeclarationScope(scopeTree, definition.range.start, name);
+        if (!targetDeclarationScope) {
+            // Fallback to simple collection if we can't find the declaration scope
+            this.collectIdentifiersInNode(scopeNode, name, document.uri, addLocation);
+            return;
+        }
+
+        // Collect identifiers that resolve to the same declaration (respecting shadowing)
+        this.collectScopeAwareIdentifiers(scopeTree, name, targetDeclarationScope, document.uri, addLocation);
     }
 
     /**
@@ -362,5 +389,211 @@ export class KanagawaRenameProvider implements vscode.RenameProvider {
         if (!name || name.length === 0) { return false; }
         // Basic identifier validation: [a-zA-Z_][a-zA-Z0-9_]*
         return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name);
+    }
+
+    // =========================================================================
+    // Scope Tree Building and Traversal (for shadowing-aware rename)
+    // =========================================================================
+
+    /** Node types that create new scopes */
+    private static readonly SCOPE_TYPES = new Set([
+        'function_definition',
+        'block',
+        'compound_statement',
+        'for_statement',
+        'while_statement',
+        'do_while_statement',
+        'if_statement',
+        'switch_statement',
+        'lambda_expression'
+    ]);
+
+    /** Node types that declare variables */
+    private static readonly DECLARATION_TYPES = new Set([
+        'variable_decl',
+        'parameter',
+        'for_range_declaration'
+    ]);
+
+    /**
+     * Builds a scope tree from an AST node, tracking all variable declarations.
+     * This enables proper handling of variable shadowing during rename.
+     */
+    private buildScopeTree(root: Parser.SyntaxNode): ScopeNode {
+        const rootScope: ScopeNode = {
+            node: root,
+            declarations: new Map(),
+            children: []
+        };
+
+        this.populateScopeTree(root, rootScope);
+        return rootScope;
+    }
+
+    /**
+     * Recursively populates the scope tree by walking the AST.
+     */
+    private populateScopeTree(node: Parser.SyntaxNode, currentScope: ScopeNode): void {
+        // Check if this node creates a new scope
+        if (KanagawaRenameProvider.SCOPE_TYPES.has(node.type) && node !== currentScope.node) {
+            const childScope: ScopeNode = {
+                node,
+                declarations: new Map(),
+                parent: currentScope,
+                children: []
+            };
+            currentScope.children.push(childScope);
+            
+            // For function definitions, add parameters to the function's scope
+            if (node.type === 'function_definition') {
+                const params = node.childForFieldName('parameters');
+                if (params) {
+                    for (const param of params.namedChildren) {
+                        if (param.type === 'parameter') {
+                            const nameNode = param.childForFieldName('name');
+                            if (nameNode) {
+                                childScope.declarations.set(nameNode.text, param);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Continue with the child scope
+            for (const child of node.namedChildren) {
+                this.populateScopeTree(child, childScope);
+            }
+            return;
+        }
+
+        // Check if this node is a declaration
+        if (KanagawaRenameProvider.DECLARATION_TYPES.has(node.type)) {
+            const nameNode = node.childForFieldName('name');
+            if (nameNode) {
+                currentScope.declarations.set(nameNode.text, node);
+            }
+        }
+
+        // Recurse into children
+        for (const child of node.namedChildren) {
+            this.populateScopeTree(child, currentScope);
+        }
+    }
+
+    /**
+     * Finds the scope that contains the declaration at the given position.
+     */
+    private findDeclarationScope(
+        scopeTree: ScopeNode,
+        position: vscode.Position,
+        name: string
+    ): ScopeNode | undefined {
+        // Check if this scope has the declaration at this position
+        const decl = scopeTree.declarations.get(name);
+        if (decl) {
+            const declStart = decl.startPosition;
+            const declEnd = decl.endPosition;
+            if (position.line >= declStart.row && position.line <= declEnd.row) {
+                // Position is within this declaration
+                return scopeTree;
+            }
+        }
+
+        // Check children
+        for (const child of scopeTree.children) {
+            const found = this.findDeclarationScope(child, position, name);
+            if (found) { return found; }
+        }
+
+        // If we have the declaration and the position is after it, this is the scope
+        if (decl) {
+            const declLine = decl.startPosition.row;
+            if (position.line >= declLine) {
+                return scopeTree;
+            }
+        }
+
+        return undefined;
+    }
+
+    /**
+     * Collects identifiers that resolve to a declaration in the target scope,
+     * respecting shadowing in nested scopes.
+     */
+    private collectScopeAwareIdentifiers(
+        scopeTree: ScopeNode,
+        name: string,
+        targetScope: ScopeNode,
+        uri: vscode.Uri,
+        addLocation: (uri: vscode.Uri, range: vscode.Range) => void
+    ): void {
+        // Check if this scope shadows the variable
+        const shadowsVariable = scopeTree !== targetScope && 
+                               scopeTree.declarations.has(name) &&
+                               !this.isAncestorScope(scopeTree, targetScope);
+
+        if (shadowsVariable) {
+            // This scope has its own declaration of this name, don't collect here
+            return;
+        }
+
+        // Check if this scope is where the target declaration lives, or is a child of it
+        const isInTargetScopeOrChild = scopeTree === targetScope || 
+                                       this.isAncestorScope(targetScope, scopeTree);
+
+        if (!isInTargetScopeOrChild) {
+            // This scope is not accessible from target scope
+            return;
+        }
+
+        // Collect identifiers in this scope's node (but not in child scopes - they're handled recursively)
+        this.collectIdentifiersInNodeExcludingChildScopes(
+            scopeTree.node,
+            name,
+            uri,
+            addLocation,
+            new Set(scopeTree.children.map(c => c.node.id))
+        );
+
+        // Recurse into child scopes
+        for (const child of scopeTree.children) {
+            this.collectScopeAwareIdentifiers(child, name, targetScope, uri, addLocation);
+        }
+    }
+
+    /**
+     * Checks if `ancestor` is an ancestor scope of `descendant`.
+     */
+    private isAncestorScope(ancestor: ScopeNode, descendant: ScopeNode): boolean {
+        let current: ScopeNode | undefined = descendant.parent;
+        while (current) {
+            if (current === ancestor) { return true; }
+            current = current.parent;
+        }
+        return false;
+    }
+
+    /**
+     * Collects identifiers with the given name, excluding nodes that are child scopes.
+     */
+    private collectIdentifiersInNodeExcludingChildScopes(
+        node: Parser.SyntaxNode,
+        name: string,
+        uri: vscode.Uri,
+        addLocation: (uri: vscode.Uri, range: vscode.Range) => void,
+        excludedNodeIds: Set<number>
+    ): void {
+        // Skip excluded nodes (child scopes)
+        if (excludedNodeIds.has(node.id)) {
+            return;
+        }
+
+        if ((node.type === 'identifier' || node.type === 'type_identifier') && node.text === name) {
+            addLocation(uri, nodeToRange(node));
+        }
+
+        for (const child of node.namedChildren) {
+            this.collectIdentifiersInNodeExcludingChildScopes(child, name, uri, addLocation, excludedNodeIds);
+        }
     }
 }

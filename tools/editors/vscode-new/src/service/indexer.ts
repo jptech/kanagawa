@@ -107,6 +107,9 @@ const MAX_ALIAS_CHAIN_DEPTH = 50;
 /** Default chunk size for batch file processing during indexing */
 const INDEX_CHUNK_SIZE = 10;
 
+/** Maximum entries in the resolved imports LRU cache */
+const RESOLVED_IMPORTS_CACHE_LIMIT = 500;
+
 export class WorkspaceIndexer {
     /** Primary index: name → SymbolInfo[] (for prefix matching, completions) */
     private symbolIndex: Map<string, SymbolInfo[]> = new Map();
@@ -750,13 +753,17 @@ export class WorkspaceIndexer {
 
     /**
      * Gets or computes the resolved imports for a document.
+     * Uses LRU cache with bounded size to prevent memory growth.
      */
     public getResolvedImports(uri: vscode.Uri): ResolvedImports {
         const key = uri.toString();
         
-        // Check cache
+        // Check cache - if found, move to end for LRU behavior
         const cached = this.resolvedImportsCache.get(key);
         if (cached) {
+            // Move to end (most recently used) by deleting and re-adding
+            this.resolvedImportsCache.delete(key);
+            this.resolvedImportsCache.set(key, cached);
             return cached;
         }
         
@@ -764,6 +771,7 @@ export class WorkspaceIndexer {
         const context = this.documentContexts.get(key);
         if (!context) {
             // Return empty resolved imports for unknown documents
+            // Don't cache empty results to avoid polluting the cache
             return {
                 currentModule: undefined,
                 importedModules: new Set(),
@@ -779,6 +787,14 @@ export class WorkspaceIndexer {
             this.moduleExports
         );
         
+        // Evict oldest entry if at limit (first entry in Map is oldest due to insertion order)
+        if (this.resolvedImportsCache.size >= RESOLVED_IMPORTS_CACHE_LIMIT) {
+            const firstKey = this.resolvedImportsCache.keys().next().value;
+            if (firstKey) {
+                this.resolvedImportsCache.delete(firstKey);
+            }
+        }
+        
         // Cache and return
         this.resolvedImportsCache.set(key, resolved);
         return resolved;
@@ -786,8 +802,9 @@ export class WorkspaceIndexer {
 
     /**
      * Invalidates the resolved imports cache for a document.
+     * This should be called when a document is closed or its imports change.
      */
-    private invalidateResolvedImports(uri: vscode.Uri): void {
+    public invalidateResolvedImports(uri: vscode.Uri): void {
         this.resolvedImportsCache.delete(uri.toString());
     }
 

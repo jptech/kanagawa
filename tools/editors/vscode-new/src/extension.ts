@@ -45,12 +45,33 @@ export async function activate(context: vscode.ExtensionContext) {
 
         const queryManager = new QueryManager(context);
     
-    // Preload all queries
-    await Promise.all([
-        queryManager.loadQuery('highlights'),
-        queryManager.loadQuery('definitions'),
-        queryManager.loadQuery('outline')
-    ]);
+    // Preload all queries with graceful error handling
+    const queryNames = ['highlights', 'definitions', 'outline'] as const;
+    const queryResults = await Promise.allSettled(
+        queryNames.map(name => queryManager.loadQuery(name))
+    );
+    
+    // Check for failures and notify user
+    const failedQueries = queryResults
+        .map((result, idx) => ({ result, name: queryNames[idx] }))
+        .filter(({ result }) => result.status === 'rejected' || 
+                               (result.status === 'fulfilled' && !result.value));
+    
+    if (failedQueries.length > 0) {
+        const failedNames = failedQueries.map(f => f.name).join(', ');
+        vscode.window.showWarningMessage(
+            `Kanagawa: Failed to load queries (${failedNames}). Some features may not work.`,
+            'Retry',
+            'Show Diagnostics'
+        ).then(choice => {
+            if (choice === 'Retry') {
+                queryManager.clearFailedQueries();
+                vscode.commands.executeCommand('kanagawa.restart');
+            } else if (choice === 'Show Diagnostics') {
+                vscode.commands.executeCommand('kanagawa.diagnostics');
+            }
+        });
+    }
 
     const outlineFilters = new OutlineFilterManager();
     
@@ -172,6 +193,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 
                 // Clear diagnostics for closed document
                 diagnosticsProvider.clearDiagnostics(doc);
+                
+                // Clear resolved imports cache for this document to prevent memory growth
+                indexer.invalidateResolvedImports(doc.uri);
             }
         }),
 
