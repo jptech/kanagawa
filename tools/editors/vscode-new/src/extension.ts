@@ -80,6 +80,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const indexer = new WorkspaceIndexer(service, queryManager, workspaceFolders);
     await indexer.init(context);
     const diagnosticsProvider = new KanagawaDiagnosticsProvider(service);
+    const inlayHintsProvider = new KanagawaInlayHintsProvider(service, indexer);
     
     // Create status bar for index visibility
     const statusBar = new IndexStatusBar();
@@ -90,8 +91,26 @@ export async function activate(context: vscode.ExtensionContext) {
         statusBar.update({ state, symbolCount, fileCount, errorMessage: error });
     });
     
+    // Helper function to read performance configuration
+    const getPerformanceConfig = () => {
+        const config = vscode.workspace.getConfiguration('kanagawa.performance');
+        return {
+            debounceDelay: config.get<number>('debounceDelay', 200),
+            memberCacheLimit: config.get<number>('memberCacheLimit', 500),
+            indexChunkSize: config.get<number>('indexChunkSize', 10)
+        };
+    };
+    
+    // Get initial performance config and apply to indexer
+    const perfConfig = getPerformanceConfig();
+    indexer.updatePerformanceConfig({
+        indexChunkSize: perfConfig.indexChunkSize,
+        memberCacheLimit: perfConfig.memberCacheLimit
+    });
+    
     // Debouncer for document change events - prevents excessive parsing during rapid typing
-    const parseDebouncer = new KeyedDebouncer<string>(DEBOUNCE_DELAYS.DOCUMENT_CHANGE);
+    // Uses configured debounce delay (default 200ms)
+    const parseDebouncer = new KeyedDebouncer<string>(perfConfig.debounceDelay);
     context.subscriptions.push(parseDebouncer);
 
     // Register Providers FIRST - extension is immediately usable
@@ -112,7 +131,7 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.languages.registerReferenceProvider('kanagawa', new KanagawaReferencesProvider(service, indexer)),
         vscode.languages.registerCallHierarchyProvider('kanagawa', new KanagawaCallHierarchyProvider(service, indexer)),
         vscode.languages.registerRenameProvider('kanagawa', new KanagawaRenameProvider(service, indexer)),
-        vscode.languages.registerInlayHintsProvider('kanagawa', new KanagawaInlayHintsProvider(service, indexer)),
+        vscode.languages.registerInlayHintsProvider('kanagawa', inlayHintsProvider),
         diagnosticsProvider,
         outlineFilters
     );
@@ -146,6 +165,11 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.workspace.onDidChangeTextDocument((event: vscode.TextDocumentChangeEvent) => {
             if (event.document.languageId === 'kanagawa') {
                 const uri = event.document.uri.toString();
+                
+                // Immediately invalidate inlay hints cache for responsive UI
+                // (inlay hints will be recalculated when VS Code requests them)
+                inlayHintsProvider.invalidateCache(event.document.uri);
+                
                 // Note: We intentionally do NOT pass contentChanges to parse() here.
                 // When debouncing, the contentChanges captured at event time become stale
                 // by the time the callback runs (the document has changed further).
@@ -194,6 +218,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 // Clear diagnostics for closed document
                 diagnosticsProvider.clearDiagnostics(doc);
                 
+                // Clear inlay hints cache for closed document
+                inlayHintsProvider.invalidateCache(doc.uri);
+                
                 // Clear resolved imports cache for this document to prevent memory growth
                 indexer.invalidateResolvedImports(doc.uri);
             }
@@ -204,6 +231,18 @@ export async function activate(context: vscode.ExtensionContext) {
             if (doc.languageId === 'kanagawa') {
                 console.log('Kanagawa: Document saved, updating index:', doc.uri.toString());
                 indexer.updateFile(doc.uri);
+            }
+        }),
+        
+        // Configuration change handler - update performance settings
+        vscode.workspace.onDidChangeConfiguration((event) => {
+            if (event.affectsConfiguration('kanagawa.performance')) {
+                const newConfig = getPerformanceConfig();
+                indexer.updatePerformanceConfig({
+                    indexChunkSize: newConfig.indexChunkSize,
+                    memberCacheLimit: newConfig.memberCacheLimit
+                });
+                console.log('Kanagawa: Performance configuration updated:', newConfig);
             }
         })
     );

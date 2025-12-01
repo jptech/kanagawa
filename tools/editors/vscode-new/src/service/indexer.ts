@@ -105,10 +105,18 @@ export interface SymbolInfo {
 const MAX_ALIAS_CHAIN_DEPTH = 50;
 
 /** Default chunk size for batch file processing during indexing */
-const INDEX_CHUNK_SIZE = 10;
+const DEFAULT_INDEX_CHUNK_SIZE = 10;
 
-/** Maximum entries in the resolved imports LRU cache */
-const RESOLVED_IMPORTS_CACHE_LIMIT = 500;
+/** Default maximum entries in the resolved imports LRU cache */
+const DEFAULT_RESOLVED_IMPORTS_CACHE_LIMIT = 500;
+
+/** Performance configuration for the indexer */
+export interface IndexerPerformanceConfig {
+    /** Number of files to process per batch during indexing (default: 10) */
+    indexChunkSize: number;
+    /** Maximum entries in the LRU caches (default: 500) */
+    memberCacheLimit: number;
+}
 
 export class WorkspaceIndexer {
     /** Primary index: name → SymbolInfo[] (for prefix matching, completions) */
@@ -134,6 +142,11 @@ export class WorkspaceIndexer {
         'enum_template'
     ]);
     private readonly typeInferenceCache: Map<string, Map<number, string>> = new Map();
+    /** Direct container→members index, built during indexing for O(1) member lookup */
+    private readonly membersByContainer: Map<string, SymbolInfo[]> = new Map();
+    /** Reverse mapping: URI → Set of container keys with members from that URI */
+    private readonly containersByUri: Map<string, Set<string>> = new Map();
+    /** Legacy computed member cache for complex alias resolution (deprecated, kept for edge cases) */
     private readonly memberCache: Map<string, SymbolInfo[]> = new Map();
     /** Reverse mapping: URI → Set of cache keys (type names) with members from that URI */
     private readonly memberCacheByUri: Map<string, Set<string>> = new Map();
@@ -148,6 +161,10 @@ export class WorkspaceIndexer {
     private indexedFiles: Set<string> = new Set();
     /** Callback for status updates during indexing */
     private onStatusChange?: (state: 'idle' | 'indexing' | 'error', symbolCount: number, fileCount: number, error?: string) => void;
+    
+    /** Configurable performance settings */
+    private indexChunkSize = DEFAULT_INDEX_CHUNK_SIZE;
+    private memberCacheLimit = DEFAULT_RESOLVED_IMPORTS_CACHE_LIMIT;
 
     constructor(
         private service: TreeSitterService,
@@ -163,6 +180,26 @@ export class WorkspaceIndexer {
         // Fallback for no workspace folders
         if (this.importConfigServices.size === 0) {
             this.importConfigServices.set('default', new ImportConfigService(undefined));
+        }
+    }
+    
+    /**
+     * Updates performance configuration. Can be called when VS Code settings change.
+     */
+    updatePerformanceConfig(config: IndexerPerformanceConfig): void {
+        this.indexChunkSize = config.indexChunkSize;
+        this.memberCacheLimit = config.memberCacheLimit;
+        
+        // Trim caches if new limit is smaller
+        if (this.resolvedImportsCache.size > this.memberCacheLimit) {
+            const keysToRemove = Array.from(this.resolvedImportsCache.keys())
+                .slice(0, this.resolvedImportsCache.size - this.memberCacheLimit);
+            keysToRemove.forEach(key => this.resolvedImportsCache.delete(key));
+        }
+        if (this.memberCache.size > this.memberCacheLimit) {
+            const keysToRemove = Array.from(this.memberCache.keys())
+                .slice(0, this.memberCache.size - this.memberCacheLimit);
+            keysToRemove.forEach(key => this.memberCache.delete(key));
         }
     }
 
@@ -276,7 +313,10 @@ export class WorkspaceIndexer {
             this.moduleExports.clear();
             this.resolvedImportsCache.clear();
             this.documentContexts.clear();
+            this.membersByContainer.clear();
+            this.containersByUri.clear();
             this.memberCache.clear();
+            this.memberCacheByUri.clear();
             this.typeInferenceCache.clear();
             this.aliasMap.clear();
             this.indexedFiles.clear();
@@ -328,13 +368,13 @@ export class WorkspaceIndexer {
             
             // Process in chunks to avoid blocking UI, with cancellation checks
             // Note: Parsing is serialized by mutex, but symbol extraction can overlap
-            for (let i = 0; i < files.length; i += INDEX_CHUNK_SIZE) {
+            for (let i = 0; i < files.length; i += this.indexChunkSize) {
                 if (effectiveToken.isCancellationRequested) {
                     console.log('Kanagawa: Workspace scan cancelled.');
                     return;
                 }
 
-                const chunk = files.slice(i, i + INDEX_CHUNK_SIZE);
+                const chunk = files.slice(i, i + this.indexChunkSize);
                 await Promise.all(chunk.map(async (uri: vscode.Uri) => {
                     if (!effectiveToken.isCancellationRequested) {
                         const doc = documentMap.get(uri.toString());
@@ -702,6 +742,28 @@ export class WorkspaceIndexer {
             // Add to qualified index (qualifiedName → symbol)
             // Note: last-write-wins for duplicate qualified names in the same file
             this.qualifiedIndex.set(info.qualifiedName, info);
+            
+            // Add to container→members index for O(1) member lookup
+            if (info.scopePath.length > 0) {
+                const container = info.scopePath[info.scopePath.length - 1];
+                if (container) {
+                    const containerKey = this.normalizeTypeName(container);
+                    if (containerKey) {
+                        const members = this.membersByContainer.get(containerKey) ?? [];
+                        members.push(info);
+                        this.membersByContainer.set(containerKey, members);
+                        
+                        // Track URI → container mapping for invalidation
+                        const uriStr = info.uri.toString();
+                        let containers = this.containersByUri.get(uriStr);
+                        if (!containers) {
+                            containers = new Set();
+                            this.containersByUri.set(uriStr, containers);
+                        }
+                        containers.add(containerKey);
+                    }
+                }
+            }
         }
     }
 
@@ -711,6 +773,8 @@ export class WorkspaceIndexer {
         this.moduleExports.clear();
         this.resolvedImportsCache.clear();
         this.documentContexts.clear();
+        this.membersByContainer.clear();
+        this.containersByUri.clear();
         this.memberCache.clear();
         this.memberCacheByUri.clear();
         this.typeInferenceCache.clear();
@@ -788,7 +852,7 @@ export class WorkspaceIndexer {
         );
         
         // Evict oldest entry if at limit (first entry in Map is oldest due to insertion order)
-        if (this.resolvedImportsCache.size >= RESOLVED_IMPORTS_CACHE_LIMIT) {
+        if (this.resolvedImportsCache.size >= this.memberCacheLimit) {
             const firstKey = this.resolvedImportsCache.keys().next().value;
             if (firstKey) {
                 this.resolvedImportsCache.delete(firstKey);
@@ -875,10 +939,26 @@ export class WorkspaceIndexer {
             }
         }
         
-        // Also clean up reverse mapping entries that reference this URI
-        for (const [_, cacheKeys] of this.memberCacheByUri) {
-            // Note: We don't need to do anything here since the forward mapping
-            // will be rebuilt when getMembersForType is called
+        // Invalidate direct container→members index entries for this URI
+        const affectedContainers = this.containersByUri.get(target);
+        if (affectedContainers) {
+            for (const containerKey of affectedContainers) {
+                const members = this.membersByContainer.get(containerKey);
+                if (members) {
+                    // Remove symbols from this URI
+                    const filtered = members.filter(sym => sym.uri.toString() !== target);
+                    if (filtered.length === 0) {
+                        this.membersByContainer.delete(containerKey);
+                    } else {
+                        this.membersByContainer.set(containerKey, filtered);
+                    }
+                }
+            }
+            this.containersByUri.delete(target);
+            
+            if (this.verbose) {
+                console.log(`Kanagawa: Invalidated ${affectedContainers.size} container index entries for ${target}`);
+            }
         }
     }
 
@@ -1801,16 +1881,35 @@ export class WorkspaceIndexer {
         return matches;
     }
 
+    /**
+     * Gets all members (methods, fields, constants) for a given type.
+     * Uses direct container→members index for O(1) lookup after normalization and alias resolution.
+     * 
+     * @param typeName The type name (may include template arguments, e.g., "FIFO<uint32, 32>")
+     * @param options Filter options for methods/fields
+     * @returns Array of SymbolInfo for all matching members
+     */
     public getMembersForType(typeName: string, options?: { includeMethods?: boolean; includeFields?: boolean }): SymbolInfo[] {
         if (!typeName) { return []; }
         const normalized = this.normalizeTypeName(typeName);
         if (!normalized) { return []; }
         const canonical = this.resolveAliasChain(normalized);
 
+        // Fast path: direct lookup in container→members index (O(1))
+        const directMembers = this.membersByContainer.get(canonical);
+        if (directMembers && directMembers.length > 0) {
+            return this.filterMembers(directMembers, options);
+        }
+
+        // Fallback: Check legacy computed cache for complex alias chains
         if (this.memberCache.has(canonical)) {
             return this.filterMembers(this.memberCache.get(canonical) ?? [], options);
         }
 
+        // Slow path: Handle complex alias chains or normalized names that differ from
+        // the container name in the scopePath. This should be rare after indexing.
+        // We still need this for cases where the alias chain resolution produces
+        // a canonical name that differs from what was indexed.
         const results: SymbolInfo[] = [];
         const seen = new Set<string>();
         const contributingUris = new Set<string>();
@@ -1843,13 +1942,21 @@ export class WorkspaceIndexer {
         });
 
         // Only cache non-empty results to avoid "stuck" empty caches
-        // Empty results might occur if indexing hasn't completed yet, and we don't want
-        // to cache that state as it won't be properly invalidated later
         if (results.length > 0) {
-            // Cache results and track reverse mapping for targeted invalidation
+            // LRU eviction: remove oldest entry if at limit
+            if (this.memberCache.size >= this.memberCacheLimit) {
+                const firstKey = this.memberCache.keys().next().value;
+                if (firstKey) {
+                    this.memberCache.delete(firstKey);
+                    // Clean up reverse mapping
+                    for (const [, keys] of this.memberCacheByUri) {
+                        keys.delete(firstKey);
+                    }
+                }
+            }
+            
             this.memberCache.set(canonical, results.slice());
             
-            // Update reverse mapping: URI → cache keys that include members from that URI
             for (const uri of contributingUris) {
                 let cacheKeys = this.memberCacheByUri.get(uri);
                 if (!cacheKeys) {

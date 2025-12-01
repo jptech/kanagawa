@@ -243,6 +243,30 @@
           "order": 30,
           "default": false,
           "markdownDescription": "Show `type: ...` CodeLens above `auto` variable declarations.\n\nDisabled by default since inlay hints provide the same information inline."
+        },
+        "kanagawa.performance.debounceDelay": {
+          "type": "number",
+          "order": 40,
+          "default": 200,
+          "minimum": 50,
+          "maximum": 2000,
+          "markdownDescription": "Delay (in milliseconds) before processing document changes. Higher values reduce CPU usage during rapid typing but increase latency.\n\nDefault: 200ms"
+        },
+        "kanagawa.performance.memberCacheLimit": {
+          "type": "number",
+          "order": 41,
+          "default": 500,
+          "minimum": 100,
+          "maximum": 10000,
+          "markdownDescription": "Maximum number of member resolution results to cache. Higher values improve performance for large workspaces but use more memory.\n\nDefault: 500 entries"
+        },
+        "kanagawa.performance.indexChunkSize": {
+          "type": "number",
+          "order": 42,
+          "default": 10,
+          "minimum": 1,
+          "maximum": 50,
+          "markdownDescription": "Number of files to process in each indexing batch. Higher values speed up initial indexing but may cause UI stuttering.\n\nDefault: 10 files per batch"
         }
       }
     }

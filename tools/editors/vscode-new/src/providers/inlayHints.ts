@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as Parser from 'web-tree-sitter';
 import { TreeSitterService } from '../service/treeSitter';
-import { WorkspaceIndexer } from '../service/indexer';
+import { WorkspaceIndexer, SymbolInfo } from '../service/indexer';
 import { 
     stripAttributes, 
     extractFunctionParameters, 
@@ -11,18 +11,65 @@ import {
 } from '../utils/signatureUtils';
 
 /**
+ * Document-local cache for inlay hints to avoid repeated indexer lookups.
+ * Cleared when the document changes.
+ */
+interface InlayHintCache {
+    /** Cache function signatures by function name */
+    signatures: Map<string, string | undefined>;
+    /** Cache template parameters by type name */
+    templateParams: Map<string, string[]>;
+    /** Cache resolved symbols by name */
+    symbols: Map<string, SymbolInfo | undefined>;
+}
+
+/**
  * Inlay Hints Provider for Kanagawa.
  * 
  * Provides visual hints for:
  * - Type annotations for `auto` variables
  * - Parameter names at call sites
  * - Template parameter names
+ * 
+ * Uses document-local caching to minimize indexer queries.
  */
 export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
+    /** Document-local cache for symbol lookups */
+    private cacheByDocument: Map<string, InlayHintCache> = new Map();
+    
     constructor(
         private service: TreeSitterService,
         private indexer: WorkspaceIndexer
     ) {}
+    
+    /**
+     * Clears the cache for a specific document.
+     * Call this when the document content changes.
+     */
+    public invalidateCache(uri: vscode.Uri): void {
+        this.cacheByDocument.delete(uri.toString());
+    }
+    
+    /**
+     * Clears all cached data.
+     */
+    public clearAllCaches(): void {
+        this.cacheByDocument.clear();
+    }
+    
+    private getOrCreateCache(uri: vscode.Uri): InlayHintCache {
+        const key = uri.toString();
+        let cache = this.cacheByDocument.get(key);
+        if (!cache) {
+            cache = {
+                signatures: new Map(),
+                templateParams: new Map(),
+                symbols: new Map()
+            };
+            this.cacheByDocument.set(key, cache);
+        }
+        return cache;
+    }
 
     private getConfig() {
         const config = vscode.workspace.getConfiguration('kanagawa.inlayHints');
@@ -48,6 +95,9 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
 
             const tree = this.service.getTree(document) ?? await this.service.parse(document);
             if (!tree) { return []; }
+            
+            // Get or create document-local cache
+            const cache = this.getOrCreateCache(document.uri);
 
             const hints: vscode.InlayHint[] = [];
 
@@ -56,7 +106,7 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
             const endPoint = { row: range.end.line, column: range.end.character };
 
             // Collect hints - now async to use indexer's type inference
-            await this.collectHints(document, tree.rootNode, startPoint, endPoint, hints, token, config);
+            await this.collectHints(document, tree.rootNode, startPoint, endPoint, hints, token, config, cache);
 
             return hints;
         } catch (error) {
@@ -72,7 +122,8 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
         endPoint: Parser.Point,
         hints: vscode.InlayHint[],
         token: vscode.CancellationToken,
-        config: { typeHintsEnabled: boolean; parameterNamesEnabled: boolean; templateParameterNamesEnabled: boolean }
+        config: { typeHintsEnabled: boolean; parameterNamesEnabled: boolean; templateParameterNamesEnabled: boolean },
+        cache: InlayHintCache
     ): Promise<void> {
         if (token.isCancellationRequested) { return; }
 
@@ -90,11 +141,11 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
         // Check for call expressions (parameter name hints and template parameter hints)
         if (node.type === 'call_expression') {
             if (config.parameterNamesEnabled) {
-                const paramHints = await this.createParameterHints(document, node);
+                const paramHints = await this.createParameterHints(document, node, cache);
                 hints.push(...paramHints);
             }
             if (config.templateParameterNamesEnabled) {
-                const templateHints = await this.createTemplateParameterHints(document, node);
+                const templateHints = await this.createTemplateParameterHints(document, node, cache);
                 hints.push(...templateHints);
             }
         }
@@ -103,7 +154,7 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
         // The grammar uses 'template_instantiation' for templated type specifiers
         if (config.templateParameterNamesEnabled && 
             (node.type === 'template_instantiation' || node.type === 'template_type')) {
-            const templateTypeHints = await this.createTemplateTypeHints(document, node);
+            const templateTypeHints = await this.createTemplateTypeHints(document, node, cache);
             hints.push(...templateTypeHints);
         }
 
@@ -112,14 +163,14 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
         if (config.templateParameterNamesEnabled && node.type === 'type_specifier') {
             const templateArgs = node.children.find(c => c.type === 'template_args');
             if (templateArgs) {
-                const templateTypeHints = await this.createTemplateTypeHints(document, node);
+                const templateTypeHints = await this.createTemplateTypeHints(document, node, cache);
                 hints.push(...templateTypeHints);
             } else {
                 // Check for raw angle bracket tokens (identifier, <, args..., >)
                 const hasAngleBrackets = node.children.some(c => c.text === '<') && 
                                          node.children.some(c => c.text === '>');
                 if (hasAngleBrackets) {
-                    const templateTypeHints = await this.createTemplateTypeHintsFromRawTokens(document, node);
+                    const templateTypeHints = await this.createTemplateTypeHintsFromRawTokens(document, node, cache);
                     hints.push(...templateTypeHints);
                 }
             }
@@ -127,7 +178,7 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
 
         // Recurse into children
         for (const child of node.children) {
-            await this.collectHints(document, child, startPoint, endPoint, hints, token, config);
+            await this.collectHints(document, child, startPoint, endPoint, hints, token, config, cache);
         }
     }
 
@@ -209,10 +260,12 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
     /**
      * Creates parameter name hints at call sites.
      * Uses the same resolution logic as hover/signature help for consistency.
+     * Results are cached per-document to avoid repeated indexer lookups.
      */
     private async createParameterHints(
         document: vscode.TextDocument,
-        node: Parser.SyntaxNode
+        node: Parser.SyntaxNode,
+        cache: InlayHintCache
     ): Promise<vscode.InlayHint[]> {
         const results: vscode.InlayHint[] = [];
         
@@ -236,23 +289,30 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
         if (args.length === 0) { return results; }
 
         // Resolve the function using the same logic as signature help
-        let funcSymbol: { signature?: string } | undefined;
+        // Check cache first for function signature
+        const funcName = this.getFunctionName(funcNode);
+        const cacheKey = funcName ? `${funcName}:${funcNode.type}` : undefined;
+        
+        let funcSignature: string | undefined;
+        
+        if (cacheKey && cache.signatures.has(cacheKey)) {
+            funcSignature = cache.signatures.get(cacheKey);
+        } else {
+            let funcSymbol: { signature?: string } | undefined;
 
-        // Try member expression first (obj.method())
-        if (funcNode.type === 'member_expression') {
-            const propertyNode = funcNode.namedChild(funcNode.namedChildCount - 1);
-            if (propertyNode) {
-                const matches = await this.indexer.resolveMemberSymbol(document, propertyNode);
-                funcSymbol = matches?.find(s => 
-                    (s.category === 'function' || s.category === 'method') && !!s.signature
-                );
+            // Try member expression first (obj.method())
+            if (funcNode.type === 'member_expression') {
+                const propertyNode = funcNode.namedChild(funcNode.namedChildCount - 1);
+                if (propertyNode) {
+                    const matches = await this.indexer.resolveMemberSymbol(document, propertyNode);
+                    funcSymbol = matches?.find(s => 
+                        (s.category === 'function' || s.category === 'method') && !!s.signature
+                    );
+                }
             }
-        }
 
-        // Try as free function using resolveWithContext
-        if (!funcSymbol) {
-            const funcName = this.getFunctionName(funcNode);
-            if (funcName) {
+            // Try as free function using resolveWithContext
+            if (!funcSymbol && funcName) {
                 const scopePath = this.indexer.getScopePathForNode(funcNode);
                 const resolution = this.indexer.resolveWithContext(funcName, scopePath, {
                     uri: document.uri,
@@ -267,12 +327,19 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
                     (s.category === 'function' || s.category === 'method') && !!s.signature
                 );
             }
+
+            funcSignature = funcSymbol?.signature;
+            
+            // Cache the result (even if undefined to avoid repeated lookups)
+            if (cacheKey) {
+                cache.signatures.set(cacheKey, funcSignature);
+            }
         }
 
-        if (!funcSymbol?.signature) { return results; }
+        if (!funcSignature) { return results; }
 
         // Parse parameter names from signature using shared utility
-        const paramNames = parseParameterNames(funcSymbol.signature);
+        const paramNames = parseParameterNames(funcSignature);
 
         // Create hints for each argument
         for (let i = 0; i < args.length && i < paramNames.length; i++) {
@@ -313,10 +380,12 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
      * Example: `foo<T, N>(...)` → shows `T:` and `N:` before template arguments
      * 
      * Uses the indexer's getTemplateParametersForSymbol for accurate parameter names.
+     * Results are cached per-document to avoid repeated lookups.
      */
     private async createTemplateParameterHints(
         document: vscode.TextDocument,
-        node: Parser.SyntaxNode
+        node: Parser.SyntaxNode,
+        cache: InlayHintCache
     ): Promise<vscode.InlayHint[]> {
         const results: vscode.InlayHint[] = [];
         
@@ -333,9 +402,19 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
             const baseName = this.getBaseFunctionName(funcNode);
             if (!baseName) { return results; }
 
+            // Check cache for template parameters
+            if (cache.templateParams.has(baseName)) {
+                const cachedParams = cache.templateParams.get(baseName)!;
+                if (cachedParams.length === 0) { return results; }
+                return this.createHintsForTemplateArgs(templateArgs, cachedParams);
+            }
+
             // Look up the template definition to get parameter names
             const symbols = this.indexer.getSymbols(baseName);
-            if (!symbols || symbols.length === 0) { return results; }
+            if (!symbols || symbols.length === 0) {
+                cache.templateParams.set(baseName, []);
+                return results;
+            }
 
             // Find a template symbol
             let templateSymbol = symbols.find(s => s.detail && s.detail.includes('template'));
@@ -351,19 +430,24 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
                 }
             }
 
-            if (!templateSymbol) { return results; }
+            if (!templateSymbol) {
+                cache.templateParams.set(baseName, []);
+                return results;
+            }
 
             // Get template parameters using the indexer's accurate AST-based method
             const templateParams = await this.indexer.getTemplateParametersForSymbol(templateSymbol);
             if (templateParams.length === 0) {
                 // Fallback to parsing from detail string
                 const paramNames = this.parseTemplateParameterNames(templateSymbol.detail ?? templateSymbol.signature ?? '');
+                cache.templateParams.set(baseName, paramNames);
                 if (paramNames.length === 0) { return results; }
                 return this.createHintsForTemplateArgs(templateArgs, paramNames);
             }
 
             // Extract parameter names from the SymbolInfo objects
             const paramNames = templateParams.map(p => p.name);
+            cache.templateParams.set(baseName, paramNames);
             return this.createHintsForTemplateArgs(templateArgs, paramNames);
         } catch (error) {
             console.error('[InlayHints] Error creating template parameter hints:', error);
@@ -376,10 +460,12 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
      * Example: `Foo<int32, 10>` → shows `T:` and `N:` before arguments
      * 
      * Uses the indexer's getTemplateParametersForSymbol for accurate parameter names.
+     * Results are cached per-document to avoid repeated lookups.
      */
     private async createTemplateTypeHints(
         document: vscode.TextDocument,
-        node: Parser.SyntaxNode
+        node: Parser.SyntaxNode,
+        cache: InlayHintCache
     ): Promise<vscode.InlayHint[]> {
         const results: vscode.InlayHint[] = [];
         
@@ -404,9 +490,19 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
 
             const typeName = nameNode.text;
 
+            // Check cache for template parameters
+            if (cache.templateParams.has(typeName)) {
+                const cachedParams = cache.templateParams.get(typeName)!;
+                if (cachedParams.length === 0) { return results; }
+                return this.createHintsForTemplateArgs(templateArgs, cachedParams);
+            }
+
             // Look up the template definition
             const symbols = this.indexer.getSymbols(typeName);
-            if (!symbols || symbols.length === 0) { return results; }
+            if (!symbols || symbols.length === 0) {
+                cache.templateParams.set(typeName, []);
+                return results;
+            }
 
             // Find a template symbol (class, struct, or alias)
             let templateSymbol = symbols.find(s => 
@@ -427,19 +523,24 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
                 }
             }
 
-            if (!templateSymbol) { return results; }
+            if (!templateSymbol) {
+                cache.templateParams.set(typeName, []);
+                return results;
+            }
 
             // Get template parameters using the indexer's accurate AST-based method
             const templateParams = await this.indexer.getTemplateParametersForSymbol(templateSymbol);
             if (templateParams.length === 0) {
                 // Fallback to parsing from detail string
                 const paramNames = this.parseTemplateParameterNames(templateSymbol.detail ?? templateSymbol.signature ?? '');
+                cache.templateParams.set(typeName, paramNames);
                 if (paramNames.length === 0) { return results; }
                 return this.createHintsForTemplateArgs(templateArgs, paramNames);
             }
 
             // Extract parameter names from the SymbolInfo objects
             const paramNames = templateParams.map(p => p.name);
+            cache.templateParams.set(typeName, paramNames);
             return this.createHintsForTemplateArgs(templateArgs, paramNames);
         } catch (error) {
             console.error('[InlayHints] Error creating template type hints:', error);
@@ -451,10 +552,12 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
      * Creates template parameter hints when the grammar parses as raw tokens.
      * Handles: `Example<uint8>` parsed as children: [identifier, <, identifier, >]
      * instead of [identifier, template_args]
+     * Results are cached per-document.
      */
     private async createTemplateTypeHintsFromRawTokens(
         document: vscode.TextDocument,
-        node: Parser.SyntaxNode
+        node: Parser.SyntaxNode,
+        cache: InlayHintCache
     ): Promise<vscode.InlayHint[]> {
         const results: vscode.InlayHint[] = [];
 
@@ -492,9 +595,19 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
 
             if (argNodes.length === 0) { return results; }
 
+            // Check cache for template parameters
+            if (cache.templateParams.has(typeName)) {
+                const cachedParams = cache.templateParams.get(typeName)!;
+                if (cachedParams.length === 0) { return results; }
+                return this.createHintsForRawTemplateArgs(argNodes, cachedParams);
+            }
+
             // Look up the template definition
             const symbols = this.indexer.getSymbols(typeName);
-            if (!symbols || symbols.length === 0) { return results; }
+            if (!symbols || symbols.length === 0) {
+                cache.templateParams.set(typeName, []);
+                return results;
+            }
 
             // Find a template symbol
             let templateSymbol = symbols.find(s =>
@@ -514,7 +627,10 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
                 }
             }
 
-            if (!templateSymbol) { return results; }
+            if (!templateSymbol) {
+                cache.templateParams.set(typeName, []);
+                return results;
+            }
 
             // Get template parameters
             const templateParams = await this.indexer.getTemplateParametersForSymbol(templateSymbol);
@@ -526,41 +642,56 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
                 paramNames = this.parseTemplateParameterNames(templateSymbol.detail ?? templateSymbol.signature ?? '');
             }
 
+            // Cache the result
+            cache.templateParams.set(typeName, paramNames);
+            
             if (paramNames.length === 0) { return results; }
 
-            // Create hints for each argument
-            for (let i = 0; i < argNodes.length && i < paramNames.length; i++) {
-                const arg = argNodes[i];
-                const paramName = paramNames[i];
-
-                // Skip if argument text matches parameter name
-                if (arg.text.trim() === paramName) { continue; }
-
-                // Skip single-letter params for numeric literals
-                const argText = arg.text.trim();
-                if (/^\d+$/.test(argText) && paramName.length <= 1) { continue; }
-
-                const position = new vscode.Position(
-                    arg.startPosition.row,
-                    arg.startPosition.column
-                );
-
-                const hint = new vscode.InlayHint(
-                    position,
-                    `${paramName}:`,
-                    vscode.InlayHintKind.Parameter
-                );
-                hint.paddingLeft = false;
-                hint.paddingRight = true;
-
-                results.push(hint);
-            }
-
-            return results;
+            // Create hints for each argument using extracted helper
+            return this.createHintsForRawTemplateArgs(argNodes, paramNames);
         } catch (error) {
             console.error('[InlayHints] Error creating template hints from raw tokens:', error);
             return results;
         }
+    }
+    
+    /**
+     * Helper to create hints for raw template argument nodes.
+     */
+    private createHintsForRawTemplateArgs(
+        argNodes: Parser.SyntaxNode[],
+        paramNames: string[]
+    ): vscode.InlayHint[] {
+        const results: vscode.InlayHint[] = [];
+        
+        for (let i = 0; i < argNodes.length && i < paramNames.length; i++) {
+            const arg = argNodes[i];
+            const paramName = paramNames[i];
+
+            // Skip if argument text matches parameter name
+            if (arg.text.trim() === paramName) { continue; }
+
+            // Skip single-letter params for numeric literals
+            const argText = arg.text.trim();
+            if (/^\d+$/.test(argText) && paramName.length <= 1) { continue; }
+
+            const position = new vscode.Position(
+                arg.startPosition.row,
+                arg.startPosition.column
+            );
+
+            const hint = new vscode.InlayHint(
+                position,
+                `${paramName}:`,
+                vscode.InlayHintKind.Parameter
+            );
+            hint.paddingLeft = false;
+            hint.paddingRight = true;
+
+            results.push(hint);
+        }
+
+        return results;
     }
 
     /**
