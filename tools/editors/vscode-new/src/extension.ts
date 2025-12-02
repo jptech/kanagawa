@@ -112,12 +112,15 @@ export async function activate(context: vscode.ExtensionContext) {
     const parseDebouncer = new KeyedDebouncer<string>(perfConfig.debounceDelay);
     context.subscriptions.push(parseDebouncer);
 
+    // Create semantic tokens provider with change notification support
+    const semanticTokensProvider = new KanagawaSemanticTokensProvider(service, queryManager);
+
     // Register Providers FIRST - extension is immediately usable
     // (providers will work with empty/partial index, improving as indexing completes)
     context.subscriptions.push(
         vscode.languages.registerHoverProvider('kanagawa', new KanagawaHoverProvider(service, indexer)),
         vscode.languages.registerDefinitionProvider('kanagawa', new KanagawaDefinitionProvider(service, indexer)),
-        vscode.languages.registerDocumentSemanticTokensProvider('kanagawa', new KanagawaSemanticTokensProvider(service, queryManager), legend),
+        vscode.languages.registerDocumentSemanticTokensProvider('kanagawa', semanticTokensProvider, legend),
         vscode.languages.registerDocumentSymbolProvider('kanagawa', new KanagawaDocumentSymbolProvider(service, queryManager, outlineFilters)),
         vscode.languages.registerWorkspaceSymbolProvider(new KanagawaWorkspaceSymbolProvider(indexer, outlineFilters)),
         vscode.languages.registerFoldingRangeProvider('kanagawa', new KanagawaFoldingRangeProvider(service)),
@@ -131,7 +134,8 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.languages.registerCallHierarchyProvider('kanagawa', new KanagawaCallHierarchyProvider(service, indexer)),
         vscode.languages.registerInlayHintsProvider('kanagawa', inlayHintsProvider),
         diagnosticsProvider,
-        outlineFilters
+        outlineFilters,
+        semanticTokensProvider
     );
 
     // Background indexing - starts after a short delay to let the UI settle
@@ -181,6 +185,10 @@ export async function activate(context: vscode.ExtensionContext) {
                         // Full reparse - document text is current, incremental changes are stale
                         await service.parse(event.document);
                         await diagnosticsProvider.updateDiagnostics(event.document);
+                        
+                        // Signal VS Code to refresh semantic tokens now that we have a fresh parse tree
+                        // This fixes desync issues where tokens were computed from stale trees
+                        semanticTokensProvider.notifyTokensChanged();
                     }
                 });
             }
@@ -192,6 +200,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 console.log('Kanagawa: Document opened:', doc.uri.toString());
                 await service.parse(doc);
                 await diagnosticsProvider.updateDiagnostics(doc);
+                
+                // Signal semantic tokens refresh after initial parse
+                semanticTokensProvider.notifyTokensChanged();
                 
                 // Priority index: ensure this file is indexed for hover/go-to-def
                 // This runs in background and doesn't block the document opening

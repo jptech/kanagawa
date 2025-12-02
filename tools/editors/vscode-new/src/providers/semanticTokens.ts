@@ -44,10 +44,32 @@ const TOKEN_MODIFIERS = [
 export const legend = new vscode.SemanticTokensLegend(TOKEN_TYPES, TOKEN_MODIFIERS);
 
 export class KanagawaSemanticTokensProvider implements vscode.DocumentSemanticTokensProvider {
+    /**
+     * Event emitter to signal VS Code that semantic tokens have changed.
+     * This allows us to trigger a refresh after parsing completes.
+     */
+    private readonly _onDidChangeSemanticTokens = new vscode.EventEmitter<void>();
+    public readonly onDidChangeSemanticTokens = this._onDidChangeSemanticTokens.event;
+
     constructor(
         private service: TreeSitterService,
         private queryManager: QueryManager
     ) {}
+
+    /**
+     * Call this after parsing completes to trigger a semantic token refresh.
+     * This ensures VS Code re-requests tokens with the latest parse tree.
+     */
+    public notifyTokensChanged(): void {
+        this._onDidChangeSemanticTokens.fire();
+    }
+
+    /**
+     * Dispose of resources.
+     */
+    public dispose(): void {
+        this._onDidChangeSemanticTokens.dispose();
+    }
 
     async provideDocumentSemanticTokens(
         document: vscode.TextDocument,

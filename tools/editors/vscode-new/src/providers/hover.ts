@@ -193,25 +193,31 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
         }
 
         // Template parameters for applicable symbol types
+        // Only show if the symbol actually references template parameters
         const templateCategories = ['class', 'struct', 'union', 'alias', 'function', 'method'];
         if (templateCategories.includes(sym.category)) {
             const templateParams = await this.indexer.getTemplateParametersForSymbol(sym);
             if (templateParams.length > 0) {
-                md.appendMarkdown(`\n---\n`);
-                md.appendMarkdown(`**Template Parameters**\n\n`);
-                for (const param of templateParams) {
-                    const label = param.signature ?? param.name;
-                    const doc = param.docMarkdown
-                        ? param.docMarkdown
-                            .split(/\r?\n/)
-                            .map(part => part.trim())
-                            .filter(part => part.length)
-                            .join(' ')
-                        : undefined;
-                    if (doc) {
-                        md.appendMarkdown(`- \`${label}\` — ${doc}\n`);
-                    } else {
-                        md.appendMarkdown(`- \`${label}\`\n`);
+                // Check if any template parameters are actually referenced in this symbol
+                const relevantParams = this.filterRelevantTemplateParams(sym, templateParams);
+                
+                if (relevantParams.length > 0) {
+                    md.appendMarkdown(`\n---\n`);
+                    md.appendMarkdown(`**Template Parameters**\n\n`);
+                    for (const param of relevantParams) {
+                        const label = param.signature ?? param.name;
+                        const doc = param.docMarkdown
+                            ? param.docMarkdown
+                                .split(/\r?\n/)
+                                .map(part => part.trim())
+                                .filter(part => part.length)
+                                .join(' ')
+                            : undefined;
+                        if (doc) {
+                            md.appendMarkdown(`- \`${label}\` — ${doc}\n`);
+                        } else {
+                            md.appendMarkdown(`- \`${label}\`\n`);
+                        }
                     }
                 }
             }
@@ -319,5 +325,45 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
             }
         }
         return undefined;
+    }
+
+    /**
+     * Filters template parameters to only include those actually referenced by the symbol.
+     * This prevents showing parent class template params for nested symbols that don't use them.
+     * 
+     * For example, `struct buffer_entry_t` nested inside a templated class shouldn't show 
+     * the parent's template parameters unless the struct actually references them.
+     */
+    private filterRelevantTemplateParams(sym: SymbolInfo, templateParams: SymbolInfo[]): SymbolInfo[] {
+        // Check if this symbol is the actual template definition (has template<...> in signature)
+        // vs a nested symbol that inherited template params from its parent
+        const isOwnTemplate = sym.signature?.match(/^\s*template\s*</) !== null;
+        
+        if (isOwnTemplate) {
+            // This is the actual template definition, show all its params
+            return templateParams;
+        }
+        
+        // For nested symbols (including nested classes/structs), only show params actually referenced
+        const textToSearch = [
+            sym.signature ?? '',
+            sym.typeHint ?? '',
+            sym.name
+        ].join(' ');
+        
+        return templateParams.filter(param => {
+            const paramName = param.name;
+            // Use word boundary matching to avoid false positives
+            // e.g., "T" shouldn't match in "TypeName"
+            const regex = new RegExp(`\\b${this.escapeRegex(paramName)}\\b`);
+            return regex.test(textToSearch);
+        });
+    }
+    
+    /**
+     * Escapes special regex characters in a string.
+     */
+    private escapeRegex(str: string): string {
+        return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
 }
