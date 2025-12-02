@@ -1133,7 +1133,19 @@ export class WorkspaceIndexer {
         const rawText = document.getText(new vscode.Range(start, end));
         const stripped = this.stripInlineDocComments(rawText).trim();
         if (!stripped) { return undefined; }
-        return stripped.replace(/\s+/g, ' ');
+        
+        // Collapse whitespace to single spaces and clean up formatting
+        let signature = stripped.replace(/\s+/g, ' ');
+        
+        // Clean up spacing around punctuation
+        signature = signature.replace(/\s*,\s*/g, ', ');      // Normalize comma spacing
+        signature = signature.replace(/\(\s+/g, '(');          // Remove space after (
+        signature = signature.replace(/\s+\)/g, ')');          // Remove space before )
+        signature = signature.replace(/<\s+/g, '<');           // Remove space after <
+        signature = signature.replace(/\s+>/g, '>');           // Remove space before >
+        signature = signature.replace(/,\s*,/g, ',');          // Remove double commas (from stripped comments)
+        
+        return signature;
     }
 
     private getDocAnchorNode(node: Parser.SyntaxNode): Parser.SyntaxNode {
@@ -2740,10 +2752,25 @@ export class WorkspaceIndexer {
         };
     }
 
+    /**
+     * Strips all comments from signature text for cleaner display.
+     * Handles:
+     * - Doc comments: //| and //<
+     * - Regular line comments: //
+     * - Block comments: /* ... *\/
+     */
     private stripInlineDocComments(text: string): string {
-        const lines = text.split(/\r?\n/);
-        const cleaned = lines.map(line => line.replace(/\/\/([|<]).*$/g, '').replace(/\s+$/u, ''));
-        return cleaned.join('\n');
+        // First, remove block comments (/* ... */)
+        let cleaned = text.replace(/\/\*[\s\S]*?\*\//g, '');
+        
+        // Then remove all line comments (// of any kind)
+        const lines = cleaned.split(/\r?\n/);
+        const strippedLines = lines.map(line => {
+            // Remove any // comment (including //|, //<, and regular //)
+            return line.replace(/\/\/.*$/g, '').replace(/\s+$/u, '');
+        });
+        
+        return strippedLines.join('\n');
     }
 
     private collectTemplateParameterDoc(document: vscode.TextDocument, paramNode: Parser.SyntaxNode): string | undefined {
