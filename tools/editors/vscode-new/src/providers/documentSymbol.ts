@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as Parser from 'web-tree-sitter';
 import { TreeSitterService } from '../service/treeSitter';
 import { QueryManager } from '../service/query';
-import { OutlineFilterManager, snapshotContainsCategory, snapshotMatchesPrefix } from '../service/outlineFilters';
+import { OutlineFilterManager, snapshotContainsCategory } from '../service/outlineFilters';
 import { SymbolCategory } from '../service/indexer';
 
 interface SymbolData {
@@ -25,7 +25,7 @@ export class KanagawaDocumentSymbolProvider implements vscode.DocumentSymbolProv
 
     async provideDocumentSymbols(
         document: vscode.TextDocument,
-        token: vscode.CancellationToken
+        _token: vscode.CancellationToken
     ): Promise<vscode.DocumentSymbol[] | undefined> {
         const tree = this.service.getTree(document) ?? await this.service.parse(document);
         if (!tree) { return undefined; }
@@ -49,7 +49,7 @@ export class KanagawaDocumentSymbolProvider implements vscode.DocumentSymbolProv
      * Builds a hierarchical tree of symbols from query captures.
      * Symbols are nested based on their AST relationships.
      */
-    private buildSymbolTree(captures: Parser.QueryCapture[], rootNode: Parser.SyntaxNode): SymbolData[] {
+    private buildSymbolTree(captures: Parser.QueryCapture[], _rootNode: Parser.SyntaxNode): SymbolData[] {
         // First pass: identify definition nodes and their metadata
         const definitionMap = new Map<number, { 
             node: Parser.SyntaxNode;

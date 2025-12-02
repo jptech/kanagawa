@@ -126,9 +126,18 @@ export class SymbolResolutionService {
                     return this.computeResult(accessible, inaccessible, options);
                 }
             }
+            // CRITICAL FIX: For member expressions, do NOT fall through to scope-based resolution.
+            // If member resolution failed (receiver type couldn't be inferred, or member not found),
+            // returning 'none' confidence is correct - we should NOT resolve to a symbol in the
+            // enclosing scope that happens to have the same name (e.g., UnsafeSemaphore::count()
+            // when we wanted counter::count() on `_counter.count()`).
+            // 
+            // This prevents the bug where hovering on `_counter.count()` shows UnsafeSemaphore::count()
+            // instead of correctly showing "could not resolve" or counter::count().
+            return this.computeResult(accessible, inaccessible, options);
         }
 
-        // Priority 3: Context-aware resolution
+        // Priority 3: Context-aware resolution (only for non-member expressions)
         const resolvedImports = this.indexer.getResolvedImports(document.uri);
         const resolution = this.indexer.resolveWithContext(name, scopePath, {
             uri: document.uri,
@@ -255,7 +264,8 @@ export class SymbolResolutionService {
             // Method call pattern: receiver.method()
             if (current.type === 'member_expression' && current.namedChildCount >= 2) {
                 const propertyNode = current.namedChild(current.namedChildCount - 1);
-                if (propertyNode === identifier) {
+                // Compare by node id since object references may differ
+                if (propertyNode && propertyNode.id === identifier.id) {
                     const receiverNode = current.namedChild(0);
                     const receiverType = await this.indexer.inferTypeFromExpression(
                         document, 
@@ -268,7 +278,8 @@ export class SymbolResolutionService {
             // Field access pattern
             if (current.type === 'field_expression' && current.namedChildCount >= 2) {
                 const fieldNode = current.namedChild(current.namedChildCount - 1);
-                if (fieldNode === identifier) {
+                // Compare by node id since object references may differ
+                if (fieldNode && fieldNode.id === identifier.id) {
                     const receiverNode = current.namedChild(0);
                     const receiverType = await this.indexer.inferTypeFromExpression(
                         document,

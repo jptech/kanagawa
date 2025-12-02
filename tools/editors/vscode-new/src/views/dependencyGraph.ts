@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 import { WorkspaceIndexer } from '../service/indexer';
-import * as path from 'path';
 
 /**
  * Module Dependency Graph visualization.

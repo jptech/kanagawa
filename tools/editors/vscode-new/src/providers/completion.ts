@@ -188,7 +188,7 @@ export class KanagawaCompletionItemProvider implements vscode.CompletionItemProv
         return 'inaccessible';
     }
 
-    /**
+        /**
      * Creates a completion item for a workspace symbol with appropriate tier sorting.
      */
     private createSymbolCompletionItem(
@@ -196,10 +196,25 @@ export class KanagawaCompletionItemProvider implements vscode.CompletionItemProv
         tier: 'same_module' | 'imported' | 'global' | 'inaccessible'
     ): vscode.CompletionItem {
         const item = new vscode.CompletionItem(sym.name, this.mapSymbolKindToCompletionKind(sym.kind));
-        item.detail = sym.detail;
+        
+        // Build detail text with module path
+        const modulePath = extractModuleFromQualified(sym.qualifiedName);
+        if (modulePath) {
+            item.detail = sym.detail ? `${sym.detail} — ${modulePath}` : modulePath;
+        } else {
+            item.detail = sym.detail;
+        }
 
-        if (sym.docMarkdown) {
-            item.documentation = new vscode.MarkdownString(sym.docMarkdown);
+        // Build documentation markdown
+        if (sym.docMarkdown || sym.signature) {
+            const docMd = new vscode.MarkdownString();
+            if (sym.signature) {
+                docMd.appendCodeblock(sym.signature, 'kanagawa');
+            }
+            if (sym.docMarkdown) {
+                docMd.appendMarkdown(`\n${sym.docMarkdown}`);
+            }
+            item.documentation = docMd;
         }
 
         // Set sort text based on tier
@@ -216,11 +231,9 @@ export class KanagawaCompletionItemProvider implements vscode.CompletionItemProv
             case 'inaccessible':
                 item.sortText = SORT_PREFIX.INACCESSIBLE + sym.name;
                 // Add note that import is required
-                if (!item.detail) {
-                    item.detail = '(requires import)';
-                } else {
-                    item.detail = `${item.detail} (requires import)`;
-                }
+                item.detail = item.detail 
+                    ? `${item.detail} ⚠️ requires import`
+                    : '⚠️ requires import';
                 break;
         }
 
@@ -304,8 +317,16 @@ export class KanagawaCompletionItemProvider implements vscode.CompletionItemProv
                 item.detail = sym.typeHint;
             }
 
-            if (sym.docMarkdown) {
-                item.documentation = new vscode.MarkdownString(sym.docMarkdown);
+            // Build documentation with signature code block
+            if (sym.docMarkdown || sym.signature) {
+                const docMd = new vscode.MarkdownString();
+                if (sym.signature && !item.detail) {
+                    docMd.appendCodeblock(sym.signature, 'kanagawa');
+                }
+                if (sym.docMarkdown) {
+                    docMd.appendMarkdown(`\n${sym.docMarkdown}`);
+                }
+                item.documentation = docMd;
             }
 
             if (sym.category === 'method') {
@@ -363,8 +384,16 @@ export class KanagawaCompletionItemProvider implements vscode.CompletionItemProv
                 item.detail = sym.typeHint;
             }
 
-            if (sym.docMarkdown) {
-                item.documentation = new vscode.MarkdownString(sym.docMarkdown);
+            // Build documentation with signature code block
+            if (sym.docMarkdown || sym.signature) {
+                const docMd = new vscode.MarkdownString();
+                if (sym.signature && !item.detail) {
+                    docMd.appendCodeblock(sym.signature, 'kanagawa');
+                }
+                if (sym.docMarkdown) {
+                    docMd.appendMarkdown(`\n${sym.docMarkdown}`);
+                }
+                item.documentation = docMd;
             }
 
             if (sym.category === 'method') {

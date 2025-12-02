@@ -17,8 +17,6 @@ export const OPERATION_TIMEOUTS = {
     COMPLETION: 2000,
     /** Timeout for references - can be slower for large workspaces */
     REFERENCES: 10000,
-    /** Timeout for rename - needs to scan files */
-    RENAME: 15000,
     /** Timeout for signature help */
     SIGNATURE_HELP: 2000,
     /** Timeout for inlay hints */

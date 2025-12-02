@@ -3,10 +3,7 @@ import * as Parser from 'web-tree-sitter';
 import { TreeSitterService } from '../service/treeSitter';
 import { WorkspaceIndexer, SymbolInfo } from '../service/indexer';
 import { 
-    stripAttributes, 
-    extractFunctionParameters, 
-    splitParameters, 
-    isTypeName,
+    splitParameters,
     parseParameterNames 
 } from '../utils/signatureUtils';
 import { OPERATION_TIMEOUTS, withTimeout } from '../utils/timeout';
@@ -485,7 +482,7 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
             let nameNode = node.children.find(c => 
                 c.type === 'identifier' || c.type === 'type_identifier'
             );
-            let templateArgs = node.children.find(c => c.type === 'template_args');
+            const templateArgs = node.children.find(c => c.type === 'template_args');
             
             // For template_instantiation, the first child might be the identifier directly
             if (!nameNode && node.namedChildCount > 0) {

@@ -28,14 +28,12 @@ import {
     MemberResolutionOptions,
     MemberResolutionResult,
     getContainerFromMember,
-    filterDirectMembers,
     filterMembersByOptions,
     sortMembers,
     findBestContainer,
     extractTemplateBaseType
 } from '../utils/memberUtils';
 import {
-    TemplateType,
     TemplateParameter,
     TemplateInstantiation,
     TemplateContext,

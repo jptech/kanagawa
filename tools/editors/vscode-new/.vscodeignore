@@ -27,11 +27,10 @@ out/test/**
 tsconfig.test.json
 
 # Documentation (internal)
-ARCHITECTURE_LESSONS.md
-DEBUGGING.md
-GRAMMAR_STATUS.md
-LARGE_PROJECT_ROADMAP.md
-symbol_upgrade_plan.md
+# Exclude all markdown files except the normal included ones (README & CHANGELOG)
+**/*.md
+!README.md
+!CHANGELOG.md
 
 # Grammar source and build dependencies (only need compiled WASM in dist/)
 grammar/**

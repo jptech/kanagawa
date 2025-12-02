@@ -25,14 +25,6 @@ interface CallCandidate {
     callExpression: Parser.SyntaxNode;
 }
 
-/** Extended reference info with context */
-interface ReferenceInfo {
-    location: vscode.Location;
-    isDefinition: boolean;
-    isWrite: boolean;
-    context?: string;  // Surrounding code snippet
-}
-
 function isSameLocation(a: SymbolInfo, b: SymbolInfo): boolean {
     return a.uri.toString() === b.uri.toString() &&
         a.range.start.line === b.range.start.line &&
@@ -404,7 +396,7 @@ export class KanagawaCallHierarchyProvider implements vscode.CallHierarchyProvid
     async prepareCallHierarchy(
         document: vscode.TextDocument,
         position: vscode.Position,
-        token: vscode.CancellationToken
+        _token: vscode.CancellationToken
     ): Promise<vscode.CallHierarchyItem[] | undefined> {
         const referencesProvider = new KanagawaReferencesProvider(this.service, this.indexer);
         const tree = this.service.getTree(document) ?? await this.service.parse(document);

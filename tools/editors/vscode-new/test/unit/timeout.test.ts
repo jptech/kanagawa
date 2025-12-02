@@ -34,7 +34,6 @@ describe('Timeout Utilities', () => {
             assert.ok(typeof OPERATION_TIMEOUTS.DEFINITION === 'number');
             assert.ok(typeof OPERATION_TIMEOUTS.COMPLETION === 'number');
             assert.ok(typeof OPERATION_TIMEOUTS.REFERENCES === 'number');
-            assert.ok(typeof OPERATION_TIMEOUTS.RENAME === 'number');
             assert.ok(typeof OPERATION_TIMEOUTS.SIGNATURE_HELP === 'number');
             assert.ok(typeof OPERATION_TIMEOUTS.INLAY_HINTS === 'number');
             assert.ok(typeof OPERATION_TIMEOUTS.SYMBOL_RESOLUTION === 'number');

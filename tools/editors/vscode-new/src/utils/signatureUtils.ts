@@ -159,7 +159,7 @@ export function parseParameterNames(signature: string): string[] {
         const parts = withoutDefault.split(/\s+/);
         if (parts.length > 0) {
             const name = parts[parts.length - 1]
-                .replace(/[&*\[\]]/g, '') // Remove pointer/reference/array markers
+                .replace(/[&*[\]]/g, '') // Remove pointer/reference/array markers
                 .trim();
             if (name && !isTypeName(name)) {
                 names.push(name);

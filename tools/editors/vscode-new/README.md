@@ -1,5 +1,7 @@
 # Kanagawa Language Support for VS Code
 
+[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](CHANGELOG.md)
+
 A lightweight, fast language extension for the Kanagawa hardware description language. Provides IDE features through "LSP-Lite" architecture—all features run in-process using Tree-sitter parsing, with no external language server required.
 
 ## Features
@@ -10,7 +12,6 @@ A lightweight, fast language extension for the Kanagawa hardware description lan
 - **Call Hierarchy** — View incoming/outgoing call relationships
 - **Document Outline** — Navigate symbols in the current file (Ctrl+Shift+O)
 - **Workspace Symbols** — Search all symbols across the project (Ctrl+T)
-- **Rename Symbol** (F2) — Safely rename symbols across files
 - **Dependency Graph** — Visualize module import relationships
 
 ### Code Intelligence
@@ -94,6 +95,7 @@ Settings under `kanagawa.*` in your VS Code `settings.json`. These can be set at
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
+| `kanagawa.developerMode` | `boolean` | `false` | Enable developer commands for debugging and performance analysis. |
 | `kanagawa.compiler.importPaths` | `string[]` | `[]` | Additional search paths for Kanagawa imports. **Combined** with `kanagawa.config.json` paths. |
 | `kanagawa.compiler.stdlibPath` | `string` | `""` | Standard library location. **Overrides** `kanagawa.config.json` if set. |
 | `kanagawa.index.exclude` | `string[]` | `[]` | Glob patterns to exclude from indexing. **Combined** with `kanagawa.config.json` patterns. |
@@ -160,16 +162,14 @@ Access via Command Palette (Ctrl+Shift+P):
 | Command | Description |
 |---------|-------------|
 | `Kanagawa: Rebuild Index` | Force a complete workspace rescan (cancellable) |
-| `Kanagawa: Clear Index` | Clear the symbol index |
-| `Kanagawa: Show Index Stats` | Display indexing statistics |
-| `Kanagawa: Toggle Index Verbose Logging` | Enable detailed indexing output |
+| `Kanagawa: Show Index Statistics` | Display indexing statistics |
 
 ### Outline & Navigation
 | Command | Description |
 |---------|-------------|
-| `Kanagawa: Select Outline Categories` | Choose which symbol types appear in outline |
-| `Kanagawa: Set Outline Module Prefix` | Filter outline to a module namespace |
-| `Kanagawa: Clear Outline Module Prefix` | Remove outline module filter |
+| `Kanagawa: Filter Outline by Category` | Choose which symbol types appear in outline |
+| `Kanagawa: Filter Outline by Module` | Filter outline to a module namespace |
+| `Kanagawa: Clear Outline Module Filter` | Remove outline module filter |
 
 ### Dependency Graph
 | Command | Description |
@@ -178,33 +178,34 @@ Access via Command Palette (Ctrl+Shift+P):
 | `Kanagawa: Show Full Dependency Graph` | View complete workspace dependency graph |
 | `Kanagawa: Browse Module Dependencies` | Interactive module dependency explorer |
 
-### Performance & Diagnostics
+### Troubleshooting
 | Command | Description |
 |---------|-------------|
 | `Kanagawa: Show Diagnostics` | Display extension health status and configuration |
 | `Kanagawa: Restart Extension` | Reinitialize Tree-sitter and rebuild index |
+| `Kanagawa: Open Project Configuration` | Open or create `kanagawa.config.json` |
+
+### Developer Commands
+
+These commands are hidden by default. Enable them by setting `kanagawa.developerMode` to `true` in your VS Code settings.
+
+| Command | Description |
+|---------|-------------|
+| `Kanagawa: Clear Index` | Clear the symbol index without rebuilding |
+| `Kanagawa: Toggle Verbose Index Logging` | Enable detailed indexing output |
+| `Kanagawa: Debug: Show Parse Tree` | Show parse tree for current file |
 | `Kanagawa: Toggle Performance Logging` | Enable timing diagnostics |
 | `Kanagawa: Show Performance Summary` | Display performance statistics |
 | `Kanagawa: Clear Performance Stats` | Reset performance counters |
 | `Kanagawa: Set Slow Operation Threshold` | Configure performance warning threshold |
 
-### Developer Tools
-| Command | Description |
-|---------|-------------|
-| `Kanagawa: Debug Parse Tree` | Show parse tree for current file |
-| `Kanagawa: Show Inferred Type` | Display inferred type for a symbol |
-
 ## Large Project Tips
 
 ### Optimizing Indexing Performance
 
-1. **Use exclude patterns**: Add `exclude` patterns to `kanagawa.config.json` to skip generated files, test vectors, or other non-source directories.
+1. **Use `kanagawa.config.json`**: Specify only the import paths you need.
 
-2. **Exclude build directories**: The extension automatically skips `build/`, `dist/`, `out/`, and `node_modules/`. Use custom patterns for additional exclusions.
-
-3. **Use `kanagawa.config.json`**: Specify only the import paths you need rather than broad parent directories.
-
-3. **Monitor with performance logging**: Use `Kanagawa: Toggle Performance Logging` to identify slow operations.
+2. **Monitor with performance logging**: Use `Kanagawa: Toggle Performance Logging` to identify slow operations.
 
 ### Multi-Module Projects
 
@@ -294,6 +295,7 @@ The following directories are automatically skipped during indexing:
 - `node_modules`
 - `build`, `dist`, `out`
 
-## License
+## Acknowledgments
 
-See LICENSE file.
+- [Tree-sitter](https://tree-sitter.github.io/tree-sitter/) for fast, incremental parsing
+- [web-tree-sitter](https://github.com/ArtificalMemory/ArtificalMemory) for WebAssembly bindings

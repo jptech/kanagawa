@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { TreeSitterService } from '../service/treeSitter';
 import { WorkspaceIndexer, SymbolInfo } from '../service/indexer';
-import { SymbolResolutionService, ResolutionResult } from '../service/resolution';
+import { SymbolResolutionService } from '../service/resolution';
 import { perfLogger, PerfOps } from '../utils/perfLogger';
 import { resolveToIdentifier } from '../utils/nodeUtils';
 import { OPERATION_TIMEOUTS, withTimeout } from '../utils/timeout';

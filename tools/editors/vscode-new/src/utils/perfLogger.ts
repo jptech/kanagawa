@@ -316,7 +316,6 @@ export const PerfOps = {
     DOCUMENT_SYMBOLS: 'provider.documentSymbols',
     FOLDING: 'provider.folding',
     SIGNATURE_HELP: 'provider.signatureHelp',
-    RENAME: 'provider.rename',
     DIAGNOSTICS: 'provider.diagnostics',
     
     // Queries

@@ -6,8 +6,8 @@ export class KanagawaFoldingRangeProvider implements vscode.FoldingRangeProvider
 
     async provideFoldingRanges(
         document: vscode.TextDocument,
-        context: vscode.FoldingContext,
-        token: vscode.CancellationToken
+        _context: vscode.FoldingContext,
+        _token: vscode.CancellationToken
     ): Promise<vscode.FoldingRange[]> {
         const tree = this.service.getTree(document) ?? await this.service.parse(document);
         if (!tree) { return []; }

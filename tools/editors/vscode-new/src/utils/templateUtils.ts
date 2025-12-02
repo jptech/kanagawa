@@ -380,7 +380,7 @@ export function parseTemplateParameters(paramString: string): TemplateParameter[
         
         // Check for default value
         const eqIndex = trimmed.indexOf('=');
-        let paramPart = eqIndex >= 0 ? trimmed.substring(0, eqIndex).trim() : trimmed;
+        const paramPart = eqIndex >= 0 ? trimmed.substring(0, eqIndex).trim() : trimmed;
         const defaultValue = eqIndex >= 0 ? trimmed.substring(eqIndex + 1).trim() : undefined;
         
         // Parse the parameter

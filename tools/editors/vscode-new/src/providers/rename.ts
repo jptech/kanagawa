@@ -47,7 +47,7 @@ export class KanagawaRenameProvider implements vscode.RenameProvider {
     async prepareRename(
         document: vscode.TextDocument,
         position: vscode.Position,
-        token: vscode.CancellationToken
+        _token: vscode.CancellationToken
     ): Promise<vscode.Range | { range: vscode.Range; placeholder: string } | undefined> {
         const tree = this.service.getTree(document) ?? await this.service.parse(document);
         if (!tree) { return undefined; }
@@ -213,7 +213,7 @@ export class KanagawaRenameProvider implements vscode.RenameProvider {
         name: string,
         definition: SymbolInfo,
         addLocation: (uri: vscode.Uri, range: vscode.Range) => void,
-        token: vscode.CancellationToken
+        _token: vscode.CancellationToken
     ): Promise<void> {
         const tree = this.service.getTree(document) ?? await this.service.parse(document);
         if (!tree) { return; }

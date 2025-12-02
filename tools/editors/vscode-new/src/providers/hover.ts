@@ -14,6 +14,24 @@ import { OPERATION_TIMEOUTS, withTimeout } from '../utils/timeout';
  */
 type HoverResolution = ResolutionResult;
 
+/**
+ * Icons for different symbol categories in hover tooltips.
+ */
+const CATEGORY_ICONS: Record<string, string> = {
+    'module': '📦',
+    'class': '🔷',
+    'struct': '🔶',
+    'union': '🔸',
+    'enum': '📋',
+    'function': '⚡',
+    'method': '🔧',
+    'variable': '📌',
+    'member': '▪️',
+    'constant': '🔒',
+    'alias': '🔗',
+    'other': '•'
+};
+
 export class KanagawaHoverProvider implements vscode.HoverProvider {
     private readonly resolutionService: SymbolResolutionService;
 
@@ -67,9 +85,16 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
                     
                     const md = new vscode.MarkdownString();
                     md.appendCodeblock(typeInfo.signature, 'kanagawa');
+                    
                     if (typeInfo.initializer) {
-                        md.appendMarkdown(`\n\n**Initializer:** \`${typeInfo.initializer}\``);
+                        md.appendMarkdown(`\n---\n`);
+                        md.appendMarkdown(`**Initializer**\n\n`);
+                        md.appendCodeblock(typeInfo.initializer, 'kanagawa');
                     }
+                    
+                    md.appendMarkdown(`\n---\n`);
+                    md.appendMarkdown(`📌 \`${typeInfo.kind}\``);
+                    
                     return new vscode.Hover(md, hoverRange);
                 }
 
@@ -146,18 +171,25 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
     }
 
     /**
-     * Builds markdown for a single symbol.
+     * Builds markdown for a single symbol with enhanced visual formatting.
      */
     private async buildSymbolMarkdown(
         document: vscode.TextDocument,
         sym: SymbolInfo
     ): Promise<vscode.MarkdownString> {
-        const summary = (sym.signature ?? `${sym.detail ?? ''} ${sym.name}`.trim()).trim() || sym.name;
         const md = new vscode.MarkdownString();
+        md.supportHtml = true;
+        
+        // Get icon for symbol category
+        const icon = CATEGORY_ICONS[sym.category] ?? CATEGORY_ICONS['other'];
+        
+        // Build signature block
+        const summary = (sym.signature ?? `${sym.detail ?? ''} ${sym.name}`.trim()).trim() || sym.name;
         md.appendCodeblock(summary, 'kanagawa');
 
+        // Documentation section
         if (sym.docMarkdown) {
-            md.appendMarkdown(`\n\n${sym.docMarkdown}`);
+            md.appendMarkdown(`\n${sym.docMarkdown}\n`);
         }
 
         // Template parameters for applicable symbol types
@@ -165,7 +197,8 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
         if (templateCategories.includes(sym.category)) {
             const templateParams = await this.indexer.getTemplateParametersForSymbol(sym);
             if (templateParams.length > 0) {
-                md.appendMarkdown(`\n\n**Template Parameters:**\n`);
+                md.appendMarkdown(`\n---\n`);
+                md.appendMarkdown(`**Template Parameters**\n\n`);
                 for (const param of templateParams) {
                     const label = param.signature ?? param.name;
                     const doc = param.docMarkdown
@@ -175,18 +208,32 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
                             .filter(part => part.length)
                             .join(' ')
                         : undefined;
-                    const line = doc ? `\`${label}\` — ${doc}` : `\`${label}\``;
-                    md.appendMarkdown(`\n${line}  `);
+                    if (doc) {
+                        md.appendMarkdown(`- \`${label}\` — ${doc}\n`);
+                    } else {
+                        md.appendMarkdown(`- \`${label}\`\n`);
+                    }
                 }
             }
         }
 
-        if (sym.scopePath.length > 0) {
-            md.appendMarkdown(`\n\n**Scope:** ${sym.scopePath.join('::')}`);
+        // Metadata section
+        md.appendMarkdown(`\n---\n`);
+        
+        // Category and scope info on one line
+        const scopeText = sym.scopePath.length > 0 
+            ? `${sym.scopePath.join('::')}` 
+            : '';
+        
+        if (scopeText) {
+            md.appendMarkdown(`${icon} \`${sym.category}\` in \`${scopeText}\`\n\n`);
+        } else {
+            md.appendMarkdown(`${icon} \`${sym.category}\`\n\n`);
         }
-
+        
+        // File location
         const relative = vscode.workspace.asRelativePath(sym.uri, false);
-        md.appendMarkdown(`\n\n*Defined in ${relative}*`);
+        md.appendMarkdown(`📄 *${relative}*`);
 
         return md;
     }
@@ -198,7 +245,7 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
     private async findLocalTypeInfo(
         document: vscode.TextDocument, 
         identifier: Parser.SyntaxNode
-    ): Promise<{ signature: string; initializer?: string; isAutoWithInlayHint?: boolean } | undefined> {
+    ): Promise<{ signature: string; initializer?: string; isAutoWithInlayHint?: boolean; kind: string } | undefined> {
         let current: Parser.SyntaxNode | null = identifier.parent;
         while (current) {
             if (current.type === 'variable_decl') {
@@ -238,7 +285,8 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
                     return {
                         signature: signatureParts.join(' '),
                         initializer: initializerText,
-                        isAutoWithInlayHint
+                        isAutoWithInlayHint,
+                        kind: 'local variable'
                     };
                 }
             } else if (current.type === 'parameter') {
@@ -247,7 +295,7 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
                     const typeNode = current.childForFieldName('type');
                     const typeText = getNodeText(document, typeNode)?.trim();
                     const signature = typeText ? `${typeText} ${identifier.text}` : identifier.text;
-                    return { signature };
+                    return { signature, kind: 'parameter' };
                 }
             }
             current = current.parent;

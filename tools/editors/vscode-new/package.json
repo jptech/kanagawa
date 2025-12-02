@@ -1,21 +1,33 @@
 {
   "name": "kanagawa-vscode",
   "displayName": "Kanagawa Language Support",
-  "description": "Language support for Kanagawa (LSP-Lite)",
-  "version": "0.0.4",
+  "description": "IDE features for the Kanagawa hardware description language: navigation, completion, hover, and more.",
+  "version": "0.1.0",
   "publisher": "microsoft",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/jptech/kanagawa"
+  },
+  "icon": "images/icon.png",
+  "galleryBanner": {
+    "color": "#1e1e2e",
+    "theme": "dark"
   },
   "engines": {
     "vscode": "^1.95.0"
   },
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Linters",
+    "Snippets"
   ],
-  "activationEvents": [
-    "onLanguage:kanagawa"
+  "keywords": [
+    "kanagawa",
+    "hardware",
+    "HDL",
+    "FPGA",
+    "hardware description language"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -35,63 +47,28 @@
     ],
     "commands": [
       {
-        "command": "kanagawa.index.clear",
-        "title": "Clear Index",
-        "category": "Kanagawa"
-      },
-      {
         "command": "kanagawa.index.rebuild",
         "title": "Rebuild Index",
         "category": "Kanagawa"
       },
       {
-        "command": "kanagawa.index.toggleVerbose",
-        "title": "Toggle Index Verbose Logging",
-        "category": "Kanagawa"
-      },
-      {
         "command": "kanagawa.index.showStats",
-        "title": "Show Index Stats",
-        "category": "Kanagawa"
-      },
-      {
-        "command": "kanagawa.typePeek.show",
-        "title": "Show Inferred Type",
+        "title": "Show Index Statistics",
         "category": "Kanagawa"
       },
       {
         "command": "kanagawa.outline.selectCategories",
-        "title": "Select Outline Categories",
+        "title": "Filter Outline by Category",
         "category": "Kanagawa"
       },
       {
         "command": "kanagawa.outline.setModulePrefix",
-        "title": "Set Outline Module Prefix",
+        "title": "Filter Outline by Module",
         "category": "Kanagawa"
       },
       {
         "command": "kanagawa.outline.clearModulePrefix",
-        "title": "Clear Outline Module Prefix",
-        "category": "Kanagawa"
-      },
-      {
-        "command": "kanagawa.perf.toggle",
-        "title": "Toggle Performance Logging",
-        "category": "Kanagawa"
-      },
-      {
-        "command": "kanagawa.perf.showSummary",
-        "title": "Show Performance Summary",
-        "category": "Kanagawa"
-      },
-      {
-        "command": "kanagawa.perf.clear",
-        "title": "Clear Performance Stats",
-        "category": "Kanagawa"
-      },
-      {
-        "command": "kanagawa.perf.setThreshold",
-        "title": "Set Slow Operation Threshold",
+        "title": "Clear Outline Module Filter",
         "category": "Kanagawa"
       },
       {
@@ -120,9 +97,57 @@
         "category": "Kanagawa"
       },
       {
-        "command": "kanagawa.debugParseTree",
-        "title": "Debug Parse Tree",
+        "command": "kanagawa.openConfig",
+        "title": "Open Project Configuration",
         "category": "Kanagawa"
+      },
+      {
+        "command": "kanagawa.index.clear",
+        "title": "Clear Index",
+        "category": "Kanagawa",
+        "enablement": "config.kanagawa.developerMode"
+      },
+      {
+        "command": "kanagawa.index.toggleVerbose",
+        "title": "Toggle Verbose Index Logging",
+        "category": "Kanagawa",
+        "enablement": "config.kanagawa.developerMode"
+      },
+      {
+        "command": "kanagawa.perf.toggle",
+        "title": "Toggle Performance Logging",
+        "category": "Kanagawa",
+        "enablement": "config.kanagawa.developerMode"
+      },
+      {
+        "command": "kanagawa.perf.showSummary",
+        "title": "Show Performance Summary",
+        "category": "Kanagawa",
+        "enablement": "config.kanagawa.developerMode"
+      },
+      {
+        "command": "kanagawa.perf.clear",
+        "title": "Clear Performance Stats",
+        "category": "Kanagawa",
+        "enablement": "config.kanagawa.developerMode"
+      },
+      {
+        "command": "kanagawa.perf.setThreshold",
+        "title": "Set Slow Operation Threshold",
+        "category": "Kanagawa",
+        "enablement": "config.kanagawa.developerMode"
+      },
+      {
+        "command": "kanagawa.debugParseTree",
+        "title": "Debug: Show Parse Tree",
+        "category": "Kanagawa",
+        "enablement": "config.kanagawa.developerMode"
+      },
+      {
+        "command": "kanagawa.typePeek.show",
+        "title": "Show Inferred Type",
+        "category": "Kanagawa",
+        "enablement": "false"
       }
     ],
     "jsonValidation": [
@@ -134,6 +159,12 @@
     "configuration": {
       "title": "Kanagawa",
       "properties": {
+        "kanagawa.developerMode": {
+          "type": "boolean",
+          "order": 0,
+          "default": false,
+          "markdownDescription": "Enable developer commands for debugging and performance analysis. When enabled, additional commands appear in the Command Palette for parse tree inspection, verbose logging, and performance profiling."
+        },
         "kanagawa.compiler.importPaths": {
           "type": "array",
           "scope": "resource",
@@ -272,6 +303,7 @@
     "test:grammar": "cd grammar && npx tree-sitter test"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.1",
     "@types/chai": "^5.2.3",
     "@types/mocha": "^10.0.1",
     "@types/node": "20.x",
@@ -282,7 +314,8 @@
     "chai": "^6.2.1",
     "eslint": "^9.0.0",
     "mocha": "^10.7.0",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.48.0"
   },
   "dependencies": {
     "web-tree-sitter": "^0.20.8"

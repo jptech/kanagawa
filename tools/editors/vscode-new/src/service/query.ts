@@ -1,5 +1,4 @@
 import * as vscode from 'vscode';
-import * as path from 'path';
 
 /** Maximum retries for loading a query file */
 const MAX_LOAD_RETRIES = 3;

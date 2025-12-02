@@ -426,6 +426,80 @@ export risc_v_wrapper<Config::HARTS, ENABLE_M ? Extension::M : Extension::None>;
         });
     });
 
+    describe('Class Member AST Structure', () => {
+        it('should correctly structure class member variables', () => {
+            const code = `
+class Foo
+{
+private:
+    counter<M, I> _counter;
+}`;
+            const tree = assertParsesCleanly(code);
+            const classDecl = findNodeByType(tree.rootNode, 'class_decl');
+            assert.ok(classDecl, 'Should find class_decl node');
+            
+            // Find member_decl
+            const memberDecls = findAllNodesByType(classDecl, 'member_decl');
+            assert.ok(memberDecls.length > 0, 'Should have member_decl children');
+            
+            // The variable declaration should be inside member_decl
+            let foundVarDecl = false;
+            for (const memberDecl of memberDecls) {
+                const varDecl = findNodeByType(memberDecl, 'variable_decl');
+                if (varDecl) {
+                    const nameNode = varDecl.childForFieldName('name');
+                    if (nameNode?.text === '_counter') {
+                        foundVarDecl = true;
+                        // Verify the type field is present
+                        const typeNode = varDecl.childForFieldName('type');
+                        assert.ok(typeNode, 'variable_decl should have type field');
+                        assert.ok(typeNode.text.includes('counter'), 'Type should contain counter');
+                    }
+                }
+            }
+            assert.ok(foundVarDecl, 'Should find _counter variable declaration in member_decl');
+        });
+
+        it('should correctly structure templated class member variables', () => {
+            const code = `
+template<auto M, auto I>
+class UnsafeSemaphore
+{
+private:
+    counter<M, I> _counter;
+}`;
+            const tree = assertParsesCleanly(code);
+            const classTemplate = findNodeByType(tree.rootNode, 'class_template');
+            assert.ok(classTemplate, 'Should find class_template node');
+            
+            // Find class_decl inside class_template
+            const classDecl = findNodeByType(classTemplate, 'class_decl');
+            assert.ok(classDecl, 'Should find class_decl inside class_template');
+            
+            // Verify member_decl is a DIRECT namedChild of class_decl
+            const directMemberDecls = classDecl!.namedChildren.filter(c => c.type === 'member_decl');
+            assert.ok(directMemberDecls.length >= 2, 
+                `Should have at least 2 member_decl as direct namedChildren of class_decl, found ${directMemberDecls.length}`);
+            
+            // Verify variable_decl is a DIRECT namedChild of member_decl
+            let foundCounterDirect = false;
+            for (const memberDecl of directMemberDecls) {
+                const directVarDecls = memberDecl.namedChildren.filter(c => c.type === 'variable_decl');
+                for (const varDecl of directVarDecls) {
+                    const nameNode = varDecl.childForFieldName('name');
+                    if (nameNode?.text === '_counter') {
+                        foundCounterDirect = true;
+                        const typeNode = varDecl.childForFieldName('type');
+                        assert.ok(typeNode, 'variable_decl should have type field');
+                        assert.strictEqual(typeNode.text, 'counter<M, I>');
+                    }
+                }
+            }
+            assert.ok(foundCounterDirect, 
+                'Should find _counter as DIRECT namedChild of member_decl (not nested deeper)');
+        });
+    });
+
     describe('Error Recovery', () => {
         it('should detect parse errors in invalid syntax', () => {
             const tree = parseCode('class { }'); // Missing name

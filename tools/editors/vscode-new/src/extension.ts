@@ -13,10 +13,9 @@ import { KanagawaDiagnosticsProvider } from './providers/diagnostics';
 import { KanagawaTypePeekCodeLensProvider } from './providers/typePeek';
 import { KanagawaSignatureHelpProvider } from './providers/signatureHelp';
 import { KanagawaReferencesProvider, KanagawaCallHierarchyProvider } from './providers/references';
-import { KanagawaRenameProvider } from './providers/rename';
 import { KanagawaInlayHintsProvider } from './providers/inlayHints';
 import { OutlineFilterManager } from './service/outlineFilters';
-import { KeyedDebouncer, DEBOUNCE_DELAYS } from './utils/debounce';
+import { KeyedDebouncer } from './utils/debounce';
 import { perfLogger, PerfLogLevel } from './utils/perfLogger';
 import { registerDependencyGraphCommands } from './views/dependencyGraph';
 import { IndexStatusBar } from './views/statusBar';
@@ -130,7 +129,6 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.languages.registerCodeLensProvider({ language: 'kanagawa' }, new KanagawaTypePeekCodeLensProvider(service, indexer)),
         vscode.languages.registerReferenceProvider('kanagawa', new KanagawaReferencesProvider(service, indexer)),
         vscode.languages.registerCallHierarchyProvider('kanagawa', new KanagawaCallHierarchyProvider(service, indexer)),
-        vscode.languages.registerRenameProvider('kanagawa', new KanagawaRenameProvider(service, indexer)),
         vscode.languages.registerInlayHintsProvider('kanagawa', inlayHintsProvider),
         diagnosticsProvider,
         outlineFilters
@@ -557,6 +555,53 @@ export async function activate(context: vscode.ExtensionContext) {
                         vscode.commands.executeCommand('workbench.action.reloadWindow');
                     }
                 });
+            }
+        }),
+        // Open or create project configuration file
+        vscode.commands.registerCommand('kanagawa.openConfig', async () => {
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (!workspaceFolders || workspaceFolders.length === 0) {
+                vscode.window.showWarningMessage('Kanagawa: No workspace folder open.');
+                return;
+            }
+
+            const configUri = vscode.Uri.joinPath(workspaceFolders[0].uri, 'kanagawa.config.json');
+            
+            try {
+                // Try to open existing config
+                const doc = await vscode.workspace.openTextDocument(configUri);
+                await vscode.window.showTextDocument(doc);
+            } catch {
+                // Config doesn't exist - offer to create it
+                const choice = await vscode.window.showInformationMessage(
+                    'No kanagawa.config.json found. Create one?',
+                    'Create',
+                    'Cancel'
+                );
+                
+                if (choice === 'Create') {
+                    const defaultConfig = {
+                        importPaths: [],
+                        stdlibPath: "",
+                        exclude: [
+                            "**/generated/**",
+                            "**/*.gen.k"
+                        ]
+                    };
+                    
+                    const edit = new vscode.WorkspaceEdit();
+                    edit.createFile(configUri, { ignoreIfExists: true });
+                    await vscode.workspace.applyEdit(edit);
+                    
+                    const doc = await vscode.workspace.openTextDocument(configUri);
+                    const editor = await vscode.window.showTextDocument(doc);
+                    
+                    await editor.edit(editBuilder => {
+                        editBuilder.insert(new vscode.Position(0, 0), JSON.stringify(defaultConfig, null, 4));
+                    });
+                    
+                    await doc.save();
+                }
             }
         })
     );
