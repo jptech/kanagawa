@@ -159,6 +159,10 @@ export class WorkspaceIndexer {
     private pendingRescan = false;
     /** Set of indexed file URIs for stats tracking */
     private indexedFiles: Set<string> = new Set();
+    /** Cached array of all symbols (invalidated on index changes) */
+    private cachedAllSymbols: SymbolInfo[] | null = null;
+    /** Reverse index: symbolName → Set<fileUri> for fast reference lookups */
+    private readonly symbolNameToUris: Map<string, Set<string>> = new Map();
     /** Callback for status updates during indexing */
     private onStatusChange?: (state: 'idle' | 'indexing' | 'error', symbolCount: number, fileCount: number, error?: string) => void;
     
@@ -733,7 +737,12 @@ export class WorkspaceIndexer {
     }
 
     private addSymbols(symbols: SymbolInfo[]) {
+        // Invalidate the cached all-symbols array
+        this.invalidateAllSymbolsCache();
+        
         for (const info of symbols) {
+            const uriStr = info.uri.toString();
+            
             // Add to primary index (name → [symbols])
             const list = this.symbolIndex.get(info.name) ?? [];
             list.push(info);
@@ -742,6 +751,14 @@ export class WorkspaceIndexer {
             // Add to qualified index (qualifiedName → symbol)
             // Note: last-write-wins for duplicate qualified names in the same file
             this.qualifiedIndex.set(info.qualifiedName, info);
+            
+            // Add to reverse index (name → URIs) for fast reference lookup
+            let nameUris = this.symbolNameToUris.get(info.name);
+            if (!nameUris) {
+                nameUris = new Set();
+                this.symbolNameToUris.set(info.name, nameUris);
+            }
+            nameUris.add(uriStr);
             
             // Add to container→members index for O(1) member lookup
             if (info.scopePath.length > 0) {
@@ -754,7 +771,6 @@ export class WorkspaceIndexer {
                         this.membersByContainer.set(containerKey, members);
                         
                         // Track URI → container mapping for invalidation
-                        const uriStr = info.uri.toString();
                         let containers = this.containersByUri.get(uriStr);
                         if (!containers) {
                             containers = new Set();
@@ -778,6 +794,8 @@ export class WorkspaceIndexer {
         this.memberCache.clear();
         this.memberCacheByUri.clear();
         this.typeInferenceCache.clear();
+        this.symbolNameToUris.clear();
+        this.cachedAllSymbols = null;
         this.recentlyIndexed = 0;
         this.aliasMap.clear();
         this.clearTemplateCaches();
@@ -964,12 +982,36 @@ export class WorkspaceIndexer {
 
     private removeSymbolsForUri(uri: vscode.Uri) {
         const target = uri.toString();
+        
+        // Invalidate the cached all-symbols array
+        this.invalidateAllSymbolsCache();
+        
+        // Track symbols being removed for reverse index cleanup
+        const removedSymbolNames = new Set<string>();
+        
         for (const [key, list] of this.symbolIndex.entries()) {
-            const filtered = list.filter(entry => entry.uri.toString() !== target);
+            const filtered = list.filter(entry => {
+                if (entry.uri.toString() === target) {
+                    removedSymbolNames.add(entry.name);
+                    return false;
+                }
+                return true;
+            });
             if (filtered.length === 0) {
                 this.symbolIndex.delete(key);
             } else if (filtered.length !== list.length) {
                 this.symbolIndex.set(key, filtered);
+            }
+        }
+        
+        // Update reverse index (symbolName → URIs)
+        for (const name of removedSymbolNames) {
+            const uris = this.symbolNameToUris.get(name);
+            if (uris) {
+                uris.delete(target);
+                if (uris.size === 0) {
+                    this.symbolNameToUris.delete(name);
+                }
             }
         }
         
@@ -1594,11 +1636,49 @@ export class WorkspaceIndexer {
     }
 
     getAllSymbols(): SymbolInfo[] {
+        // Return cached array if available (O(1) after first call)
+        if (this.cachedAllSymbols !== null) {
+            return this.cachedAllSymbols;
+        }
+        
+        // Build and cache the array
         const all: SymbolInfo[] = [];
         for (const list of this.symbolIndex.values()) {
             all.push(...list);
         }
+        this.cachedAllSymbols = all;
         return all;
+    }
+    
+    /**
+     * Generator for iterating over all symbols without creating an array.
+     * Use this when you don't need random access to the full array.
+     */
+    *iterateSymbols(): Generator<SymbolInfo, void, undefined> {
+        for (const list of this.symbolIndex.values()) {
+            for (const sym of list) {
+                yield sym;
+            }
+        }
+    }
+    
+    /**
+     * Invalidates the cached getAllSymbols() array.
+     * Must be called whenever symbols are added or removed.
+     */
+    private invalidateAllSymbolsCache(): void {
+        this.cachedAllSymbols = null;
+    }
+    
+    /**
+     * Gets the URIs of files that contain a symbol with the given name.
+     * Uses the reverse index for O(1) lookup instead of scanning all files.
+     * 
+     * @param name The symbol name to search for
+     * @returns Set of URI strings containing symbols with this name
+     */
+    getUrisContainingSymbol(name: string): Set<string> {
+        return this.symbolNameToUris.get(name) ?? new Set();
     }
 
     getIndexedUris(): vscode.Uri[] {

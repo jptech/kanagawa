@@ -3,6 +3,7 @@ import * as Parser from 'web-tree-sitter';
 import { TreeSitterService } from '../service/treeSitter';
 import { WorkspaceIndexer, SymbolInfo } from '../service/indexer';
 import { findIdentifierNode, nodeToRange } from '../utils/nodeUtils';
+import { OPERATION_TIMEOUTS, withTimeout } from '../utils/timeout';
 
 /**
  * Represents a scope in the scope tree for tracking variable declarations.
@@ -135,7 +136,11 @@ export class KanagawaRenameProvider implements vscode.RenameProvider {
         }
 
         // Priority 2: Try member resolution (obj.member patterns)
-        const memberMatches = await this.indexer.resolveMemberSymbol(document, identifier);
+        const memberMatches = await withTimeout(
+            'rename member resolution',
+            this.indexer.resolveMemberSymbol(document, identifier),
+            OPERATION_TIMEOUTS.SYMBOL_RESOLUTION
+        );
         if (memberMatches && memberMatches.length > 0) {
             // Return the best match (first one from sorted results)
             return memberMatches[0];
@@ -349,7 +354,11 @@ export class KanagawaRenameProvider implements vscode.RenameProvider {
 
         // Try member resolution first (for obj.member patterns)
         if (node.parent?.type === 'member_expression') {
-            const memberMatches = await this.indexer.resolveMemberSymbol(document, node);
+            const memberMatches = await withTimeout(
+                'rename resolve-to-same member resolution',
+                this.indexer.resolveMemberSymbol(document, node),
+                OPERATION_TIMEOUTS.SYMBOL_RESOLUTION
+            );
             if (memberMatches && memberMatches.length > 0) {
                 return memberMatches.some(match => this.isSameSymbol(match, definition));
             }

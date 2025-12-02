@@ -3,6 +3,7 @@ import * as Parser from 'web-tree-sitter';
 import { WorkspaceIndexer, SymbolInfo } from '../service/indexer';
 import { TreeSitterService } from '../service/treeSitter';
 import { extractModuleFromQualified } from '../utils/importUtils';
+import { OPERATION_TIMEOUTS, withTimeout } from '../utils/timeout';
 
 // Kanagawa language keywords (from overview.md and grammar.js)
 const KEYWORDS = [
@@ -265,7 +266,11 @@ export class KanagawaCompletionItemProvider implements vscode.CompletionItemProv
             return [];
         }
 
-        const receiverType = await this.indexer.inferTypeFromExpression(document, objectNode);
+        const receiverType = await withTimeout(
+            'completion type inference',
+            this.indexer.inferTypeFromExpression(document, objectNode),
+            OPERATION_TIMEOUTS.COMPLETION
+        );
         if (!receiverType) {
             return [];
         }

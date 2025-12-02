@@ -9,6 +9,7 @@ import {
     isTypeName,
     parseParameterNames 
 } from '../utils/signatureUtils';
+import { OPERATION_TIMEOUTS, withTimeout } from '../utils/timeout';
 
 /**
  * Document-local cache for inlay hints to avoid repeated indexer lookups.
@@ -216,8 +217,12 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
 
         if (!initNode) { return undefined; }
 
-        // Use the indexer's authoritative type inference
-        const inferredType = await this.indexer.inferTypeFromExpression(document, initNode);
+        // Use the indexer's authoritative type inference with timeout
+        const inferredType = await withTimeout(
+            'inlay hints type inference',
+            this.indexer.inferTypeFromExpression(document, initNode),
+            OPERATION_TIMEOUTS.INLAY_HINTS
+        );
 
         if (!inferredType || inferredType === 'auto' || inferredType === 'unknown') {
             return undefined;
@@ -304,7 +309,11 @@ export class KanagawaInlayHintsProvider implements vscode.InlayHintsProvider {
             if (funcNode.type === 'member_expression') {
                 const propertyNode = funcNode.namedChild(funcNode.namedChildCount - 1);
                 if (propertyNode) {
-                    const matches = await this.indexer.resolveMemberSymbol(document, propertyNode);
+                    const matches = await withTimeout(
+                        'inlay hints parameter member resolution',
+                        this.indexer.resolveMemberSymbol(document, propertyNode),
+                        OPERATION_TIMEOUTS.SYMBOL_RESOLUTION
+                    );
                     funcSymbol = matches?.find(s => 
                         (s.category === 'function' || s.category === 'method') && !!s.signature
                     );

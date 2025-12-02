@@ -3,6 +3,7 @@ import * as Parser from 'web-tree-sitter';
 import { TreeSitterService } from '../service/treeSitter';
 import { WorkspaceIndexer, SymbolInfo, SymbolContextHint } from '../service/indexer';
 import { getNodeText } from '../utils/nodeUtils';
+import { OPERATION_TIMEOUTS, withTimeout } from '../utils/timeout';
 
 interface CallContext {
     callExpression: Parser.SyntaxNode;
@@ -493,7 +494,11 @@ export class KanagawaSignatureHelpProvider implements vscode.SignatureHelpProvid
         if (callee.type === 'member_expression') {
             const propertyNode = callee.namedChild(callee.namedChildCount - 1);
             if (propertyNode) {
-                const matches = await this.indexer.resolveMemberSymbol(document, propertyNode);
+                const matches = await withTimeout(
+                    'signature help member resolution',
+                    this.indexer.resolveMemberSymbol(document, propertyNode),
+                    OPERATION_TIMEOUTS.SYMBOL_RESOLUTION
+                );
                 if (matches && matches.length > 0) {
                     // Filter to callable symbols
                     symbols = matches.filter(sym => 

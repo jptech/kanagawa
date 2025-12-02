@@ -2,7 +2,8 @@ import * as vscode from 'vscode';
 import * as Parser from 'web-tree-sitter';
 import { TreeSitterService } from '../service/treeSitter';
 import { WorkspaceIndexer, SymbolInfo, SymbolContextHint } from '../service/indexer';
-import { findIdentifierNode, nodeToRange } from '../utils/nodeUtils';
+import { findIdentifierNode, nodeToRange, resolveToIdentifier } from '../utils/nodeUtils';
+import { OPERATION_TIMEOUTS, withTimeout } from '../utils/timeout';
 
 interface ReferenceTarget {
     symbol: SymbolInfo;
@@ -126,10 +127,45 @@ export class KanagawaReferencesProvider implements vscode.ReferenceProvider {
             }
         }
 
-        // Search across all indexed files
-        const indexedUris = this.indexer.getIndexedUris();
+        // Use reverse index to find only files containing this symbol name
+        // This is O(relevant_files) instead of O(all_files)
+        const symbolName = identifier.text;
+        const candidateUriStrings = this.indexer.getUrisContainingSymbol(symbolName);
         
-        for (const uri of indexedUris) {
+        // Also check all indexed URIs if the symbol wasn't in the reverse index
+        // (covers cases where the identifier appears but isn't a definition)
+        const allIndexedUris = this.indexer.getIndexedUris();
+        
+        // Start with files known to have this symbol, then check others
+        const priorityUris: vscode.Uri[] = [];
+        const otherUris: vscode.Uri[] = [];
+        
+        for (const uri of allIndexedUris) {
+            if (candidateUriStrings.has(uri.toString())) {
+                priorityUris.push(uri);
+            } else {
+                otherUris.push(uri);
+            }
+        }
+        
+        // Search priority URIs first (likely to have references)
+        for (const uri of priorityUris) {
+            if (token.isCancellationRequested) { break; }
+            
+            try {
+                const doc = await vscode.workspace.openTextDocument(uri);
+                const treeForDoc = this.service.getTree(doc) ?? await this.service.parse(doc);
+                if (!treeForDoc) { continue; }
+                
+                const references = await this.collectReferencesInDocument(doc, treeForDoc, targets, token);
+                results.push(...references);
+            } catch (e) {
+                // Ignore files that can't be opened
+            }
+        }
+        
+        // Search other URIs (may have usages even if not in reverse index)
+        for (const uri of otherUris) {
             if (token.isCancellationRequested) { break; }
             
             try {
@@ -231,7 +267,11 @@ export class KanagawaReferencesProvider implements vscode.ReferenceProvider {
     private async resolveTargets(document: vscode.TextDocument, identifier: Parser.SyntaxNode): Promise<ReferenceTarget[]> {
         const targets: ReferenceTarget[] = [];
 
-        const memberMatches = await this.indexer.resolveMemberSymbol(document, identifier);
+        const memberMatches = await withTimeout(
+            'references member resolution',
+            this.indexer.resolveMemberSymbol(document, identifier),
+            OPERATION_TIMEOUTS.REFERENCES
+        );
         if (memberMatches && memberMatches.length > 0) {
             for (const symbol of memberMatches) {
                 if (symbol.category === 'method' || symbol.category === 'function') {
@@ -279,7 +319,11 @@ export class KanagawaReferencesProvider implements vscode.ReferenceProvider {
         for (const candidate of candidates) {
             if (token.isCancellationRequested) { break; }
             if (candidate.kind === 'member') {
-                const definitions = await this.indexer.resolveMemberSymbol(document, candidate.identifier);
+                const definitions = await withTimeout(
+                    'references collect member resolution',
+                    this.indexer.resolveMemberSymbol(document, candidate.identifier),
+                    OPERATION_TIMEOUTS.SYMBOL_RESOLUTION
+                );
                 if (!definitions?.length) { continue; }
                 for (const target of targets) {
                     if (definitions.some(def => isSameLocation(def, target.symbol))) {
@@ -324,7 +368,7 @@ export class KanagawaReferencesProvider implements vscode.ReferenceProvider {
                         out.push({ kind: 'member', identifier: property, callExpression: node });
                     }
                 } else {
-                    const identifier = this.extractIdentifierNode(callee);
+                    const identifier = resolveToIdentifier(callee);
                     if (identifier) {
                         out.push({ kind: 'free', identifier, callExpression: node });
                     }
@@ -342,21 +386,6 @@ export class KanagawaReferencesProvider implements vscode.ReferenceProvider {
             if (child.type === 'argument_list') { continue; }
             if (child.type === 'call_attributes') { continue; }
             return child;
-        }
-        return undefined;
-    }
-
-    private extractIdentifierNode(node: Parser.SyntaxNode): Parser.SyntaxNode | undefined {
-        let current: Parser.SyntaxNode | null = node;
-        while (current) {
-            if (current.type === 'identifier' || current.type === 'type_identifier') {
-                return current;
-            }
-            if ((current.type === 'qualified_identifier' || current.type === 'template_instantiation') && current.namedChildCount > 0) {
-                current = current.namedChild(current.namedChildCount - 1);
-                continue;
-            }
-            current = current.parent;
         }
         return undefined;
     }
@@ -454,7 +483,11 @@ export class KanagawaCallHierarchyProvider implements vscode.CallHierarchyProvid
         for (const candidate of candidates) {
             if (token.isCancellationRequested) { break; }
             if (candidate.kind === 'member') {
-                const defs = await this.indexer.resolveMemberSymbol(doc, candidate.identifier);
+                const defs = await withTimeout(
+                    'call hierarchy member resolution',
+                    this.indexer.resolveMemberSymbol(doc, candidate.identifier),
+                    OPERATION_TIMEOUTS.SYMBOL_RESOLUTION
+                );
                 if (defs?.length) {
                     for (const def of defs) {
                         const chi = this.toCallHierarchyItem(createCallHierarchyItemFromSymbol(def));

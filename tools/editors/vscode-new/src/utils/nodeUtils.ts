@@ -28,18 +28,81 @@ export function findIdentifierNode(
         column: position.character
     });
 
-    let current: Parser.SyntaxNode | null = node;
+    return resolveToIdentifier(node);
+}
+
+/**
+ * Resolves a syntax node to its identifier, handling various node types.
+ * This is the core logic shared across providers for finding the actual
+ * identifier from any node in the AST.
+ * 
+ * Handles:
+ * - Direct identifier/type_identifier nodes
+ * - Member expressions (obj.member) → returns the member identifier
+ * - Qualified identifiers (Foo::Bar) → returns the rightmost identifier
+ * - Template instantiations (Foo<T>) → returns the base type identifier
+ * - Module names with nested components
+ * - Field expressions
+ * 
+ * @param node The starting node (often from descendantForPosition)
+ * @returns The identifier node, or undefined if not on an identifier
+ * 
+ * @example
+ * // For node at "obj.method()", returns the "method" identifier
+ * resolveToIdentifier(node)
+ */
+export function resolveToIdentifier(
+    node: Parser.SyntaxNode | null
+): Parser.SyntaxNode | undefined {
+    let current = node;
     while (current) {
+        // Direct identifier match
         if (current.type === 'identifier' || current.type === 'type_identifier') {
             return current;
         }
-        // For qualified_identifier (e.g., Foo::Bar), get the specific segment
-        if ((current.type === 'qualified_identifier' || current.type === 'template_instantiation')
-            && current.namedChildCount > 0) {
-            // Navigate to the last identifier in the chain
+        
+        // For qualified identifiers (e.g., Foo::Bar), get the specific segment
+        if (current.type === 'qualified_identifier' || current.type === 'scoped_identifier') {
+            const nameField = current.childForFieldName('name');
+            if (nameField && (nameField.type === 'identifier' || nameField.type === 'type_identifier')) {
+                return nameField;
+            }
+            // Fall back to last named child
+            if (current.namedChildCount > 0) {
+                current = current.namedChild(current.namedChildCount - 1);
+                continue;
+            }
+        }
+        
+        // For template instantiation (e.g., Foo<T>), get the base type
+        if (current.type === 'template_instantiation') {
+            const baseType = current.childForFieldName('type') ?? current.namedChild(0);
+            if (baseType) {
+                if (baseType.type === 'identifier' || baseType.type === 'type_identifier') {
+                    return baseType;
+                }
+                current = baseType;
+                continue;
+            }
+        }
+        
+        // For member expression (e.g., obj.member), get the member
+        if (current.type === 'member_expression' || current.type === 'field_expression') {
+            const memberField = current.childForFieldName('member') ?? 
+                               current.childForFieldName('field') ??
+                               current.namedChild(current.namedChildCount - 1);
+            if (memberField && (memberField.type === 'identifier' || memberField.type === 'type_identifier')) {
+                return memberField;
+            }
+        }
+        
+        // For module_name with nested components
+        if (current.type === 'module_name' && current.namedChildCount > 0) {
             current = current.namedChild(current.namedChildCount - 1);
             continue;
         }
+        
+        // Move up to parent
         current = current.parent;
     }
     return undefined;
