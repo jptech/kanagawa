@@ -229,6 +229,51 @@ export class KanagawaSemanticTokensProvider implements vscode.DocumentSemanticTo
     }
 
     /**
+     * Converts a tree-sitter byte offset (column) to a VS Code character offset.
+     * Tree-sitter uses byte offsets, but VS Code expects UTF-16 character offsets.
+     * This is necessary for documents containing multi-byte UTF-8 characters.
+     */
+    private byteToCharacter(document: vscode.TextDocument, line: number, byteColumn: number): number {
+        const lineText = document.lineAt(line).text;
+        const lineLength = lineText.length;
+        
+        // Fast path: if byte offset is 0, character offset is also 0
+        if (byteColumn === 0) {
+            return 0;
+        }
+        
+        // Count bytes until we reach the target byte offset
+        let byteOffset = 0;
+        let charOffset = 0;
+        
+        while (charOffset < lineLength && byteOffset < byteColumn) {
+            const codePoint = lineText.codePointAt(charOffset);
+            if (codePoint === undefined) {
+                break;
+            }
+            
+            // Calculate UTF-8 byte length of this character
+            let charByteLen: number;
+            if (codePoint <= 0x7F) {
+                charByteLen = 1;
+            } else if (codePoint <= 0x7FF) {
+                charByteLen = 2;
+            } else if (codePoint <= 0xFFFF) {
+                charByteLen = 3;
+            } else {
+                charByteLen = 4;
+            }
+            
+            byteOffset += charByteLen;
+            // Handle surrogate pairs (characters > U+FFFF take 2 UTF-16 code units)
+            charOffset += codePoint > 0xFFFF ? 2 : 1;
+        }
+        
+        // Clamp to line length to prevent "end character > model.getLineLength" errors
+        return Math.min(charOffset, lineLength);
+    }
+
+    /**
      * Pushes a semantic token, handling multi-line nodes by splitting them
      * into individual single-line tokens (VS Code API requirement).
      */
@@ -243,11 +288,20 @@ export class KanagawaSemanticTokensProvider implements vscode.DocumentSemanticTo
         const endLine = node.endPosition.row;
 
         if (startLine === endLine) {
-            // Single-line token - push directly
+            // Single-line token - convert byte columns to character columns
+            const startCol = this.byteToCharacter(document, startLine, node.startPosition.column);
+            const endCol = this.byteToCharacter(document, startLine, node.endPosition.column);
+            const length = endCol - startCol;
+            
+            // Skip invalid tokens
+            if (length <= 0) {
+                return;
+            }
+            
             builder.push(
                 startLine,
-                node.startPosition.column,
-                node.endPosition.column - node.startPosition.column,
+                startCol,
+                length,
                 TOKEN_TYPES.indexOf(type),
                 this.encodeModifiers(modifiers)
             );
@@ -255,24 +309,27 @@ export class KanagawaSemanticTokensProvider implements vscode.DocumentSemanticTo
             // Multi-line token - split into per-line tokens
             for (let line = startLine; line <= endLine; line++) {
                 const lineText = document.lineAt(line).text;
+                const lineLength = lineText.length;
                 let startCol: number;
-                let length: number;
+                let endCol: number;
 
                 if (line === startLine) {
                     // First line: from start column to end of line
-                    startCol = node.startPosition.column;
-                    length = lineText.length - startCol;
+                    startCol = this.byteToCharacter(document, line, node.startPosition.column);
+                    endCol = lineLength;
                 } else if (line === endLine) {
                     // Last line: from start of line to end column
                     startCol = 0;
-                    length = node.endPosition.column;
+                    endCol = this.byteToCharacter(document, line, node.endPosition.column);
                 } else {
                     // Middle lines: entire line
                     startCol = 0;
-                    length = lineText.length;
+                    endCol = lineLength;
                 }
 
-                // Skip empty tokens
+                const length = endCol - startCol;
+
+                // Skip empty or invalid tokens
                 if (length > 0) {
                     builder.push(
                         line,

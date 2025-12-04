@@ -1222,21 +1222,28 @@ export class WorkspaceIndexer {
         const targetName = identifier.text;
         const limit = identifier.startIndex;
 
+        // Limit traversal depth to prevent excessive tree walking in large files
+        const MAX_SCOPE_DEPTH = 20;
+        let depth = 0;
         let current: Parser.SyntaxNode | null = identifier.parent;
-        while (current) {
+        
+        while (current && depth < MAX_SCOPE_DEPTH) {
+            depth++;
+            const nodeType = current.type;
+            
             const templateSymbol = this.findTemplateParameterSymbol(document, current, targetName);
             if (templateSymbol) {
                 return templateSymbol;
             }
 
-            if (current.type === 'block' || current.type === 'compound_statement') {
+            if (nodeType === 'block' || nodeType === 'compound_statement') {
                 const decl = this.findDeclarationInScope(current, targetName, limit);
                 if (decl) {
                     return this.buildLocalSymbolInfo(document, decl, targetName);
                 }
             }
 
-            if (current.type === 'function_definition') {
+            if (nodeType === 'function_definition') {
                 const templateMatch = this.findTemplateParameterSymbol(document, current.parent, targetName);
                 if (templateMatch) {
                     return templateMatch;
@@ -1245,6 +1252,11 @@ export class WorkspaceIndexer {
                 if (param) {
                     return this.buildLocalSymbolInfo(document, param, targetName);
                 }
+            }
+            
+            // Early exit: if we hit the module level, stop looking for locals
+            if (nodeType === 'module_definition' || nodeType === 'source_file') {
+                break;
             }
 
             current = current.parent;
@@ -2879,8 +2891,12 @@ export class WorkspaceIndexer {
         this.invalidateResolvedImports(uri);
     }
 
-    private findDeclarationInScope(scopeNode: Parser.SyntaxNode, targetName: string, limit: number): Parser.SyntaxNode | undefined {
-        if (!scopeNode.namedChildren.length) { return undefined; }
+    private findDeclarationInScope(scopeNode: Parser.SyntaxNode, targetName: string, limit: number, depth: number = 0): Parser.SyntaxNode | undefined {
+        // Limit recursion depth to prevent stack overflow and excessive traversal
+        const MAX_RECURSION_DEPTH = 10;
+        if (depth >= MAX_RECURSION_DEPTH || !scopeNode.namedChildren.length) { 
+            return undefined; 
+        }
 
         let candidate: Parser.SyntaxNode | undefined;
         for (const child of scopeNode.namedChildren) {
@@ -2888,7 +2904,8 @@ export class WorkspaceIndexer {
                 break;
             }
 
-            const isBlock = child.type === 'block' || child.type === 'compound_statement';
+            const childType = child.type;
+            const isBlock = childType === 'block' || childType === 'compound_statement';
             const shouldDescend = !isBlock || (child.startIndex <= limit && child.endIndex >= limit);
 
             if (shouldDescend) {
@@ -2897,7 +2914,7 @@ export class WorkspaceIndexer {
                     candidate = match;
                 }
 
-                const nested = this.findDeclarationInScope(child, targetName, limit);
+                const nested = this.findDeclarationInScope(child, targetName, limit, depth + 1);
                 if (nested && (!candidate || nested.startIndex > candidate.startIndex)) {
                     candidate = nested;
                 }

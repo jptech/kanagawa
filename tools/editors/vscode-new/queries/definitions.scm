@@ -42,11 +42,18 @@
 (alias_template
   name: (identifier) @alias.name) @alias
 
-; Global variables
+; Global variables (at source_file level)
 (source_file
   (declaration
     (variable_decl
-      name: (identifier) @variable.name))) @variable
+      name: (identifier) @variable.name)) @variable)
+
+; Module-level variables/constants (inside module_decl)
+; Note: module_decl can contain declaration children directly
+(module_decl
+  (declaration
+    (variable_decl
+      name: (identifier) @variable.name)) @variable)
 
 ; Member variables (inside classes/structs)
 (member_decl

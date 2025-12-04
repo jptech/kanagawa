@@ -253,19 +253,30 @@ export class SymbolResolutionService {
     /**
      * Builds a context hint based on identifier usage pattern.
      * Determines if the identifier is used as a method call, type, or free identifier.
+     * 
+     * Optimized to limit parent traversal depth and avoid expensive type inference
+     * when not strictly necessary.
      */
     async buildContextHint(
         document: vscode.TextDocument,
         identifier: Parser.SyntaxNode
     ): Promise<SymbolContextHint> {
+        // Limit traversal depth to avoid expensive walks up large trees
+        const MAX_PARENT_DEPTH = 5;
+        let depth = 0;
         let current: Parser.SyntaxNode | null = identifier.parent;
         
-        while (current) {
+        while (current && depth < MAX_PARENT_DEPTH) {
+            depth++;
+            const nodeType = current.type;
+            
             // Method call pattern: receiver.method()
-            if (current.type === 'member_expression' && current.namedChildCount >= 2) {
+            if (nodeType === 'member_expression' && current.namedChildCount >= 2) {
                 const propertyNode = current.namedChild(current.namedChildCount - 1);
                 // Compare by node id since object references may differ
                 if (propertyNode && propertyNode.id === identifier.id) {
+                    // Only infer receiver type if we actually found a member expression
+                    // This is the expensive part, so we defer it until needed
                     const receiverNode = current.namedChild(0);
                     const receiverType = await this.indexer.inferTypeFromExpression(
                         document, 
@@ -276,7 +287,7 @@ export class SymbolResolutionService {
             }
             
             // Field access pattern
-            if (current.type === 'field_expression' && current.namedChildCount >= 2) {
+            if (nodeType === 'field_expression' && current.namedChildCount >= 2) {
                 const fieldNode = current.namedChild(current.namedChildCount - 1);
                 // Compare by node id since object references may differ
                 if (fieldNode && fieldNode.id === identifier.id) {
@@ -287,6 +298,17 @@ export class SymbolResolutionService {
                     );
                     return { kind: 'method', receiverType };
                 }
+            }
+            
+            // Early exit: if we hit a statement-level node, stop traversing
+            // (the identifier can't be part of a member expression above this point)
+            if (nodeType === 'expression_statement' || 
+                nodeType === 'variable_decl' ||
+                nodeType === 'return_statement' ||
+                nodeType === 'if_statement' ||
+                nodeType === 'while_statement' ||
+                nodeType === 'for_statement') {
+                break;
             }
             
             current = current.parent;

@@ -9,6 +9,14 @@ import { perfLogger, PerfOps } from '../utils/perfLogger';
 import { OPERATION_TIMEOUTS, withTimeout } from '../utils/timeout';
 import { healthMonitor } from '../service/healthMonitor';
 
+/** Minimum time between hover lookups at the same position (ms) */
+const THROTTLE_INTERVAL_MS = 100;
+
+interface CachedHoverResult {
+    result: vscode.Hover | undefined;
+    timestamp: number;
+}
+
 /**
  * Result of resolving hover candidates with confidence scoring.
  * Uses ResolutionResult from the SymbolResolutionService.
@@ -35,12 +43,57 @@ const CATEGORY_ICONS: Record<string, string> = {
 
 export class KanagawaHoverProvider implements vscode.HoverProvider {
     private readonly resolutionService: SymbolResolutionService;
+    
+    /**
+     * Cache for recent hover lookups to avoid expensive recomputation
+     * when VS Code repeatedly calls provideHover (e.g., during mouse movement).
+     */
+    private readonly cache = new Map<string, CachedHoverResult>();
+    private readonly maxCacheSize = 50;
 
     constructor(
         private service: TreeSitterService,
         private indexer: WorkspaceIndexer
     ) {
         this.resolutionService = new SymbolResolutionService(indexer);
+    }
+    
+    /**
+     * Generates a cache key for a document position.
+     */
+    private makeCacheKey(document: vscode.TextDocument, position: vscode.Position): string {
+        return `${document.uri.toString()}#${document.version}#${position.line}:${position.character}`;
+    }
+    
+    /**
+     * Gets a cached result if available and not expired.
+     */
+    private getCached(key: string): vscode.Hover | undefined | null {
+        const entry = this.cache.get(key);
+        if (!entry) { return null; } // null = not in cache
+        
+        const age = Date.now() - entry.timestamp;
+        if (age > THROTTLE_INTERVAL_MS) {
+            this.cache.delete(key);
+            return null;
+        }
+        
+        return entry.result; // undefined = cached "not found" result
+    }
+    
+    /**
+     * Stores a result in the cache.
+     */
+    private setCache(key: string, result: vscode.Hover | undefined): void {
+        // Trim cache if too large
+        if (this.cache.size >= this.maxCacheSize) {
+            const oldestKey = this.cache.keys().next().value;
+            if (oldestKey) {
+                this.cache.delete(oldestKey);
+            }
+        }
+        
+        this.cache.set(key, { result, timestamp: Date.now() });
     }
 
     async provideHover(
@@ -52,6 +105,14 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
             return await perfLogger.measure(PerfOps.HOVER, document.uri.toString(), async () => {
                 // Check for cancellation early
                 if (token.isCancellationRequested) { return undefined; }
+                
+                // Check cache first to avoid expensive recomputation during rapid calls
+                const cacheKey = this.makeCacheKey(document, position);
+                const cached = this.getCached(cacheKey);
+                if (cached !== null) {
+                    // Cache hit (even if result is undefined)
+                    return cached;
+                }
                 
                 const tree = this.service.getTree(document) ?? await this.service.parse(document);
                 if (!tree) {
@@ -67,6 +128,7 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
 
                 const identifier = resolveToIdentifier(node);
                 if (!identifier) {
+                    this.setCache(cacheKey, undefined);
                     return undefined;
                 }
 
@@ -81,6 +143,7 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
                     // If this is an auto variable with an inlay hint showing the type,
                     // suppress the hover to avoid redundancy
                     if (typeInfo.isAutoWithInlayHint) {
+                        this.setCache(cacheKey, undefined);
                         return undefined;
                     }
                     
@@ -96,7 +159,9 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
                     md.appendMarkdown(`\n---\n`);
                     md.appendMarkdown(`📌 \`${typeInfo.kind}\``);
                     
-                    return new vscode.Hover(md, hoverRange);
+                    const result = new vscode.Hover(md, hoverRange);
+                    this.setCache(cacheKey, result);
+                    return result;
                 }
 
                 if (token.isCancellationRequested) { return undefined; }
@@ -113,6 +178,7 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
                 );
 
                 if (!resolution || resolution.confidence === 'none') {
+                    this.setCache(cacheKey, undefined);
                     return undefined;
                 }
 
@@ -121,9 +187,12 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
 
                 if (markdowns.length > 0) {
                     healthMonitor.recordSuccess('hover');
-                    return new vscode.Hover(markdowns, hoverRange);
+                    const result = new vscode.Hover(markdowns, hoverRange);
+                    this.setCache(cacheKey, result);
+                    return result;
                 }
 
+                this.setCache(cacheKey, undefined);
                 return undefined;
             }); // end perfLogger.measure
         } catch (error) {
@@ -251,6 +320,9 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
     /**
      * Finds local type information for a variable or parameter.
      * Also detects if this is an auto variable that would have an inlay type hint shown.
+     * 
+     * This only handles true local variables (inside functions/blocks) and parameters.
+     * Module-level constants are handled by the symbol resolution path to include doc comments.
      */
     private async findLocalTypeInfo(
         document: vscode.TextDocument, 
@@ -261,6 +333,14 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
             if (current.type === 'variable_decl') {
                 const nameNode = current.childForFieldName('name');
                 if (nameNode === identifier) {
+                    // Check if this is a true local variable (inside a function/block)
+                    // vs a module-level constant which should be handled by symbol resolution
+                    if (!this.isInsideFunction(current)) {
+                        // This is a module-level variable/constant - let symbol resolution handle it
+                        // so we get the doc comment and proper category
+                        return undefined;
+                    }
+                    
                     const typeNode = current.childForFieldName('type');
                     const initializerNode = current.childForFieldName('initializer');
                     const typeText = getNodeText(document, typeNode);
@@ -311,6 +391,25 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
             current = current.parent;
         }
         return undefined;
+    }
+
+    /**
+     * Checks if a node is inside a function definition (i.e., is a local variable).
+     * Module-level variables are not inside functions.
+     */
+    private isInsideFunction(node: Parser.SyntaxNode): boolean {
+        let current: Parser.SyntaxNode | null = node.parent;
+        while (current) {
+            if (current.type === 'function_definition' || current.type === 'function_template') {
+                return true;
+            }
+            // If we hit module_decl or source_file before a function, it's module-level
+            if (current.type === 'module_decl' || current.type === 'source_file') {
+                return false;
+            }
+            current = current.parent;
+        }
+        return false;
     }
 
     /**
