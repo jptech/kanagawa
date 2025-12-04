@@ -5,6 +5,7 @@ import { SymbolResolutionService } from '../service/resolution';
 import { perfLogger, PerfOps } from '../utils/perfLogger';
 import { resolveToIdentifier } from '../utils/nodeUtils';
 import { OPERATION_TIMEOUTS, withTimeout } from '../utils/timeout';
+import { healthMonitor } from '../service/healthMonitor';
 
 export class KanagawaDefinitionProvider implements vscode.DefinitionProvider {
     private readonly resolutionService: SymbolResolutionService;
@@ -61,19 +62,24 @@ export class KanagawaDefinitionProvider implements vscode.DefinitionProvider {
             // This matches the behavior of hover, which shows the primary definition.
             // Only show a picker when confidence is medium/low and there are multiple candidates.
             if (resolution.confidence === 'exact' || resolution.confidence === 'high') {
+                healthMonitor.recordSuccess('definition');
                 return new vscode.Location(resolution.primary.uri, resolution.primary.range);
             }
 
             // Medium/low confidence with multiple matches → return all, VS Code will show picker
             const allMatches = [resolution.primary, ...resolution.alternatives];
             if (allMatches.length > 1) {
+                healthMonitor.recordSuccess('definition');
                 return this.buildLocationArray(allMatches);
             }
 
             // Single match even at lower confidence → jump directly
+            healthMonitor.recordSuccess('definition');
             return new vscode.Location(resolution.primary.uri, resolution.primary.range);
         } catch (error) {
             console.error('Kanagawa: Definition provider error:', error);
+            healthMonitor.recordFailure('definition',
+                error instanceof Error ? error.message : String(error));
             return undefined;
         } finally {
             endTiming();

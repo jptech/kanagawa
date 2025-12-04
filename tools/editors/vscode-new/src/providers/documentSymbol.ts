@@ -4,6 +4,7 @@ import { TreeSitterService } from '../service/treeSitter';
 import { QueryManager } from '../service/query';
 import { OutlineFilterManager, snapshotContainsCategory } from '../service/outlineFilters';
 import { SymbolCategory } from '../service/indexer';
+import { healthMonitor } from '../service/healthMonitor';
 
 interface SymbolData {
     name: string;
@@ -27,22 +28,30 @@ export class KanagawaDocumentSymbolProvider implements vscode.DocumentSymbolProv
         document: vscode.TextDocument,
         _token: vscode.CancellationToken
     ): Promise<vscode.DocumentSymbol[] | undefined> {
-        const tree = this.service.getTree(document) ?? await this.service.parse(document);
-        if (!tree) { return undefined; }
+        try {
+            const tree = this.service.getTree(document) ?? await this.service.parse(document);
+            if (!tree) { return undefined; }
 
-        let queryString = this.queryManager.getQuery('outline');
-        if (!queryString) {
-            queryString = await this.queryManager.loadQuery('outline');
+            let queryString = this.queryManager.getQuery('outline');
+            if (!queryString) {
+                queryString = await this.queryManager.loadQuery('outline');
+            }
+
+            const captures = this.service.query(tree.rootNode, queryString);
+            
+            // Build hierarchical symbol tree from captures
+            const rootSymbols = this.buildSymbolTree(captures, tree.rootNode);
+            
+            // Apply filters and convert to VS Code symbols
+            const snapshot = this.filters.getFilters();
+            const result = this.filterAndConvertSymbols(rootSymbols, snapshot);
+            healthMonitor.recordSuccess('documentSymbols');
+            return result;
+        } catch (error) {
+            healthMonitor.recordFailure('documentSymbols', error);
+            console.error('[DocumentSymbolProvider] Error:', error);
+            return undefined;
         }
-
-        const captures = this.service.query(tree.rootNode, queryString);
-        
-        // Build hierarchical symbol tree from captures
-        const rootSymbols = this.buildSymbolTree(captures, tree.rootNode);
-        
-        // Apply filters and convert to VS Code symbols
-        const snapshot = this.filters.getFilters();
-        return this.filterAndConvertSymbols(rootSymbols, snapshot);
     }
 
     /**

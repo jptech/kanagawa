@@ -276,12 +276,45 @@ export class TreeSitterService {
     /**
      * Removes the cached parse tree for a document.
      * Should be called when a document is closed to free memory.
+     * 
+     * Note: This method is synchronized with parse() to prevent race conditions
+     * where a tree is being removed while it's being replaced.
      */
-    remove(document: vscode.TextDocument) {
+    async remove(document: vscode.TextDocument): Promise<void> {
+        const uri = document.uri.toString();
+        
+        // Acquire mutex to prevent race with concurrent parse operations
+        await this.parseMutex.acquire();
+        try {
+            const tree = this.trees.get(uri);
+            if (tree) {
+                try {
+                    tree.delete();
+                } catch (e) {
+                    // Tree may already be deleted - this is fine
+                    console.warn('Kanagawa: Failed to delete tree on remove:', e);
+                }
+                this.trees.delete(uri);
+            }
+        } finally {
+            this.parseMutex.release();
+        }
+    }
+    
+    /**
+     * Synchronous version of remove for use in event handlers.
+     * Does not wait for mutex - best effort cleanup.
+     * Use this when you can't await (e.g., in synchronous event handlers).
+     */
+    removeSync(document: vscode.TextDocument): void {
         const uri = document.uri.toString();
         const tree = this.trees.get(uri);
         if (tree) {
-            tree.delete();
+            try {
+                tree.delete();
+            } catch (e) {
+                // Tree may already be deleted or in use - ignore
+            }
             this.trees.delete(uri);
         }
     }

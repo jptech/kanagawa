@@ -4,6 +4,7 @@ import { TreeSitterService } from '../service/treeSitter';
 import { WorkspaceIndexer, SymbolInfo, SymbolContextHint } from '../service/indexer';
 import { findIdentifierNode, nodeToRange, resolveToIdentifier } from '../utils/nodeUtils';
 import { OPERATION_TIMEOUTS, withTimeout } from '../utils/timeout';
+import { healthMonitor } from '../service/healthMonitor';
 
 interface ReferenceTarget {
     symbol: SymbolInfo;
@@ -97,17 +98,20 @@ export class KanagawaReferencesProvider implements vscode.ReferenceProvider {
         context: vscode.ReferenceContext,
         token: vscode.CancellationToken
     ): Promise<vscode.Location[] | undefined> {
-        const tree = this.service.getTree(document) ?? await this.service.parse(document);
-        if (!tree) { return undefined; }
+        try {
+            const tree = this.service.getTree(document) ?? await this.service.parse(document);
+            if (!tree) { return undefined; }
 
-        const identifier = findIdentifierNode(tree, position);
-        if (!identifier) { return undefined; }
+            const identifier = findIdentifierNode(tree, position);
+            if (!identifier) { return undefined; }
 
-        const targets = await this.resolveTargets(document, identifier);
-        if (!targets.length) { 
-            // Fall back to simple text search for non-indexed symbols
-            return this.findReferencesWorkspaceWide(identifier.text, context.includeDeclaration, token);
-        }
+            const targets = await this.resolveTargets(document, identifier);
+            if (!targets.length) { 
+                // Fall back to simple text search for non-indexed symbols
+                const result = await this.findReferencesWorkspaceWide(identifier.text, context.includeDeclaration, token);
+                healthMonitor.recordSuccess('references');
+                return result;
+            }
 
         const includeDeclaration = context.includeDeclaration ?? false;
         const results: vscode.Location[] = [];
@@ -173,7 +177,13 @@ export class KanagawaReferencesProvider implements vscode.ReferenceProvider {
         }
 
         // Deduplicate results
-        return this.deduplicateLocations(results);
+            healthMonitor.recordSuccess('references');
+            return this.deduplicateLocations(results);
+        } catch (error) {
+            healthMonitor.recordFailure('references', error);
+            console.error('[ReferencesProvider] Error:', error);
+            return undefined;
+        }
     }
 
     /**
@@ -398,22 +408,30 @@ export class KanagawaCallHierarchyProvider implements vscode.CallHierarchyProvid
         position: vscode.Position,
         _token: vscode.CancellationToken
     ): Promise<vscode.CallHierarchyItem[] | undefined> {
-        const referencesProvider = new KanagawaReferencesProvider(this.service, this.indexer);
-        const tree = this.service.getTree(document) ?? await this.service.parse(document);
-        if (!tree) { return undefined; }
-        const identifier = findIdentifierNode(tree, position);
-        if (!identifier) { return undefined; }
-        const targets = await referencesProvider['resolveTargets'](document, identifier);
-        if (!targets.length) { return undefined; }
-        return targets.map(target => this.toCallHierarchyItem(target.item));
+        try {
+            const referencesProvider = new KanagawaReferencesProvider(this.service, this.indexer);
+            const tree = this.service.getTree(document) ?? await this.service.parse(document);
+            if (!tree) { return undefined; }
+            const identifier = findIdentifierNode(tree, position);
+            if (!identifier) { return undefined; }
+            const targets = await referencesProvider['resolveTargets'](document, identifier);
+            if (!targets.length) { return undefined; }
+            healthMonitor.recordSuccess('callHierarchy');
+            return targets.map(target => this.toCallHierarchyItem(target.item));
+        } catch (error) {
+            healthMonitor.recordFailure('callHierarchy', error);
+            console.error('[CallHierarchyProvider] prepareCallHierarchy error:', error);
+            return undefined;
+        }
     }
 
     async provideCallHierarchyIncomingCalls(
         item: vscode.CallHierarchyItem,
         token: vscode.CancellationToken
     ): Promise<vscode.CallHierarchyIncomingCall[]> {
-        const symbol = await this.lookupSymbolInfo(item);
-        if (!symbol) { return []; }
+        try {
+            const symbol = await this.lookupSymbolInfo(item);
+            if (!symbol) { return []; }
         const referenceProvider = new KanagawaReferencesProvider(this.service, this.indexer);
         const dummyDocument = await vscode.workspace.openTextDocument(symbol.uri);
         const tree = this.service.getTree(dummyDocument) ?? await this.service.parse(dummyDocument);
@@ -450,15 +468,21 @@ export class KanagawaCallHierarchyProvider implements vscode.CallHierarchyProvid
                 fromRanges: entry.ranges
             });
         }
-        return result;
+            return result;
+        } catch (error) {
+            healthMonitor.recordFailure('callHierarchy', error);
+            console.error('[CallHierarchyProvider] provideCallHierarchyIncomingCalls error:', error);
+            return [];
+        }
     }
 
     async provideCallHierarchyOutgoingCalls(
         item: vscode.CallHierarchyItem,
         token: vscode.CancellationToken
     ): Promise<vscode.CallHierarchyOutgoingCall[]> {
-        const symbol = await this.lookupSymbolInfo(item);
-        if (!symbol) { return []; }
+        try {
+            const symbol = await this.lookupSymbolInfo(item);
+            if (!symbol) { return []; }
 
         const doc = await vscode.workspace.openTextDocument(symbol.uri);
         const tree = this.service.getTree(doc) ?? await this.service.parse(doc);
@@ -513,10 +537,15 @@ export class KanagawaCallHierarchyProvider implements vscode.CallHierarchyProvid
             }
         }
 
-        return Array.from(outgoing.values()).map(entry => ({
-            to: entry.item,
-            fromRanges: entry.ranges
-        }));
+            return Array.from(outgoing.values()).map(entry => ({
+                to: entry.item,
+                fromRanges: entry.ranges
+            }));
+        } catch (error) {
+            healthMonitor.recordFailure('callHierarchy', error);
+            console.error('[CallHierarchyProvider] provideCallHierarchyOutgoingCalls error:', error);
+            return [];
+        }
     }
 
     private async lookupSymbolInfo(item: vscode.CallHierarchyItem): Promise<SymbolInfo | undefined> {

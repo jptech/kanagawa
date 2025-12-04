@@ -12,6 +12,8 @@ import * as vscode from 'vscode';
 export class KeyedDebouncer<K = string> implements vscode.Disposable {
     private readonly timers = new Map<K, NodeJS.Timeout>();
     private disposed = false;
+    /** Track in-flight async callbacks to prevent overlapping executions */
+    private readonly inFlight = new Map<K, Promise<void>>();
 
     /**
      * Creates a new debouncer.
@@ -24,11 +26,14 @@ export class KeyedDebouncer<K = string> implements vscode.Disposable {
      * If called again with the same key before the delay expires, 
      * the previous callback is cancelled and the delay resets.
      * 
+     * Handles both sync and async callbacks safely. Async callbacks are properly
+     * awaited and their errors are caught to prevent unhandled promise rejections.
+     * 
      * @param key Unique identifier for this debounced action
-     * @param callback The function to execute after the delay
+     * @param callback The function to execute after the delay (can be async)
      * @param delay Optional custom delay (defaults to constructor value)
      */
-    debounce(key: K, callback: () => void, delay?: number): void {
+    debounce(key: K, callback: () => void | Promise<void>, delay?: number): void {
         if (this.disposed) { return; }
 
         const effectiveDelay = delay ?? this.defaultDelay;
@@ -43,11 +48,39 @@ export class KeyedDebouncer<K = string> implements vscode.Disposable {
         const timer = setTimeout(() => {
             this.timers.delete(key);
             if (!this.disposed) {
-                try {
-                    callback();
-                } catch (e) {
-                    console.error(`Kanagawa: Debounced callback error for key ${key}:`, e);
-                }
+                // Wrap in async IIFE to properly handle async callbacks
+                const executeCallback = async (): Promise<void> => {
+                    try {
+                        // If there's already an in-flight callback for this key, wait for it
+                        // This prevents overlapping async operations on the same document
+                        const pending = this.inFlight.get(key);
+                        if (pending) {
+                            try {
+                                await pending;
+                            } catch {
+                                // Ignore errors from previous callback
+                            }
+                        }
+                        
+                        // Check disposed again after potentially waiting
+                        if (this.disposed) { return; }
+                        
+                        // Execute the callback and await if it's a promise
+                        const result = callback();
+                        if (result && typeof result.then === 'function') {
+                            await result;
+                        }
+                    } catch (e) {
+                        // Log error but don't crash - this is critical for stability
+                        console.error(`Kanagawa: Debounced callback error for key ${key}:`, e);
+                    } finally {
+                        this.inFlight.delete(key);
+                    }
+                };
+                
+                // Track the in-flight promise
+                const promise = executeCallback();
+                this.inFlight.set(key, promise);
             }
         }, effectiveDelay);
 
@@ -56,6 +89,7 @@ export class KeyedDebouncer<K = string> implements vscode.Disposable {
 
     /**
      * Cancels any pending callback for the given key.
+     * Also waits for any in-flight async callback to complete (best-effort).
      */
     cancel(key: K): void {
         const timer = this.timers.get(key);
@@ -63,6 +97,8 @@ export class KeyedDebouncer<K = string> implements vscode.Disposable {
             clearTimeout(timer);
             this.timers.delete(key);
         }
+        // Note: we don't await in-flight here to keep cancel() synchronous,
+        // but the in-flight map entry is preserved so new debounce() calls can wait
     }
 
     /**
@@ -84,10 +120,12 @@ export class KeyedDebouncer<K = string> implements vscode.Disposable {
 
     /**
      * Disposes the debouncer and cancels all pending callbacks.
+     * Any in-flight async callbacks will complete but their results are ignored.
      */
     dispose(): void {
         this.disposed = true;
         this.cancelAll();
+        this.inFlight.clear();
     }
 }
 

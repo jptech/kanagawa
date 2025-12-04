@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as Parser from 'web-tree-sitter';
 import { TreeSitterService } from '../service/treeSitter';
 import { WorkspaceIndexer } from '../service/indexer';
+import { healthMonitor } from '../service/healthMonitor';
 
 interface TypePeekResult {
     range: vscode.Range;
@@ -21,14 +22,15 @@ export class KanagawaTypePeekCodeLensProvider implements vscode.CodeLensProvider
         document: vscode.TextDocument,
         token: vscode.CancellationToken
     ): Promise<vscode.CodeLens[]> {
-        // Check if typePeek is enabled (disabled by default since inlay hints show same info)
-        const config = vscode.workspace.getConfiguration('kanagawa.typePeek');
-        if (!config.get<boolean>('enabled', false)) {
-            return [];
-        }
+        try {
+            // Check if typePeek is enabled (disabled by default since inlay hints show same info)
+            const config = vscode.workspace.getConfiguration('kanagawa.typePeek');
+            if (!config.get<boolean>('enabled', false)) {
+                return [];
+            }
 
-        const tree = this.treeService.getTree(document) ?? await this.treeService.parse(document);
-        if (!tree) { return []; }
+            const tree = this.treeService.getTree(document) ?? await this.treeService.parse(document);
+            if (!tree) { return []; }
 
         const results: TypePeekResult[] = [];
         const stack: Parser.SyntaxNode[] = [tree.rootNode];
@@ -76,11 +78,17 @@ export class KanagawaTypePeekCodeLensProvider implements vscode.CodeLensProvider
             }
         }
 
-        return results.map(result => new vscode.CodeLens(result.range, {
-            title: result.label,
-            tooltip: result.tooltip,
-            command: 'kanagawa.typePeek.show',
-            arguments: result.commandArgs
-        }));
+            healthMonitor.recordSuccess('codeLens');
+            return results.map(result => new vscode.CodeLens(result.range, {
+                title: result.label,
+                tooltip: result.tooltip,
+                command: 'kanagawa.typePeek.show',
+                arguments: result.commandArgs
+            }));
+        } catch (error) {
+            healthMonitor.recordFailure('codeLens', error);
+            console.error('[TypePeekCodeLensProvider] Error:', error);
+            return [];
+        }
     }
 }

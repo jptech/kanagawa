@@ -3,6 +3,7 @@ import * as Parser from 'web-tree-sitter';
 import { TreeSitterService } from '../service/treeSitter';
 import { QueryManager } from '../service/query';
 import { perfLogger, PerfOps } from '../utils/perfLogger';
+import { healthMonitor } from '../service/healthMonitor';
 
 const TOKEN_TYPES = [
     'namespace',
@@ -77,124 +78,151 @@ export class KanagawaSemanticTokensProvider implements vscode.DocumentSemanticTo
     ): Promise<vscode.SemanticTokens | undefined> {
         const endTiming = perfLogger.start(PerfOps.SEMANTIC_TOKENS, document.uri.toString());
         try {
+            // Check if service is ready before proceeding
+            if (!this.service.isReady()) {
+                console.warn('Kanagawa: Semantic tokens requested but parser not ready');
+                return undefined;
+            }
+
             // Get existing tree or parse the document (parse is now async)
             const tree = this.service.getTree(document) ?? await this.service.parse(document);
             if (!tree) { return undefined; }
 
-        const builder = new vscode.SemanticTokensBuilder(legend);
-        
-        let queryString = this.queryManager.getQuery('highlights');
-        if (!queryString) {
-            queryString = await this.queryManager.loadQuery('highlights');
-        }
-
-        if (token.isCancellationRequested) { return undefined; }
-
-        const captures = this.service.query(tree.rootNode, queryString);
-
-        for (const capture of captures) {
             if (token.isCancellationRequested) { return undefined; }
-            
-            const node = capture.node;
-            let type: string | undefined;
-            let modifiers: string[] = [];
-            
-            switch (capture.name) {
-                case 'keyword':
-                    type = 'keyword';
-                    break;
-                    
-                case 'function.definition':
-                    type = 'function';
-                    modifiers = ['definition'];
-                    break;
-                    
-                case 'function.call':
-                    type = 'function';
-                    break;
-                    
-                case 'function.builtin':
-                    type = 'function';
-                    modifiers = ['defaultLibrary'];
-                    break;
-                    
-                case 'type.definition':
-                    type = 'class';
-                    modifiers = ['definition'];
-                    break;
-                    
-                case 'type':
-                    type = 'type';
-                    break;
-                    
-                case 'type.parameter':
-                    type = 'typeParameter';
-                    break;
-                    
-                case 'variable.definition':
-                    type = 'variable';
-                    modifiers = ['definition'];
-                    break;
-                    
-                case 'variable':
-                    type = 'variable';
-                    break;
-                    
-                case 'parameter':
-                    type = 'parameter';
-                    break;
-                    
-                case 'property':
-                    type = 'property';
-                    break;
-                    
-                case 'constant':
-                    type = 'enumMember';
-                    modifiers = ['readonly'];
-                    break;
-                    
-                case 'namespace':
-                    type = 'namespace';
-                    break;
-                    
-                case 'attribute':
-                    type = 'macro';
-                    break;
-                    
-                case 'comment':
-                    type = 'comment';
-                    break;
-                    
-                case 'string':
-                case 'string.escape':
-                    type = 'string';
-                    break;
-                    
-                case 'number':
-                    type = 'number';
-                    break;
-                    
-                case 'boolean':
-                    type = 'keyword';
-                    break;
-                    
-                case 'operator':
-                    type = 'operator';
-                    break;
-                    
-                default:
-                    // Skip unknown captures
-                    continue;
+
+            const builder = new vscode.SemanticTokensBuilder(legend);
+        
+            let queryString = this.queryManager.getQuery('highlights');
+            if (!queryString) {
+                queryString = await this.queryManager.loadQuery('highlights');
             }
 
-            if (type) {
-                // VS Code requires semantic tokens to be single-line.
-                // Split multi-line tokens into per-line tokens.
-                this.pushToken(builder, document, node, type, modifiers);
-            }
-        }
+            if (token.isCancellationRequested) { return undefined; }
 
-        return builder.build();
+            // If no query string available, return empty tokens rather than crashing
+            if (!queryString) {
+                console.warn('Kanagawa: No highlights query available');
+                return builder.build();
+            }
+
+            const captures = this.service.query(tree.rootNode, queryString);
+
+            for (const capture of captures) {
+                if (token.isCancellationRequested) { return undefined; }
+            
+                const node = capture.node;
+                let type: string | undefined;
+                let modifiers: string[] = [];
+            
+                switch (capture.name) {
+                    case 'keyword':
+                        type = 'keyword';
+                        break;
+                    
+                    case 'function.definition':
+                        type = 'function';
+                        modifiers = ['definition'];
+                        break;
+                    
+                    case 'function.call':
+                        type = 'function';
+                        break;
+                    
+                    case 'function.builtin':
+                        type = 'function';
+                        modifiers = ['defaultLibrary'];
+                        break;
+                    
+                    case 'type.definition':
+                        type = 'class';
+                        modifiers = ['definition'];
+                        break;
+                    
+                    case 'type':
+                        type = 'type';
+                        break;
+                    
+                    case 'type.parameter':
+                        type = 'typeParameter';
+                        break;
+                    
+                    case 'variable.definition':
+                        type = 'variable';
+                        modifiers = ['definition'];
+                        break;
+                    
+                    case 'variable':
+                        type = 'variable';
+                        break;
+                    
+                    case 'parameter':
+                        type = 'parameter';
+                        break;
+                    
+                    case 'property':
+                        type = 'property';
+                        break;
+                    
+                    case 'constant':
+                        type = 'enumMember';
+                        modifiers = ['readonly'];
+                        break;
+                    
+                    case 'namespace':
+                        type = 'namespace';
+                        break;
+                    
+                    case 'attribute':
+                        type = 'macro';
+                        break;
+                    
+                    case 'comment':
+                        type = 'comment';
+                        break;
+                    
+                    case 'string':
+                    case 'string.escape':
+                        type = 'string';
+                        break;
+                    
+                    case 'number':
+                        type = 'number';
+                        break;
+                    
+                    case 'boolean':
+                        type = 'keyword';
+                        break;
+                    
+                    case 'operator':
+                        type = 'operator';
+                        break;
+                    
+                    default:
+                        // Skip unknown captures
+                        continue;
+                }
+
+                if (type) {
+                    // VS Code requires semantic tokens to be single-line.
+                    // Split multi-line tokens into per-line tokens.
+                    try {
+                        this.pushToken(builder, document, node, type, modifiers);
+                    } catch (pushError) {
+                        // Log but don't fail the entire provider on individual token errors
+                        console.warn('Kanagawa: Failed to push semantic token:', pushError);
+                    }
+                }
+            }
+
+            // Record success for health monitoring
+            healthMonitor.recordSuccess('semantic_tokens');
+            return builder.build();
+        } catch (error) {
+            // Comprehensive error handling to prevent provider crashes
+            console.error('Kanagawa: Semantic tokens provider error:', error);
+            healthMonitor.recordFailure('semantic_tokens', 
+                error instanceof Error ? error.message : String(error));
+            return undefined;
         } finally {
             endTiming();
         }

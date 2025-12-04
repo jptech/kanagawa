@@ -19,6 +19,7 @@ import { KeyedDebouncer } from './utils/debounce';
 import { perfLogger, PerfLogLevel } from './utils/perfLogger';
 import { registerDependencyGraphCommands } from './views/dependencyGraph';
 import { IndexStatusBar } from './views/statusBar';
+import { healthMonitor } from './service/healthMonitor';
 
 export async function activate(context: vscode.ExtensionContext) {
     console.log('Kanagawa "LSP-Lite" is activating...');
@@ -26,6 +27,10 @@ export async function activate(context: vscode.ExtensionContext) {
     try {
         // Initialize performance logger (off by default)
         perfLogger.init(context);
+        
+        // Start health monitoring
+        healthMonitor.start();
+        context.subscriptions.push(healthMonitor);
 
         const service = new TreeSitterService(context);
         const initSuccess = await service.init();
@@ -179,6 +184,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 // Incremental parsing is still used for non-debounced scenarios.
                 
                 // Debounce parsing and diagnostics to avoid excessive processing during rapid typing
+                // The debouncer handles async callbacks safely with proper error catching
                 parseDebouncer.debounce(uri, async () => {
                     // Verify document is still open (it could have been closed during the delay)
                     if (!event.document.isClosed) {
@@ -195,20 +201,26 @@ export async function activate(context: vscode.ExtensionContext) {
         }),
 
         // Document open handler - parse immediately and ensure file is indexed
+        // Wrapped in try/catch to prevent crashes from affecting the extension
         vscode.workspace.onDidOpenTextDocument(async (doc: vscode.TextDocument) => {
             if (doc.languageId === 'kanagawa') {
-                console.log('Kanagawa: Document opened:', doc.uri.toString());
-                await service.parse(doc);
-                await diagnosticsProvider.updateDiagnostics(doc);
-                
-                // Signal semantic tokens refresh after initial parse
-                semanticTokensProvider.notifyTokensChanged();
-                
-                // Priority index: ensure this file is indexed for hover/go-to-def
-                // This runs in background and doesn't block the document opening
-                indexer.ensureFileIndexed(doc.uri).catch((err) => {
-                    console.error('Kanagawa: Failed to index opened file:', err);
-                });
+                try {
+                    console.log('Kanagawa: Document opened:', doc.uri.toString());
+                    await service.parse(doc);
+                    await diagnosticsProvider.updateDiagnostics(doc);
+                    
+                    // Signal semantic tokens refresh after initial parse
+                    semanticTokensProvider.notifyTokensChanged();
+                    
+                    // Priority index: ensure this file is indexed for hover/go-to-def
+                    // This runs in background and doesn't block the document opening
+                    indexer.ensureFileIndexed(doc.uri).catch((err) => {
+                        console.error('Kanagawa: Failed to index opened file:', err);
+                    });
+                } catch (err) {
+                    // Don't let errors in parsing/diagnostics crash the extension
+                    console.error('Kanagawa: Error handling document open:', err);
+                }
             }
         }),
 
@@ -221,8 +233,8 @@ export async function activate(context: vscode.ExtensionContext) {
                 // Cancel any pending debounced operations for this document
                 parseDebouncer.cancel(uri);
                 
-                // Remove cached parse tree
-                service.remove(doc);
+                // Remove cached parse tree (use sync version since we can't await in event handler)
+                service.removeSync(doc);
                 
                 // Clear diagnostics for closed document
                 diagnosticsProvider.clearDiagnostics(doc);
@@ -236,10 +248,13 @@ export async function activate(context: vscode.ExtensionContext) {
         }),
 
         // Document save handler - update the workspace index
+        // Error handling ensures index update failures don't crash the extension
         vscode.workspace.onDidSaveTextDocument((doc: vscode.TextDocument) => {
             if (doc.languageId === 'kanagawa') {
                 console.log('Kanagawa: Document saved, updating index:', doc.uri.toString());
-                indexer.updateFile(doc.uri);
+                indexer.updateFile(doc.uri).catch((err) => {
+                    console.error('Kanagawa: Failed to update index on save:', err);
+                });
             }
         }),
         
@@ -256,10 +271,14 @@ export async function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // Parse currently active editor
+    // Parse currently active editor - wrap in try/catch for robustness
     if (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document.languageId === 'kanagawa') {
-        await service.parse(vscode.window.activeTextEditor.document);
-        await diagnosticsProvider.updateDiagnostics(vscode.window.activeTextEditor.document);
+        try {
+            await service.parse(vscode.window.activeTextEditor.document);
+            await diagnosticsProvider.updateDiagnostics(vscode.window.activeTextEditor.document);
+        } catch (err) {
+            console.error('Kanagawa: Failed to parse active editor on activation:', err);
+        }
     }
 
     // Debug Command
@@ -517,8 +536,34 @@ export async function activate(context: vscode.ExtensionContext) {
             diagOutput.appendLine('  • "Developer: Reload Window" - Full VS Code reload');
             diagOutput.appendLine('');
             
+            // Health Monitor Statistics
+            diagOutput.appendLine('▶ Provider Health Statistics:');
+            const healthStats = healthMonitor.getStats();
+            let unhealthyCount = 0;
+            for (const [operation, opStats] of healthStats) {
+                const total = opStats.successes + opStats.failures;
+                if (total === 0) {
+                    diagOutput.appendLine(`    ${operation}: No activity`);
+                } else {
+                    const failureRate = total > 0 ? Math.round((opStats.failures / total) * 100) : 0;
+                    const status = opStats.consecutiveFailures >= 5 
+                        ? '⚠️ UNHEALTHY' 
+                        : failureRate > 50 
+                            ? '⚠️ DEGRADED' 
+                            : '✓ OK';
+                    if (opStats.consecutiveFailures >= 5 || failureRate > 50) {
+                        unhealthyCount++;
+                    }
+                    diagOutput.appendLine(`    ${operation}: ${status} (${opStats.successes}/${total} success, ${opStats.consecutiveFailures} consecutive failures)`);
+                    if (opStats.lastError) {
+                        diagOutput.appendLine(`        Last error: ${opStats.lastError.substring(0, 100)}`);
+                    }
+                }
+            }
+            diagOutput.appendLine('');
+            
             // Overall health
-            const isHealthy = treeSitterOk && stats.totalSymbols > 0;
+            const isHealthy = treeSitterOk && stats.totalSymbols > 0 && unhealthyCount === 0;
             diagOutput.appendLine('═══════════════════════════════════════════════════════════');
             diagOutput.appendLine(`Overall Status: ${isHealthy ? '✓ HEALTHY' : '⚠ ISSUES DETECTED'}`);
             diagOutput.appendLine('═══════════════════════════════════════════════════════════');
@@ -544,6 +589,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     progress.report({ message: 'Clearing caches...' });
                     indexer.clearIndex();
                     perfLogger.clearStats();
+                    healthMonitor.reset();
                     
                     progress.report({ message: 'Reinitializing Tree-sitter...' });
                     await service.init();

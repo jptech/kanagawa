@@ -7,6 +7,7 @@ import { extractModuleFromQualified } from '../utils/importUtils';
 import { getNodeText, resolveToIdentifier } from '../utils/nodeUtils';
 import { perfLogger, PerfOps } from '../utils/perfLogger';
 import { OPERATION_TIMEOUTS, withTimeout } from '../utils/timeout';
+import { healthMonitor } from '../service/healthMonitor';
 
 /**
  * Result of resolving hover candidates with confidence scoring.
@@ -119,6 +120,7 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
                 const markdowns = await this.buildHoverContent(document, resolution);
 
                 if (markdowns.length > 0) {
+                    healthMonitor.recordSuccess('hover');
                     return new vscode.Hover(markdowns, hoverRange);
                 }
 
@@ -127,6 +129,8 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
         } catch (error) {
             // Log error but don't crash the provider
             console.error('Kanagawa: Hover provider error:', error);
+            healthMonitor.recordFailure('hover', 
+                error instanceof Error ? error.message : String(error));
             return undefined;
         }
     }

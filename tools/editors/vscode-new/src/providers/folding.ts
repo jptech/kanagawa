@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { TreeSitterService } from '../service/treeSitter';
+import { healthMonitor } from '../service/healthMonitor';
 
 export class KanagawaFoldingRangeProvider implements vscode.FoldingRangeProvider {
     constructor(private service: TreeSitterService) {}
@@ -9,8 +10,9 @@ export class KanagawaFoldingRangeProvider implements vscode.FoldingRangeProvider
         _context: vscode.FoldingContext,
         _token: vscode.CancellationToken
     ): Promise<vscode.FoldingRange[]> {
-        const tree = this.service.getTree(document) ?? await this.service.parse(document);
-        if (!tree) { return []; }
+        try {
+            const tree = this.service.getTree(document) ?? await this.service.parse(document);
+            if (!tree) { return []; }
 
         const ranges: vscode.FoldingRange[] = [];
         
@@ -76,9 +78,15 @@ export class KanagawaFoldingRangeProvider implements vscode.FoldingRangeProvider
         }
         
         // Also fold consecutive import statements as a group
-        this.addImportFolding(tree.rootNode, ranges, addedRanges);
-        
-        return ranges;
+            this.addImportFolding(tree.rootNode, ranges, addedRanges);
+            
+            healthMonitor.recordSuccess('folding');
+            return ranges;
+        } catch (error) {
+            healthMonitor.recordFailure('folding', error);
+            console.error('[FoldingRangeProvider] Error:', error);
+            return [];
+        }
     }
     
     /**
