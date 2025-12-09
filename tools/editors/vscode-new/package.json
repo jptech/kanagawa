@@ -2,7 +2,7 @@
   "name": "kanagawa-vscode",
   "displayName": "Kanagawa Language Support",
   "description": "IDE features for the Kanagawa hardware description language: navigation, completion, hover, and more.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "microsoft",
   "license": "MIT",
   "repository": {

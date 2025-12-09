@@ -200,27 +200,35 @@ export async function activate(context: vscode.ExtensionContext) {
             }
         }),
 
-        // Document open handler - parse immediately and ensure file is indexed
-        // Wrapped in try/catch to prevent crashes from affecting the extension
-        vscode.workspace.onDidOpenTextDocument(async (doc: vscode.TextDocument) => {
+        // Document open handler - parse asynchronously and ensure file is indexed
+        // Uses setImmediate pattern to avoid blocking the event loop during rapid file opens
+        vscode.workspace.onDidOpenTextDocument((doc: vscode.TextDocument) => {
             if (doc.languageId === 'kanagawa') {
-                try {
-                    console.log('Kanagawa: Document opened:', doc.uri.toString());
-                    await service.parse(doc);
-                    await diagnosticsProvider.updateDiagnostics(doc);
-                    
-                    // Signal semantic tokens refresh after initial parse
-                    semanticTokensProvider.notifyTokensChanged();
-                    
-                    // Priority index: ensure this file is indexed for hover/go-to-def
-                    // This runs in background and doesn't block the document opening
-                    indexer.ensureFileIndexed(doc.uri).catch((err) => {
-                        console.error('Kanagawa: Failed to index opened file:', err);
-                    });
-                } catch (err) {
-                    // Don't let errors in parsing/diagnostics crash the extension
-                    console.error('Kanagawa: Error handling document open:', err);
-                }
+                console.log('Kanagawa: Document opened:', doc.uri.toString());
+                
+                // Defer parsing to avoid blocking the event loop
+                // This is especially important during activation when multiple files may be open
+                setTimeout(async () => {
+                    try {
+                        // Verify document is still open (could have been closed during the yield)
+                        if (!doc.isClosed) {
+                            await service.parse(doc);
+                            await diagnosticsProvider.updateDiagnostics(doc);
+                            
+                            // Signal semantic tokens refresh after initial parse
+                            semanticTokensProvider.notifyTokensChanged();
+                            
+                            // Priority index: ensure this file is indexed for hover/go-to-def
+                            // This runs in background and doesn't block the document opening
+                            indexer.ensureFileIndexed(doc.uri).catch((err) => {
+                                console.error('Kanagawa: Failed to index opened file:', err);
+                            });
+                        }
+                    } catch (err) {
+                        // Don't let errors in parsing/diagnostics crash the extension
+                        console.error('Kanagawa: Error handling document open:', err);
+                    }
+                }, 0);
             }
         }),
 
@@ -271,14 +279,21 @@ export async function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // Parse currently active editor - wrap in try/catch for robustness
+    // Parse currently active editor - run asynchronously to avoid blocking activation
+    // The extension is usable immediately; parsing improves features as it completes
     if (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document.languageId === 'kanagawa') {
-        try {
-            await service.parse(vscode.window.activeTextEditor.document);
-            await diagnosticsProvider.updateDiagnostics(vscode.window.activeTextEditor.document);
-        } catch (err) {
-            console.error('Kanagawa: Failed to parse active editor on activation:', err);
-        }
+        // Use setImmediate-style pattern to yield control back to VS Code
+        setTimeout(async () => {
+            try {
+                const doc = vscode.window.activeTextEditor?.document;
+                if (doc && doc.languageId === 'kanagawa') {
+                    await service.parse(doc);
+                    await diagnosticsProvider.updateDiagnostics(doc);
+                }
+            } catch (err) {
+                console.error('Kanagawa: Failed to parse active editor on activation:', err);
+            }
+        }, 0);
     }
 
     // Debug Command

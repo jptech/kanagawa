@@ -12,31 +12,88 @@ interface QueryCache {
 }
 
 /**
+ * Error thrown when mutex acquisition times out.
+ */
+class MutexTimeoutError extends Error {
+    constructor(timeoutMs: number) {
+        super(`Mutex acquisition timed out after ${timeoutMs}ms`);
+        this.name = 'MutexTimeoutError';
+    }
+}
+
+/** Default timeout for mutex acquisition (5 seconds) */
+const DEFAULT_MUTEX_TIMEOUT_MS = 5000;
+
+/**
  * Simple mutex for serializing async operations.
  * Tree-sitter WASM is not thread-safe and cannot handle concurrent parsing.
+ * 
+ * Features:
+ * - Timeout protection to prevent indefinite blocking
+ * - Queue tracking for diagnostics
  */
 class AsyncMutex {
     private locked = false;
-    private waiting: (() => void)[] = [];
+    private waiting: { resolve: () => void; reject: (error: Error) => void; timeoutId?: NodeJS.Timeout }[] = [];
 
-    async acquire(): Promise<void> {
+    /**
+     * Acquires the mutex lock.
+     * 
+     * @param timeoutMs Maximum time to wait for lock acquisition (default: 5000ms)
+     * @throws MutexTimeoutError if timeout is exceeded
+     */
+    async acquire(timeoutMs: number = DEFAULT_MUTEX_TIMEOUT_MS): Promise<void> {
         if (!this.locked) {
             this.locked = true;
             return;
         }
 
-        return new Promise<void>(resolve => {
-            this.waiting.push(resolve);
+        return new Promise<void>((resolve, reject) => {
+            const entry: { resolve: () => void; reject: (error: Error) => void; timeoutId?: NodeJS.Timeout } = {
+                resolve,
+                reject
+            };
+            
+            // Set up timeout
+            entry.timeoutId = setTimeout(() => {
+                // Remove from waiting queue
+                const index = this.waiting.indexOf(entry);
+                if (index !== -1) {
+                    this.waiting.splice(index, 1);
+                }
+                reject(new MutexTimeoutError(timeoutMs));
+            }, timeoutMs);
+            
+            this.waiting.push(entry);
         });
     }
 
     release(): void {
         if (this.waiting.length > 0) {
             const next = this.waiting.shift()!;
-            next();
+            // Clear the timeout since we're granting the lock
+            if (next.timeoutId) {
+                clearTimeout(next.timeoutId);
+            }
+            next.resolve();
         } else {
             this.locked = false;
         }
+    }
+    
+    /**
+     * Returns the number of operations waiting for the lock.
+     * Useful for diagnostics.
+     */
+    getQueueLength(): number {
+        return this.waiting.length;
+    }
+    
+    /**
+     * Returns true if the mutex is currently locked.
+     */
+    isLocked(): boolean {
+        return this.locked;
     }
 }
 
@@ -153,7 +210,18 @@ export class TreeSitterService {
         const endTiming = perfLogger.start(opName, uri);
 
         // Serialize parsing operations - Tree-sitter WASM cannot handle concurrent parsing
-        await this.parseMutex.acquire();
+        // Use timeout to prevent indefinite blocking if a parse operation hangs
+        try {
+            await this.parseMutex.acquire();
+        } catch (error) {
+            if (error instanceof Error && error.name === 'MutexTimeoutError') {
+                console.error(`Kanagawa: Parse mutex acquisition timed out for ${uri}. Another parse operation may be hanging.`);
+                endTiming();
+                // Return cached tree if available, otherwise undefined
+                return this.trees.get(uri);
+            }
+            throw error;
+        }
         
         const previous = this.trees.get(uri);
 

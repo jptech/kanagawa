@@ -3,7 +3,8 @@ import * as Parser from 'web-tree-sitter';
 import { WorkspaceIndexer, SymbolInfo } from '../service/indexer';
 import { TreeSitterService } from '../service/treeSitter';
 import { extractModuleFromQualified } from '../utils/importUtils';
-import { OPERATION_TIMEOUTS, withTimeout } from '../utils/timeout';
+import { OPERATION_TIMEOUTS, withTimeout, withProviderGuard } from '../utils/timeout';
+import { healthMonitor } from '../service/healthMonitor';
 
 // Kanagawa language keywords (from overview.md and grammar.js)
 const KEYWORDS = [
@@ -54,46 +55,52 @@ export class KanagawaCompletionItemProvider implements vscode.CompletionItemProv
         token: vscode.CancellationToken,
         _context: vscode.CompletionContext
     ): Promise<vscode.CompletionItem[] | vscode.CompletionList | undefined> {
-        try {
-            void _context;
-            
-            if (token.isCancellationRequested) { return undefined; }
-            
-            const tree = this.treeService.getTree(document) ?? await this.treeService.parse(document);
-            if (!tree) { return undefined; }
+        // Wrap entire completion operation with provider guard for timeout + cancellation protection
+        return withProviderGuard(
+            {
+                operation: 'completion',
+                timeoutMs: OPERATION_TIMEOUTS.COMPLETION,
+                token,
+                onSuccess: () => healthMonitor.recordSuccess('completion'),
+                onFailure: (error) => healthMonitor.recordFailure('completion',
+                    error instanceof Error ? error.message : String(error))
+            },
+            async () => {
+                void _context;
+                
+                const tree = this.treeService.getTree(document) ?? await this.treeService.parse(document);
+                if (!tree) { return undefined; }
 
-            if (token.isCancellationRequested) { return undefined; }
+                if (token.isCancellationRequested) { return undefined; }
 
-            const lineText = document.lineAt(position.line).text;
-            const prefix = lineText.slice(0, position.character);
+                const lineText = document.lineAt(position.line).text;
+                const prefix = lineText.slice(0, position.character);
 
-            // Member completions (after '.')
-            if (prefix.endsWith('.')) {
-                const memberItems = await this.provideMemberCompletions(document, position, tree, token);
-                if (memberItems.length > 0) {
-                    return new vscode.CompletionList(memberItems, true);
+                // Member completions (after '.')
+                if (prefix.endsWith('.')) {
+                    const memberItems = await this.provideMemberCompletions(document, position, tree, token);
+                    if (memberItems.length > 0) {
+                        return new vscode.CompletionList(memberItems, true);
+                    }
                 }
-            }
 
-            // Static member completions (after '::')
-            if (prefix.endsWith('::')) {
-                const staticItems = await this.provideStaticMemberCompletions(document, position, tree, token, prefix);
-                if (staticItems.length > 0) {
-                    return new vscode.CompletionList(staticItems, true);
+                // Static member completions (after '::')
+                if (prefix.endsWith('::')) {
+                    const staticItems = await this.provideStaticMemberCompletions(document, position, tree, token, prefix);
+                    if (staticItems.length > 0) {
+                        return new vscode.CompletionList(staticItems, true);
+                    }
                 }
+
+                if (token.isCancellationRequested) { return undefined; }
+
+                // General completions with tiered sorting
+                const currentPrefix = this.extractWordPrefix(lineText, position.character);
+                const items = await this.provideGeneralCompletions(document, position, tree, currentPrefix);
+
+                return new vscode.CompletionList(items, false);
             }
-
-            if (token.isCancellationRequested) { return undefined; }
-
-            // General completions with tiered sorting
-            const currentPrefix = this.extractWordPrefix(lineText, position.character);
-            const items = await this.provideGeneralCompletions(document, position, tree, currentPrefix);
-
-            return new vscode.CompletionList(items, false);
-        } catch (error) {
-            console.error('Kanagawa: Completion provider error:', error);
-            return undefined;
-        }
+        );
     }
 
     /**

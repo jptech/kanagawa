@@ -223,6 +223,151 @@ export async function safeProviderOperation<T>(
 }
 
 /**
+ * VS Code CancellationToken interface for type checking.
+ */
+interface VSCodeCancellationToken {
+    isCancellationRequested: boolean;
+    onCancellationRequested: (listener: () => void) => { dispose(): void };
+}
+
+/**
+ * Provider guard options for fine-grained control.
+ */
+export interface ProviderGuardOptions {
+    /** Operation name for logging */
+    operation: string;
+    /** Timeout in milliseconds */
+    timeoutMs: number;
+    /** VS Code cancellation token */
+    token: VSCodeCancellationToken;
+    /** Optional circuit breaker for adaptive failure handling */
+    circuitBreaker?: CircuitBreaker;
+    /** Callback on success (for health monitoring) */
+    onSuccess?: () => void;
+    /** Callback on failure (for health monitoring) */
+    onFailure?: (error: unknown) => void;
+}
+
+/**
+ * Comprehensive provider guard that wraps provider operations with:
+ * - Overall timeout protection
+ * - Cancellation token checking
+ * - Error boundary with logging
+ * - Optional circuit breaker integration
+ * - Health monitoring callbacks
+ * 
+ * This is the recommended wrapper for ALL provider entry points to prevent
+ * any single operation from hanging the extension.
+ * 
+ * @example
+ * ```typescript
+ * async provideHover(doc, pos, token): Promise<Hover | undefined> {
+ *     return withProviderGuard(
+ *         {
+ *             operation: 'hover',
+ *             timeoutMs: OPERATION_TIMEOUTS.HOVER,
+ *             token,
+ *             onSuccess: () => healthMonitor.recordSuccess('hover'),
+ *             onFailure: (e) => healthMonitor.recordFailure('hover', e)
+ *         },
+ *         async () => {
+ *             // ... actual hover logic ...
+ *         }
+ *     );
+ * }
+ * ```
+ */
+export async function withProviderGuard<T>(
+    options: ProviderGuardOptions,
+    fn: () => Promise<T>
+): Promise<T | undefined> {
+    const { operation, timeoutMs, token, circuitBreaker, onSuccess, onFailure } = options;
+    
+    // Check cancellation before starting
+    if (token.isCancellationRequested) {
+        return undefined;
+    }
+    
+    // Check circuit breaker if provided
+    if (circuitBreaker && !circuitBreaker.shouldAttempt()) {
+        console.warn(`Kanagawa: ${operation} skipped - circuit breaker open`);
+        return undefined;
+    }
+    
+    let timeoutId: NodeJS.Timeout | undefined;
+    let cancelled = false;
+    let completed = false;
+    
+    // Create a promise that resolves on timeout
+    const timeoutPromise = new Promise<T | undefined>((resolve) => {
+        timeoutId = setTimeout(() => {
+            if (!completed && !cancelled) {
+                console.warn(`Kanagawa: ${operation} timed out after ${timeoutMs}ms`);
+                onFailure?.(new TimeoutError(operation, timeoutMs));
+                circuitBreaker?.recordFailure();
+                resolve(undefined);
+            }
+        }, timeoutMs);
+    });
+    
+    // Create a promise that resolves on cancellation
+    const cancellationPromise = new Promise<T | undefined>((resolve) => {
+        const disposable = token.onCancellationRequested(() => {
+            cancelled = true;
+            disposable.dispose();
+            resolve(undefined);
+        });
+        
+        // Also poll for cancellation (in case event doesn't fire)
+        const pollInterval = setInterval(() => {
+            if (token.isCancellationRequested && !completed) {
+                cancelled = true;
+                clearInterval(pollInterval);
+                resolve(undefined);
+            }
+        }, 100);
+        
+        // Clean up poll interval after operation completes
+        Promise.race([timeoutPromise]).finally(() => clearInterval(pollInterval));
+    });
+    
+    try {
+        const result = await Promise.race([
+            fn().then(r => {
+                completed = true;
+                return r;
+            }),
+            timeoutPromise,
+            cancellationPromise
+        ]);
+        
+        // Only record success if we actually completed (not timeout/cancel)
+        if (completed && result !== undefined) {
+            onSuccess?.();
+            circuitBreaker?.recordSuccess();
+        }
+        
+        return result;
+    } catch (error) {
+        completed = true;
+        
+        // Don't log cancellation as errors
+        if (cancelled || (error instanceof Error && error.name === 'CancellationError')) {
+            return undefined;
+        }
+        
+        console.error(`Kanagawa: ${operation} failed:`, error);
+        onFailure?.(error);
+        circuitBreaker?.recordFailure();
+        return undefined;
+    } finally {
+        if (timeoutId) {
+            clearTimeout(timeoutId);
+        }
+    }
+}
+
+/**
  * Circuit breaker state for tracking operation failures.
  */
 interface CircuitBreakerState {

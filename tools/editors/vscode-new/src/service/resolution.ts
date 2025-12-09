@@ -16,6 +16,7 @@ import * as vscode from 'vscode';
 import * as Parser from 'web-tree-sitter';
 import { WorkspaceIndexer, SymbolInfo, SymbolContextHint } from './indexer';
 import { extractModuleFromQualified } from '../utils/importUtils';
+import { isModuleOrImportNode } from '../utils/nodeUtils';
 
 /**
  * Resolution confidence levels, from most to least certain.
@@ -81,6 +82,20 @@ export class SymbolResolutionService {
     ): Promise<ResolutionResult> {
         const { document, identifier } = request;
         const name = identifier.text;
+        
+        // OPTIMIZATION: Skip expensive resolution for identifiers inside import/module statements.
+        // Import paths are module references, not symbol lookups. Trying to resolve them
+        // as symbols wastes time and can cause hangs on malformed import expressions.
+        // Return early with a 'none' result to signal "no symbol to resolve here".
+        if (isModuleOrImportNode(identifier)) {
+            return {
+                primary: undefined,
+                confidence: 'none',
+                alternatives: [],
+                inaccessible: []
+            };
+        }
+        
         const scopePath = this.indexer.getScopePathForNode(identifier);
 
         const accessible: SymbolInfo[] = [];

@@ -3,7 +3,7 @@ import * as Parser from 'web-tree-sitter';
 import { TreeSitterService } from '../service/treeSitter';
 import { WorkspaceIndexer, SymbolInfo, SymbolContextHint } from '../service/indexer';
 import { findIdentifierNode, nodeToRange, resolveToIdentifier } from '../utils/nodeUtils';
-import { OPERATION_TIMEOUTS, withTimeout } from '../utils/timeout';
+import { OPERATION_TIMEOUTS, withTimeout, withProviderGuard } from '../utils/timeout';
 import { healthMonitor } from '../service/healthMonitor';
 
 interface ReferenceTarget {
@@ -98,92 +98,95 @@ export class KanagawaReferencesProvider implements vscode.ReferenceProvider {
         context: vscode.ReferenceContext,
         token: vscode.CancellationToken
     ): Promise<vscode.Location[] | undefined> {
-        try {
-            const tree = this.service.getTree(document) ?? await this.service.parse(document);
-            if (!tree) { return undefined; }
+        // Wrap entire references operation with provider guard for timeout + cancellation protection
+        return withProviderGuard(
+            {
+                operation: 'references',
+                timeoutMs: OPERATION_TIMEOUTS.REFERENCES,
+                token,
+                onSuccess: () => healthMonitor.recordSuccess('references'),
+                onFailure: (error) => healthMonitor.recordFailure('references', error)
+            },
+            async () => {
+                const tree = this.service.getTree(document) ?? await this.service.parse(document);
+                if (!tree) { return undefined; }
 
-            const identifier = findIdentifierNode(tree, position);
-            if (!identifier) { return undefined; }
+                const identifier = findIdentifierNode(tree, position);
+                if (!identifier) { return undefined; }
 
-            const targets = await this.resolveTargets(document, identifier);
-            if (!targets.length) { 
-                // Fall back to simple text search for non-indexed symbols
-                const result = await this.findReferencesWorkspaceWide(identifier.text, context.includeDeclaration, token);
-                healthMonitor.recordSuccess('references');
-                return result;
-            }
+                const targets = await this.resolveTargets(document, identifier);
+                if (!targets.length) { 
+                    // Fall back to simple text search for non-indexed symbols
+                    return await this.findReferencesWorkspaceWide(identifier.text, context.includeDeclaration, token);
+                }
 
-        const includeDeclaration = context.includeDeclaration ?? false;
-        const results: vscode.Location[] = [];
-        
-        // Include declarations
-        if (includeDeclaration) {
-            for (const target of targets) {
-                results.push(new vscode.Location(target.symbol.uri, target.symbol.range));
-            }
-        }
-
-        // Use reverse index to find only files containing this symbol name
-        // This is O(relevant_files) instead of O(all_files)
-        const symbolName = identifier.text;
-        const candidateUriStrings = this.indexer.getUrisContainingSymbol(symbolName);
-        
-        // Also check all indexed URIs if the symbol wasn't in the reverse index
-        // (covers cases where the identifier appears but isn't a definition)
-        const allIndexedUris = this.indexer.getIndexedUris();
-        
-        // Start with files known to have this symbol, then check others
-        const priorityUris: vscode.Uri[] = [];
-        const otherUris: vscode.Uri[] = [];
-        
-        for (const uri of allIndexedUris) {
-            if (candidateUriStrings.has(uri.toString())) {
-                priorityUris.push(uri);
-            } else {
-                otherUris.push(uri);
-            }
-        }
-        
-        // Search priority URIs first (likely to have references)
-        for (const uri of priorityUris) {
-            if (token.isCancellationRequested) { break; }
-            
-            try {
-                const doc = await vscode.workspace.openTextDocument(uri);
-                const treeForDoc = this.service.getTree(doc) ?? await this.service.parse(doc);
-                if (!treeForDoc) { continue; }
+                const includeDeclaration = context.includeDeclaration ?? false;
+                const results: vscode.Location[] = [];
                 
-                const references = await this.collectReferencesInDocument(doc, treeForDoc, targets, token);
-                results.push(...references);
-            } catch (e) {
-                // Ignore files that can't be opened
-            }
-        }
-        
-        // Search other URIs (may have usages even if not in reverse index)
-        for (const uri of otherUris) {
-            if (token.isCancellationRequested) { break; }
-            
-            try {
-                const doc = await vscode.workspace.openTextDocument(uri);
-                const treeForDoc = this.service.getTree(doc) ?? await this.service.parse(doc);
-                if (!treeForDoc) { continue; }
-                
-                const references = await this.collectReferencesInDocument(doc, treeForDoc, targets, token);
-                results.push(...references);
-            } catch (e) {
-                // Ignore files that can't be opened
-            }
-        }
+                // Include declarations
+                if (includeDeclaration) {
+                    for (const target of targets) {
+                        results.push(new vscode.Location(target.symbol.uri, target.symbol.range));
+                    }
+                }
 
-        // Deduplicate results
-            healthMonitor.recordSuccess('references');
-            return this.deduplicateLocations(results);
-        } catch (error) {
-            healthMonitor.recordFailure('references', error);
-            console.error('[ReferencesProvider] Error:', error);
-            return undefined;
-        }
+                // Use reverse index to find only files containing this symbol name
+                // This is O(relevant_files) instead of O(all_files)
+                const symbolName = identifier.text;
+                const candidateUriStrings = this.indexer.getUrisContainingSymbol(symbolName);
+                
+                // Also check all indexed URIs if the symbol wasn't in the reverse index
+                // (covers cases where the identifier appears but isn't a definition)
+                const allIndexedUris = this.indexer.getIndexedUris();
+                
+                // Start with files known to have this symbol, then check others
+                const priorityUris: vscode.Uri[] = [];
+                const otherUris: vscode.Uri[] = [];
+                
+                for (const uri of allIndexedUris) {
+                    if (candidateUriStrings.has(uri.toString())) {
+                        priorityUris.push(uri);
+                    } else {
+                        otherUris.push(uri);
+                    }
+                }
+                
+                // Search priority URIs first (likely to have references)
+                for (const uri of priorityUris) {
+                    if (token.isCancellationRequested) { break; }
+                    
+                    try {
+                        const doc = await vscode.workspace.openTextDocument(uri);
+                        const treeForDoc = this.service.getTree(doc) ?? await this.service.parse(doc);
+                        if (!treeForDoc) { continue; }
+                        
+                        const references = await this.collectReferencesInDocument(doc, treeForDoc, targets, token);
+                        results.push(...references);
+                    } catch (e) {
+                        // Ignore files that can't be opened
+                    }
+                }
+                
+                // Search other URIs (may have usages even if not in reverse index)
+                for (const uri of otherUris) {
+                    if (token.isCancellationRequested) { break; }
+                    
+                    try {
+                        const doc = await vscode.workspace.openTextDocument(uri);
+                        const treeForDoc = this.service.getTree(doc) ?? await this.service.parse(doc);
+                        if (!treeForDoc) { continue; }
+                        
+                        const references = await this.collectReferencesInDocument(doc, treeForDoc, targets, token);
+                        results.push(...references);
+                    } catch (e) {
+                        // Ignore files that can't be opened
+                    }
+                }
+
+                // Deduplicate results
+                return this.deduplicateLocations(results);
+            }
+        );
     }
 
     /**

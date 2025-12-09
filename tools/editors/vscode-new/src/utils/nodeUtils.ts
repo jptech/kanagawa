@@ -7,13 +7,66 @@ import * as vscode from 'vscode';
 import * as Parser from 'web-tree-sitter';
 
 /**
+ * Checks if a syntax node is part of a module or import declaration.
+ * These are module path components, not resolvable symbols.
+ * 
+ * CRITICAL: This function is used to prevent expensive symbol resolution
+ * on module/import statements which can cause extension hangs.
+ * 
+ * @param node The syntax node to check
+ * @returns True if the node is in a module/import context
+ */
+export function isModuleOrImportNode(node: Parser.SyntaxNode | null): boolean {
+    if (!node) return false;
+    
+    const MAX_DEPTH = 15;
+    let current: Parser.SyntaxNode | null = node;
+    let depth = 0;
+    
+    while (current && depth < MAX_DEPTH) {
+        const nodeType = current.type;
+        
+        // Check for import or module declaration nodes AND their components
+        if (nodeType === 'import_decl' || 
+            nodeType === 'module_decl' ||
+            nodeType === 'module_name' ||
+            nodeType === 'module_identifier_part' ||  // Individual parts like 'shuffle' in 'shuffle.send_scheduler'
+            nodeType === 'module_exports' ||
+            nodeType === 'module_reference' ||
+            nodeType === 'module_diff') {
+            return true;
+        }
+        
+        // Early exit if we've hit a code boundary (definitely not in module/import)
+        if (nodeType === 'source_file' || 
+            nodeType === 'function_definition' ||
+            nodeType === 'function_template' ||
+            nodeType === 'class_body' ||
+            nodeType === 'struct_body' ||
+            nodeType === 'expression_statement' ||
+            nodeType === 'variable_decl' ||
+            nodeType === 'block' ||
+            nodeType === 'compound_statement') {
+            break;
+        }
+        
+        current = current.parent;
+        depth++;
+    }
+    
+    return false;
+}
+
+/**
  * Finds the identifier node at the given position in a parse tree.
  * Handles qualified identifiers and template instantiations by navigating
  * to the appropriate segment.
  * 
+ * Returns undefined for module/import paths to prevent expensive resolution.
+ * 
  * @param tree The parsed syntax tree
  * @param position The cursor position
- * @returns The identifier node at the position, or undefined if not found
+ * @returns The identifier node at the position, or undefined if not found or in module/import context
  * 
  * @example
  * // For "Foo::Bar" at the cursor on "Bar", returns the "Bar" identifier node
@@ -27,6 +80,12 @@ export function findIdentifierNode(
         row: position.line,
         column: position.character
     });
+    
+    // CRITICAL: Check for module/import nodes FIRST before any resolution.
+    // This prevents expensive operations when hovering on module declarations or imports.
+    if (isModuleOrImportNode(node)) {
+        return undefined;
+    }
 
     return resolveToIdentifier(node);
 }

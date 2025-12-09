@@ -3,8 +3,8 @@ import { TreeSitterService } from '../service/treeSitter';
 import { WorkspaceIndexer, SymbolInfo } from '../service/indexer';
 import { SymbolResolutionService } from '../service/resolution';
 import { perfLogger, PerfOps } from '../utils/perfLogger';
-import { resolveToIdentifier } from '../utils/nodeUtils';
-import { OPERATION_TIMEOUTS, withTimeout } from '../utils/timeout';
+import { resolveToIdentifier, isModuleOrImportNode } from '../utils/nodeUtils';
+import { OPERATION_TIMEOUTS, withTimeout, withProviderGuard } from '../utils/timeout';
 import { healthMonitor } from '../service/healthMonitor';
 
 /** Minimum time between definition lookups at the same position (ms) */
@@ -78,83 +78,99 @@ export class KanagawaDefinitionProvider implements vscode.DefinitionProvider {
     ): Promise<vscode.Definition | undefined> {
         const endTiming = perfLogger.start(PerfOps.DEFINITION, document.uri.toString());
         try {
-            if (token.isCancellationRequested) { return undefined; }
-            
-            // Check cache first to avoid expensive recomputation during rapid calls
-            const cacheKey = this.makeCacheKey(document, position);
-            const cached = this.getCached(cacheKey);
-            if (cached !== null) {
-                // Cache hit (even if result is undefined)
-                return cached;
-            }
-            
-            const tree = this.service.getTree(document) ?? await this.service.parse(document);
-            if (!tree) { return undefined; }
+            // Wrap entire definition operation with provider guard for timeout + cancellation protection
+            return await withProviderGuard(
+                {
+                    operation: 'definition',
+                    timeoutMs: OPERATION_TIMEOUTS.DEFINITION,
+                    token,
+                    onSuccess: () => healthMonitor.recordSuccess('definition'),
+                    onFailure: (error) => healthMonitor.recordFailure('definition',
+                        error instanceof Error ? error.message : String(error))
+                },
+                async () => {
+                    // Check cache first to avoid expensive recomputation during rapid calls
+                    const cacheKey = this.makeCacheKey(document, position);
+                    const cached = this.getCached(cacheKey);
+                    if (cached !== null) {
+                        // Cache hit (even if result is undefined)
+                        return cached;
+                    }
+                    
+                    const tree = this.service.getTree(document) ?? await this.service.parse(document);
+                    if (!tree) { return undefined; }
 
-            if (token.isCancellationRequested) { return undefined; }
+                    if (token.isCancellationRequested) { return undefined; }
 
-            const node = tree.rootNode.descendantForPosition({
-                row: position.line,
-                column: position.character
-            });
+                    const node = tree.rootNode.descendantForPosition({
+                        row: position.line,
+                        column: position.character
+                    });
+                    
+                    // CRITICAL: Check raw node FIRST before any processing.
+                    // If on a module/import-related node, bail immediately to prevent hangs.
+                    if (isModuleOrImportNode(node)) {
+                        this.setCache(cacheKey, undefined);
+                        return undefined;
+                    }
 
-            // Use shared utility for consistent identifier resolution
-            const identifier = resolveToIdentifier(node);
-            if (!identifier) {
-                this.setCache(cacheKey, undefined);
-                return undefined;
-            }
-            
-            if (token.isCancellationRequested) { return undefined; }
+                    // Use shared utility for consistent identifier resolution
+                    const identifier = resolveToIdentifier(node);
+                    if (!identifier) {
+                        this.setCache(cacheKey, undefined);
+                        return undefined;
+                    }
+                    
+                    // Double-check the resolved identifier too (belt and suspenders)
+                    if (isModuleOrImportNode(identifier)) {
+                        this.setCache(cacheKey, undefined);
+                        return undefined;
+                    }
+                    
+                    if (token.isCancellationRequested) { return undefined; }
 
-            // Use centralized resolution service with timeout
-            const resolution = await withTimeout(
-                'definition symbol resolution',
-                this.resolutionService.resolveAtPosition({
-                    document,
-                    position,
-                    tree,
-                    identifier
-                }),
-                OPERATION_TIMEOUTS.SYMBOL_RESOLUTION
+                    // Use centralized resolution service with timeout
+                    const resolution = await withTimeout(
+                        'definition symbol resolution',
+                        this.resolutionService.resolveAtPosition({
+                            document,
+                            position,
+                            tree,
+                            identifier
+                        }),
+                        OPERATION_TIMEOUTS.SYMBOL_RESOLUTION
+                    );
+
+                    if (!resolution || resolution.confidence === 'none' || !resolution.primary) {
+                        this.setCache(cacheKey, undefined);
+                        return undefined;
+                    }
+
+                    let result: vscode.Definition;
+                    
+                    // For exact or high confidence, always jump directly to the primary (most likely) definition.
+                    // This matches the behavior of hover, which shows the primary definition.
+                    // Only show a picker when confidence is medium/low and there are multiple candidates.
+                    if (resolution.confidence === 'exact' || resolution.confidence === 'high') {
+                        result = new vscode.Location(resolution.primary.uri, resolution.primary.range);
+                        this.setCache(cacheKey, result);
+                        return result;
+                    }
+
+                    // Medium/low confidence with multiple matches → return all, VS Code will show picker
+                    const allMatches = [resolution.primary, ...resolution.alternatives];
+                    if (allMatches.length > 1) {
+                        result = this.buildLocationArray(allMatches);
+                        this.setCache(cacheKey, result);
+                        return result;
+                    }
+
+                    // Single match even at lower confidence → jump directly
+                    result = new vscode.Location(resolution.primary.uri, resolution.primary.range);
+                    this.setCache(cacheKey, result);
+                    return result;
+                }
             );
-
-            if (!resolution || resolution.confidence === 'none' || !resolution.primary) {
-                this.setCache(cacheKey, undefined);
-                return undefined;
-            }
-
-            let result: vscode.Definition;
-            
-            // For exact or high confidence, always jump directly to the primary (most likely) definition.
-            // This matches the behavior of hover, which shows the primary definition.
-            // Only show a picker when confidence is medium/low and there are multiple candidates.
-            if (resolution.confidence === 'exact' || resolution.confidence === 'high') {
-                healthMonitor.recordSuccess('definition');
-                result = new vscode.Location(resolution.primary.uri, resolution.primary.range);
-                this.setCache(cacheKey, result);
-                return result;
-            }
-
-            // Medium/low confidence with multiple matches → return all, VS Code will show picker
-            const allMatches = [resolution.primary, ...resolution.alternatives];
-            if (allMatches.length > 1) {
-                healthMonitor.recordSuccess('definition');
-                result = this.buildLocationArray(allMatches);
-                this.setCache(cacheKey, result);
-                return result;
-            }
-
-            // Single match even at lower confidence → jump directly
-            healthMonitor.recordSuccess('definition');
-            result = new vscode.Location(resolution.primary.uri, resolution.primary.range);
-            this.setCache(cacheKey, result);
-            return result;
-        } catch (error) {
-            console.error('Kanagawa: Definition provider error:', error);
-            healthMonitor.recordFailure('definition',
-                error instanceof Error ? error.message : String(error));
-            return undefined;
         } finally {
             endTiming();
         }

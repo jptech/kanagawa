@@ -4,9 +4,9 @@ import { TreeSitterService } from '../service/treeSitter';
 import { WorkspaceIndexer, SymbolInfo } from '../service/indexer';
 import { SymbolResolutionService, ResolutionResult } from '../service/resolution';
 import { extractModuleFromQualified } from '../utils/importUtils';
-import { getNodeText, resolveToIdentifier } from '../utils/nodeUtils';
+import { getNodeText, resolveToIdentifier, isModuleOrImportNode } from '../utils/nodeUtils';
 import { perfLogger, PerfOps } from '../utils/perfLogger';
-import { OPERATION_TIMEOUTS, withTimeout } from '../utils/timeout';
+import { OPERATION_TIMEOUTS, withTimeout, withProviderGuard } from '../utils/timeout';
 import { healthMonitor } from '../service/healthMonitor';
 
 /** Minimum time between hover lookups at the same position (ms) */
@@ -101,107 +101,126 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
         position: vscode.Position,
         token: vscode.CancellationToken
     ): Promise<vscode.Hover | undefined> {
-        try {
-            return await perfLogger.measure(PerfOps.HOVER, document.uri.toString(), async () => {
-                // Check for cancellation early
-                if (token.isCancellationRequested) { return undefined; }
-                
-                // Check cache first to avoid expensive recomputation during rapid calls
-                const cacheKey = this.makeCacheKey(document, position);
-                const cached = this.getCached(cacheKey);
-                if (cached !== null) {
-                    // Cache hit (even if result is undefined)
-                    return cached;
-                }
-                
-                const tree = this.service.getTree(document) ?? await this.service.parse(document);
-                if (!tree) {
-                    return undefined;
-                }
+        // Wrap entire hover operation with provider guard for timeout + cancellation protection
+        return withProviderGuard(
+            {
+                operation: 'hover',
+                timeoutMs: OPERATION_TIMEOUTS.HOVER,
+                token,
+                onSuccess: () => healthMonitor.recordSuccess('hover'),
+                onFailure: (error) => healthMonitor.recordFailure('hover',
+                    error instanceof Error ? error.message : String(error))
+            },
+            async () => {
+                return await perfLogger.measure(PerfOps.HOVER, document.uri.toString(), async () => {
+                    // Check for cancellation early
+                    if (token.isCancellationRequested) { return undefined; }
+                    
+                    // Check cache first to avoid expensive recomputation during rapid calls
+                    const cacheKey = this.makeCacheKey(document, position);
+                    const cached = this.getCached(cacheKey);
+                    if (cached !== null) {
+                        // Cache hit (even if result is undefined)
+                        return cached;
+                    }
+                    
+                    const tree = this.service.getTree(document) ?? await this.service.parse(document);
+                    if (!tree) {
+                        return undefined;
+                    }
 
-                if (token.isCancellationRequested) { return undefined; }
+                    if (token.isCancellationRequested) { return undefined; }
 
-                const node = tree.rootNode.descendantForPosition({
-                    row: position.line,
-                    column: position.character
-                });
+                    const node = tree.rootNode.descendantForPosition({
+                        row: position.line,
+                        column: position.character
+                    });
+                    
+                    // CRITICAL: Check the raw node FIRST before any processing.
+                    // If we're on a module/import-related node, bail out immediately.
+                    // This prevents hangs when hovering on module declarations or import statements.
+                    if (isModuleOrImportNode(node)) {
+                        this.setCache(cacheKey, undefined);
+                        return undefined;
+                    }
 
-                const identifier = resolveToIdentifier(node);
-                if (!identifier) {
-                    this.setCache(cacheKey, undefined);
-                    return undefined;
-                }
-
-                const hoverRange = new vscode.Range(
-                    new vscode.Position(identifier.startPosition.row, identifier.startPosition.column),
-                    new vscode.Position(identifier.endPosition.row, identifier.endPosition.column)
-                );
-
-                // Try local variable/parameter first
-                const typeInfo = await this.findLocalTypeInfo(document, identifier);
-                if (typeInfo) {
-                    // If this is an auto variable with an inlay hint showing the type,
-                    // suppress the hover to avoid redundancy
-                    if (typeInfo.isAutoWithInlayHint) {
+                    const identifier = resolveToIdentifier(node);
+                    if (!identifier) {
                         this.setCache(cacheKey, undefined);
                         return undefined;
                     }
                     
-                    const md = new vscode.MarkdownString();
-                    md.appendCodeblock(typeInfo.signature, 'kanagawa');
-                    
-                    if (typeInfo.initializer) {
-                        md.appendMarkdown(`\n---\n`);
-                        md.appendMarkdown(`**Initializer**\n\n`);
-                        md.appendCodeblock(typeInfo.initializer, 'kanagawa');
+                    // Double-check: also verify the resolved identifier isn't in a module context
+                    // (belt and suspenders - the raw node check above should catch most cases)
+                    if (isModuleOrImportNode(identifier)) {
+                        this.setCache(cacheKey, undefined);
+                        return undefined;
                     }
-                    
-                    md.appendMarkdown(`\n---\n`);
-                    md.appendMarkdown(`📌 \`${typeInfo.kind}\``);
-                    
-                    const result = new vscode.Hover(md, hoverRange);
-                    this.setCache(cacheKey, result);
-                    return result;
-                }
 
-                if (token.isCancellationRequested) { return undefined; }
+                    const hoverRange = new vscode.Range(
+                        new vscode.Position(identifier.startPosition.row, identifier.startPosition.column),
+                        new vscode.Position(identifier.endPosition.row, identifier.endPosition.column)
+                    );
 
-                // Resolve with confidence scoring using centralized service
-                // Wrap in timeout to prevent hanging on complex resolution
-                const resolution = await withTimeout(
-                    'hover symbol resolution',
-                    this.resolutionService.resolveAtPosition(
-                        { document, position, tree, identifier },
-                        { includeInaccessible: true }
-                    ),
-                    OPERATION_TIMEOUTS.SYMBOL_RESOLUTION
-                );
+                    // Try local variable/parameter first
+                    const typeInfo = await this.findLocalTypeInfo(document, identifier);
+                    if (typeInfo) {
+                        // If this is an auto variable with an inlay hint showing the type,
+                        // suppress the hover to avoid redundancy
+                        if (typeInfo.isAutoWithInlayHint) {
+                            this.setCache(cacheKey, undefined);
+                            return undefined;
+                        }
+                        
+                        const md = new vscode.MarkdownString();
+                        md.appendCodeblock(typeInfo.signature, 'kanagawa');
+                        
+                        if (typeInfo.initializer) {
+                            md.appendMarkdown(`\n---\n`);
+                            md.appendMarkdown(`**Initializer**\n\n`);
+                            md.appendCodeblock(typeInfo.initializer, 'kanagawa');
+                        }
+                        
+                        md.appendMarkdown(`\n---\n`);
+                        md.appendMarkdown(`📌 \`${typeInfo.kind}\``);
+                        
+                        const result = new vscode.Hover(md, hoverRange);
+                        this.setCache(cacheKey, result);
+                        return result;
+                    }
 
-                if (!resolution || resolution.confidence === 'none') {
+                    if (token.isCancellationRequested) { return undefined; }
+
+                    // Resolve with confidence scoring using centralized service
+                    // Wrap in timeout to prevent hanging on complex resolution
+                    const resolution = await withTimeout(
+                        'hover symbol resolution',
+                        this.resolutionService.resolveAtPosition(
+                            { document, position, tree, identifier },
+                            { includeInaccessible: true }
+                        ),
+                        OPERATION_TIMEOUTS.SYMBOL_RESOLUTION
+                    );
+
+                    if (!resolution || resolution.confidence === 'none') {
+                        this.setCache(cacheKey, undefined);
+                        return undefined;
+                    }
+
+                    // Build hover content based on confidence
+                    const markdowns = await this.buildHoverContent(document, resolution);
+
+                    if (markdowns.length > 0) {
+                        const result = new vscode.Hover(markdowns, hoverRange);
+                        this.setCache(cacheKey, result);
+                        return result;
+                    }
+
                     this.setCache(cacheKey, undefined);
                     return undefined;
-                }
-
-                // Build hover content based on confidence
-                const markdowns = await this.buildHoverContent(document, resolution);
-
-                if (markdowns.length > 0) {
-                    healthMonitor.recordSuccess('hover');
-                    const result = new vscode.Hover(markdowns, hoverRange);
-                    this.setCache(cacheKey, result);
-                    return result;
-                }
-
-                this.setCache(cacheKey, undefined);
-                return undefined;
-            }); // end perfLogger.measure
-        } catch (error) {
-            // Log error but don't crash the provider
-            console.error('Kanagawa: Hover provider error:', error);
-            healthMonitor.recordFailure('hover', 
-                error instanceof Error ? error.message : String(error));
-            return undefined;
-        }
+                }); // end perfLogger.measure
+            }
+        );
     }
 
     /**

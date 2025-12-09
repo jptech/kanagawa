@@ -48,6 +48,7 @@ import {
     applyTemplateContext,
     createEmptyContext
 } from '../utils/templateUtils';
+import { CircuitBreaker } from '../utils/timeout';
 
 export type SymbolCategory =
     | 'module'
@@ -100,13 +101,25 @@ export interface SymbolInfo {
 }
 
 /** Maximum depth for alias chain resolution to prevent infinite loops */
-const MAX_ALIAS_CHAIN_DEPTH = 50;
+const MAX_ALIAS_CHAIN_DEPTH = 30;
+
+/** Maximum depth for recursive type inference to prevent stack overflow */
+const MAX_TYPE_INFERENCE_DEPTH = 15;
+
+/** Maximum depth for member resolution to prevent infinite recursion */
+const MAX_MEMBER_RESOLUTION_DEPTH = 10;
 
 /** Default chunk size for batch file processing during indexing */
 const DEFAULT_INDEX_CHUNK_SIZE = 10;
 
 /** Default maximum entries in the resolved imports LRU cache */
 const DEFAULT_RESOLVED_IMPORTS_CACHE_LIMIT = 500;
+
+/** Default maximum documents in the type inference cache */
+const DEFAULT_TYPE_INFERENCE_CACHE_LIMIT = 100;
+
+/** Maximum type inference entries per document */
+const MAX_TYPE_INFERENCE_ENTRIES_PER_DOC = 500;
 
 /** Performance configuration for the indexer */
 export interface IndexerPerformanceConfig {
@@ -167,6 +180,18 @@ export class WorkspaceIndexer {
     /** Configurable performance settings */
     private indexChunkSize = DEFAULT_INDEX_CHUNK_SIZE;
     private memberCacheLimit = DEFAULT_RESOLVED_IMPORTS_CACHE_LIMIT;
+    
+    /** 
+     * Circuit breaker for file indexing operations.
+     * Prevents repeated failures on problematic files from degrading performance.
+     */
+    private readonly fileIndexingCircuitBreaker = new CircuitBreaker(3, 60000);
+    
+    /**
+     * Per-file circuit breakers for files that consistently fail.
+     * Key is file URI string.
+     */
+    private readonly perFileCircuitBreakers: Map<string, CircuitBreaker> = new Map();
 
     constructor(
         private service: TreeSitterService,
@@ -381,7 +406,7 @@ export class WorkspaceIndexer {
                     if (!effectiveToken.isCancellationRequested) {
                         const doc = documentMap.get(uri.toString());
                         if (doc) {
-                            await this.indexFileWithDocument(uri, doc, queryString);
+                            await this.indexFileWithDocument(uri, doc, queryString, effectiveToken);
                         }
                     }
                 }));
@@ -435,24 +460,70 @@ export class WorkspaceIndexer {
     /**
      * Indexes a file with a pre-loaded document.
      * Used during workspace scan when documents are pre-loaded in parallel.
+     * @param token Optional cancellation token for early termination
      */
-    private async indexFileWithDocument(uri: vscode.Uri, document: vscode.TextDocument, queryString?: string) {
-        const endTiming = perfLogger.start(PerfOps.INDEX_FILE, uri.toString());
+    private async indexFileWithDocument(
+        uri: vscode.Uri, 
+        document: vscode.TextDocument, 
+        queryString?: string,
+        token?: vscode.CancellationToken
+    ) {
+        const uriStr = uri.toString();
+        const endTiming = perfLogger.start(PerfOps.INDEX_FILE, uriStr);
+        
+        // Early cancellation check
+        if (token?.isCancellationRequested) {
+            endTiming();
+            return;
+        }
+        
+        // Check per-file circuit breaker to skip files that repeatedly fail
+        let perFileBreaker = this.perFileCircuitBreakers.get(uriStr);
+        if (perFileBreaker && !perFileBreaker.shouldAttempt()) {
+            if (this.verbose) {
+                console.log(`Kanagawa: Skipping ${uriStr} due to circuit breaker (previous failures)`);
+            }
+            endTiming();
+            return;
+        }
+        
+        // Also check global file indexing circuit breaker
+        if (!this.fileIndexingCircuitBreaker.shouldAttempt()) {
+            console.warn('Kanagawa: File indexing circuit breaker is open, skipping:', uriStr);
+            endTiming();
+            return;
+        }
         
         // Mark as indexed to prevent duplicate work from ensureFileIndexed
-        this.indexedFiles.add(uri.toString());
+        this.indexedFiles.add(uriStr);
         
         try {
             if (this.verbose) {
-                console.log('Kanagawa: Indexing file:', uri.toString());
+                console.log('Kanagawa: Indexing file:', uriStr);
             }
             this.clearDocumentCaches(uri);
+            
+            // Check cancellation before expensive parse operation
+            if (token?.isCancellationRequested) {
+                return;
+            }
             
             // Parse document (serialized via mutex in TreeSitterService)
             const tree = await this.service.parse(document);
             if (!tree) { 
-                console.warn('Kanagawa: No tree for file:', uri.toString());
+                console.warn('Kanagawa: No tree for file:', uriStr);
+                // Record failure for per-file breaker
+                if (!perFileBreaker) {
+                    perFileBreaker = new CircuitBreaker(3, 30000); // 3 failures, 30s reset
+                    this.perFileCircuitBreakers.set(uriStr, perFileBreaker);
+                }
+                perFileBreaker.recordFailure();
                 return; 
+            }
+            
+            // Check cancellation after parse
+            if (token?.isCancellationRequested) {
+                return;
             }
 
             if (!queryString) {
@@ -465,16 +536,35 @@ export class WorkspaceIndexer {
             }
 
             // Symbol extraction (CPU-bound, can run in parallel after parsing)
-            const symbols = this.extractSymbols(document, tree, queryString, uri);
+            const symbols = this.extractSymbols(document, tree, queryString, uri, token);
+            
+            // Check cancellation after symbol extraction
+            if (token?.isCancellationRequested) {
+                return;
+            }
+            
             const context = this.collectDocumentContext(tree.rootNode);
-            this.documentContexts.set(uri.toString(), context);
+            this.documentContexts.set(uriStr, context);
             this.addSymbols(symbols);
             // Smart cache invalidation: only clear cached members that could be affected
             // by changes in this specific file, rather than clearing the entire cache
             this.invalidateMemberCacheForUri(uri);
             this.recentlyIndexed += symbols.length;
+            
+            // Record success for circuit breakers
+            this.fileIndexingCircuitBreaker.recordSuccess();
+            if (perFileBreaker) {
+                perFileBreaker.recordSuccess();
+            }
         } catch (e) {
-            console.error(`Failed to index ${uri.toString()}:`, e);
+            console.error(`Failed to index ${uriStr}:`, e);
+            // Record failure for circuit breakers
+            this.fileIndexingCircuitBreaker.recordFailure();
+            if (!perFileBreaker) {
+                perFileBreaker = new CircuitBreaker(3, 30000);
+                this.perFileCircuitBreakers.set(uriStr, perFileBreaker);
+            }
+            perFileBreaker.recordFailure();
         } finally {
             endTiming();
         }
@@ -589,7 +679,8 @@ export class WorkspaceIndexer {
         document: vscode.TextDocument,
         tree: Parser.Tree,
         queryString: string,
-        uri: vscode.Uri
+        uri: vscode.Uri,
+        token?: vscode.CancellationToken
     ): SymbolInfo[] {
         const captures = this.service.query(tree.rootNode, queryString);
         if (!captures.length) { return []; }
@@ -597,8 +688,20 @@ export class WorkspaceIndexer {
         const { preDocs, postDocs } = this.prepareDocCommentMaps(captures);
         const processedNodes = new Set<number>();
         const symbols: SymbolInfo[] = [];
+        
+        // Check cancellation every N symbols for large files
+        const CANCELLATION_CHECK_INTERVAL = 50;
+        let processingCount = 0;
 
         for (const capture of captures) {
+            // Periodic cancellation check
+            if (token?.isCancellationRequested) {
+                break;
+            }
+            if (++processingCount % CANCELLATION_CHECK_INTERVAL === 0 && token?.isCancellationRequested) {
+                break;
+            }
+            
             if (capture.name === 'doc.comment') { continue; }
             const nodeId = capture.node.id;
             if (processedNodes.has(nodeId)) { continue; }
@@ -1720,11 +1823,26 @@ export class WorkspaceIndexer {
         await this.indexFile(uri);
     }
 
-    public async inferTypeFromExpression(document: vscode.TextDocument, expression?: Parser.SyntaxNode): Promise<string | undefined> {
+    public async inferTypeFromExpression(document: vscode.TextDocument, expression?: Parser.SyntaxNode, depth: number = 0): Promise<string | undefined> {
         if (!expression) { return undefined; }
+        
+        // Prevent infinite recursion
+        if (depth > MAX_TYPE_INFERENCE_DEPTH) {
+            console.warn(`Kanagawa: Type inference depth exceeded at depth ${depth}`);
+            return undefined;
+        }
 
         const docKey = document.uri.toString();
-        const cache = this.typeInferenceCache.get(docKey) ?? new Map<number, string>();
+        let cache = this.typeInferenceCache.get(docKey);
+        
+        // LRU behavior: move to end on access
+        if (cache) {
+            this.typeInferenceCache.delete(docKey);
+            this.typeInferenceCache.set(docKey, cache);
+        } else {
+            cache = new Map<number, string>();
+        }
+        
         if (cache.has(expression.id)) {
             const cached = cache.get(expression.id);
             return cached && cached.length ? cached : undefined;
@@ -1772,13 +1890,15 @@ export class WorkspaceIndexer {
         } else if (expression.type === 'member_expression') {
             const objectNode = expression.namedChild(0);
             const propertyNode = expression.namedChild(expression.namedChildCount - 1);
-            const objectType = await this.inferTypeFromExpression(document, objectNode ?? undefined);
+            // Pass depth + 1 for recursive call
+            const objectType = await this.inferTypeFromExpression(document, objectNode ?? undefined, depth + 1);
             if (objectType && propertyNode) {
                 const member = this.getMemberInfo(objectType, propertyNode.text);
                 inferred = member?.typeHint;
             }
         } else if (expression.type === 'call_expression') {
-            inferred = await this.inferCallExpressionType(document, expression);
+            // Pass depth for call expression type inference
+            inferred = await this.inferCallExpressionType(document, expression, depth);
         }
 
         // Apply enclosing template context if the inferred type has unresolved parameters
@@ -1789,15 +1909,37 @@ export class WorkspaceIndexer {
             }
         }
 
+        // Store in cache with LRU eviction
         if (inferred) {
+            // Evict entries if per-document limit exceeded
+            if (cache.size >= MAX_TYPE_INFERENCE_ENTRIES_PER_DOC) {
+                const firstKey = cache.keys().next().value;
+                if (firstKey !== undefined) {
+                    cache.delete(firstKey);
+                }
+            }
             cache.set(expression.id, inferred);
-            this.typeInferenceCache.set(docKey, cache);
-            return inferred;
+        } else {
+            // Also cache negative results to avoid repeated lookups
+            if (cache.size >= MAX_TYPE_INFERENCE_ENTRIES_PER_DOC) {
+                const firstKey = cache.keys().next().value;
+                if (firstKey !== undefined) {
+                    cache.delete(firstKey);
+                }
+            }
+            cache.set(expression.id, '');
         }
-
-        cache.set(expression.id, '');
+        
+        // Evict oldest document cache if document limit exceeded
+        if (this.typeInferenceCache.size >= DEFAULT_TYPE_INFERENCE_CACHE_LIMIT) {
+            const firstDocKey = this.typeInferenceCache.keys().next().value;
+            if (firstDocKey && firstDocKey !== docKey) {
+                this.typeInferenceCache.delete(firstDocKey);
+            }
+        }
         this.typeInferenceCache.set(docKey, cache);
-        return undefined;
+
+        return inferred || undefined;
     }
 
     /**
@@ -1806,10 +1948,13 @@ export class WorkspaceIndexer {
      * - Member method calls: `obj.method()` → method's return type
      * - Free function calls: `func()` → function's return type
      * - Constructor calls: `Foo<T>()` → Foo
+     * 
+     * @param depth Current recursion depth for infinite loop prevention
      */
     private async inferCallExpressionType(
         document: vscode.TextDocument,
-        callExpression: Parser.SyntaxNode
+        callExpression: Parser.SyntaxNode,
+        depth: number = 0
     ): Promise<string | undefined> {
         const callee = this.getCallTarget(callExpression);
         if (!callee) { return undefined; }
@@ -1821,7 +1966,7 @@ export class WorkspaceIndexer {
 
         // Handle member method calls: obj.method()
         if (callee.type === 'member_expression') {
-            return this.inferMemberCallReturnType(document, callee);
+            return this.inferMemberCallReturnType(document, callee, depth);
         }
 
         // Handle free function calls or constructor calls
@@ -1884,16 +2029,19 @@ export class WorkspaceIndexer {
 
     /**
      * Infers the return type of a member method call: obj.method()
+     * 
+     * @param depth Current recursion depth for infinite loop prevention
      */
     private async inferMemberCallReturnType(
         document: vscode.TextDocument,
-        memberExpression: Parser.SyntaxNode
+        memberExpression: Parser.SyntaxNode,
+        depth: number = 0
     ): Promise<string | undefined> {
         const propertyNode = this.getMemberIdentifier(memberExpression);
         if (!propertyNode) { return undefined; }
 
-        // First try to resolve as a member method
-        const memberMatches = await this.resolveMemberSymbol(document, propertyNode);
+        // First try to resolve as a member method (with depth limit)
+        const memberMatches = await this.resolveMemberSymbol(document, propertyNode, depth);
         if (memberMatches?.length) {
             // Find a function/method with a return type
             const methodMatch = memberMatches.find(sym =>
@@ -1912,8 +2060,15 @@ export class WorkspaceIndexer {
 
     public async resolveMemberSymbol(
         document: vscode.TextDocument,
-        identifier: Parser.SyntaxNode
+        identifier: Parser.SyntaxNode,
+        depth: number = 0
     ): Promise<SymbolInfo[] | undefined> {
+        // Prevent infinite recursion in member resolution chains
+        if (depth > MAX_MEMBER_RESOLUTION_DEPTH) {
+            console.warn(`Kanagawa: Member resolution depth exceeded at depth ${depth}`);
+            return undefined;
+        }
+        
         const parent = identifier.parent;
         if (!parent || parent.type !== 'member_expression') {
             return undefined;
@@ -1923,7 +2078,8 @@ export class WorkspaceIndexer {
         if (!receiverNode) { return undefined; }
         const memberName = identifier.text;
 
-        const receiverType = await this.inferTypeFromExpression(document, receiverNode);
+        // Pass depth + 1 for recursive type inference
+        const receiverType = await this.inferTypeFromExpression(document, receiverNode, depth + 1);
         if (!receiverType) { return undefined; }
 
         // Check if this is a call context (member is being called as a method)
