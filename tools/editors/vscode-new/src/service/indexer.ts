@@ -935,6 +935,14 @@ export class WorkspaceIndexer {
     }
 
     /**
+     * Gets the document context (module path, imports) for a URI.
+     * Returns undefined if the document is not indexed.
+     */
+    public getDocumentContext(uri: vscode.Uri): DocumentContext | undefined {
+        return this.documentContexts.get(uri.toString());
+    }
+
+    /**
      * Gets or computes the resolved imports for a document.
      * Uses LRU cache with bounded size to prevent memory growth.
      */

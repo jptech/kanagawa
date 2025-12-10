@@ -20,6 +20,7 @@ import { perfLogger, PerfLogLevel } from './utils/perfLogger';
 import { registerDependencyGraphCommands } from './views/dependencyGraph';
 import { IndexStatusBar } from './views/statusBar';
 import { healthMonitor } from './service/healthMonitor';
+import { registerCopilotTools } from './copilot';
 
 export async function activate(context: vscode.ExtensionContext) {
     console.log('Kanagawa "LSP-Lite" is activating...');
@@ -165,6 +166,10 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Register dependency graph commands
     registerDependencyGraphCommands(context, indexer);
+
+    // Register Copilot tools for AI agent integration
+    // Tools allow Copilot to query symbols, types, members, and dependencies
+    registerCopilotTools(context, indexer, service);
 
     // Events - document lifecycle management
     context.subscriptions.push(

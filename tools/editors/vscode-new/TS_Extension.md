@@ -648,6 +648,155 @@ Both `resolvedImportsCache` and `memberCache` now use bounded LRU eviction:
 - Configurable via `memberCacheLimit` setting
 - Cache trimming on limit decrease
 
+### 3.21. GitHub Copilot Language Model Tools (v0.0.5)
+**Goal:** Expose the Kanagawa symbol index to AI agents via VS Code's Language Model Tools API.
+
+#### Overview
+The extension registers 6 Language Model Tools that enable GitHub Copilot and other AI agents to query the Kanagawa codebase semantically. These tools provide structured JSON responses optimized for AI consumption.
+
+#### Architecture
+```
+src/copilot/
+├── index.ts       # Tool registration & exports
+├── tools.ts       # VS Code adapter classes (thin wrappers)
+├── toolLogic.ts   # Pure business logic (testable without vscode)
+└── types.ts       # Type definitions (vscode-free)
+```
+
+**Key design decisions:**
+- **Pure Logic Extraction:** All business logic is in `toolLogic.ts` with no vscode imports
+- **Testable:** Logic functions can be unit tested directly without mocking vscode
+- **Type-Safe:** Union return types (`SuccessShape | ToolErrorResponse`) model all outcomes
+- **Consistent Errors:** All tools return structured `{ error, code }` responses
+
+#### Available Tools
+
+| Tool | Purpose | Input |
+|------|---------|-------|
+| `kanagawa_lookup_symbol` | Find symbol definitions by name | `symbolName`, optional `scopePath` |
+| `kanagawa_get_type_members` | List methods/fields of a type | `typeName`, optional filters |
+| `kanagawa_infer_type` | Infer type at a position | `filePath`, `line`, `character` |
+| `kanagawa_get_module_exports` | List symbols exported by a file | `filePath` |
+| `kanagawa_get_imports` | Show imports for a file | `filePath` |
+| `kanagawa_search_symbols` | Search symbols by prefix/substring | `query`, optional `category`, `filePath` |
+
+#### Tool: kanagawa_lookup_symbol
+Finds symbol definitions matching a name, with optional scope disambiguation:
+
+```json
+// Input
+{ "symbolName": "push", "scopePath": ["data.fifo", "FIFO"] }
+
+// Output (success)
+{
+  "results": [{
+    "name": "push",
+    "qualifiedName": "data.fifo::FIFO::push",
+    "kind": "method",
+    "category": "method",
+    "signature": "void push(T value)",
+    "documentation": "Pushes a value onto the queue",
+    "location": "/project/src/fifo.k:42",
+    "scopePath": ["data.fifo", "FIFO"]
+  }],
+  "totalCount": 1
+}
+
+// Output (error)
+{ "error": "No symbols found matching \"xyz\"", "code": "SYMBOL_NOT_FOUND" }
+```
+
+#### Tool: kanagawa_get_type_members
+Lists methods and fields of a type, with filtering options:
+
+```json
+// Input
+{ "typeName": "FIFO<uint32, 16>", "includeMethods": true, "includeFields": false }
+
+// Output
+{
+  "results": [
+    { "name": "push", "category": "method", "signature": "void push(uint32 value)" },
+    { "name": "pop", "category": "method", "signature": "uint32 pop()" }
+  ],
+  "containerType": "FIFO",
+  "truncated": false
+}
+```
+
+#### Tool: kanagawa_search_symbols
+Enables AI agents to explore the codebase with fuzzy search:
+
+```json
+// Input
+{ "query": "FIF", "category": "class", "limit": 10 }
+
+// Output
+{
+  "results": [{
+    "name": "FIFO",
+    "qualifiedName": "data.fifo::FIFO",
+    "kind": "class",
+    "location": "/stdlib/data/fifo.k:15",
+    "documentation": "Generic FIFO queue implementation"
+  }],
+  "totalCount": 1,
+  "truncated": false
+}
+```
+
+**Search features:**
+- **Prefix match:** Finds symbols starting with query (highest priority)
+- **Substring match:** Finds symbols containing query (second priority)
+- **Category filter:** Restrict to `class`, `function`, `method`, `struct`, etc.
+- **File filter:** Limit search to a specific file
+- **Minimum query:** Requires 2+ characters to prevent overly broad searches
+
+#### Error Codes
+All tools use consistent error codes:
+
+| Code | Description |
+|------|-------------|
+| `SYMBOL_NOT_FOUND` | No matching symbols in index |
+| `FILE_NOT_FOUND` | File not indexed |
+| `INVALID_INPUT` | Missing or malformed input |
+| `PARSE_ERROR` | Could not parse file |
+| `INVALID_POSITION` | Position outside file bounds |
+| `INTERNAL_ERROR` | Unexpected error |
+
+#### Registration
+Tools are registered during extension activation if the Language Model API is available:
+
+```typescript
+export function registerCopilotTools(
+    context: vscode.ExtensionContext,
+    indexer: IWorkspaceIndexer,
+    treeSitterService: TreeSitterService
+): vscode.Disposable[] {
+    // Check API availability (VS Code 1.90+)
+    if (!vscode.lm || typeof vscode.lm.registerTool !== 'function') {
+        return [];
+    }
+    
+    // Register each tool
+    vscode.lm.registerTool('kanagawa_lookup_symbol', new LookupSymbolTool(indexer));
+    // ... other tools
+}
+```
+
+#### Testing
+The pure logic functions in `toolLogic.ts` are tested with a mock indexer:
+
+```typescript
+// 41 tests covering:
+// - Symbol lookup with scope filtering
+// - Type member retrieval with method/field filtering  
+// - Module exports extraction
+// - Import analysis with resolution status
+// - Symbol search with category/file filtering
+// - Error handling for all edge cases
+```
+
 ## 4. Build System & Distribution Plan
 
 ### 4.1. Project Structure
@@ -659,6 +808,11 @@ tools/editors/vscode-new/
 │   └── grammar.js
 ├── src/
 │   ├── extension.ts      # Entry point
+│   ├── copilot/          # GitHub Copilot Language Model Tools
+│   │   ├── index.ts      # Tool registration
+│   │   ├── tools.ts      # VS Code adapter classes
+│   │   ├── toolLogic.ts  # Pure business logic (testable)
+│   │   └── types.ts      # Type definitions (vscode-free)
 │   ├── service/
 │   │   ├── treeSitter.ts # Thread-safe parsing with mutex
 │   │   ├── indexer.ts    # Symbol indexing with smart cache invalidation
@@ -693,6 +847,7 @@ tools/editors/vscode-new/
 │       ├── importUtils.test.ts
 │       ├── memberUtils.test.ts
 │       ├── templateUtils.test.ts
+│       ├── copilotTools.test.ts  # Copilot tool logic tests
 │       └── providerUtils.test.ts
 └── queries/
     ├── highlights.scm
@@ -803,9 +958,15 @@ async function loadWasm(context: vscode.ExtensionContext) {
 4.  **LRU Cache Management:** Implemented bounded LRU eviction for both member cache and imports cache.
 5.  **Config Hot Reload:** Performance settings apply immediately via `onDidChangeConfiguration`.
 
+### Phase 12: GitHub Copilot Integration (v0.0.5) ✅
+1.  **Language Model Tools:** Implemented 6 VS Code Language Model Tools for Copilot agents.
+2.  **Pure Logic Architecture:** Extracted tool logic to `toolLogic.ts` for testing without vscode dependencies.
+3.  **Symbol Search:** Added `kanagawa_search_symbols` for AI-driven codebase exploration.
+4.  **Tool Test Suite:** 41 comprehensive tests covering all tool logic paths.
+
 ## 6. Testing
 
-**Unit Tests (696 passing):**
+**Unit Tests (1229 passing):**
 - `symbolUtils.test.ts` - Qualified name computation, module matching (49 tests)
 - `importUtils.test.ts` - Import resolution, accessibility filtering (36 tests)
 - `memberUtils.test.ts` - Member resolution, container matching (34 tests)
@@ -813,6 +974,7 @@ async function loadWasm(context: vscode.ExtensionContext) {
 - `providerUtils.test.ts` - Provider quality utilities (26 tests)
 - `providerResolution.test.ts` - Provider resolution consistency (42 tests)
 - `nodeUtils.test.ts` - Cache key utilities, location/position key formatting (6 tests)
+- `copilotTools.test.ts` - Copilot tool logic with mock indexer (41 tests)
 - Grammar and type utility tests (150+ tests)
 - Provider tests: Completion, Definition, References, Rename (291 tests)
 
@@ -855,9 +1017,10 @@ The extension includes several documentation files:
 *   **Stability:** No crashes or hangs when opening multiple files simultaneously.
 *   **Coverage:** Standard library (`pipelined_for`, `FIFO`) is indexable and hoverable.
 *   **Accuracy:** Syntax highlighting correctly distinguishes types from variables in 99% of cases.
-*   **Test Coverage:** 405+ passing unit tests covering all utility modules.
+*   **Test Coverage:** 1229 passing unit tests covering all utility modules and providers.
 *   **Thread Safety:** Concurrent document opens handled gracefully via mutex serialization.
 *   **Error Handling:** All background operations have proper `.catch()` handlers (no unhandled promise rejections).
+*   **AI Integration:** 6 Language Model Tools enable Copilot agents to query the codebase semantically.
 
 ## 10. Robustness & Reliability
 
