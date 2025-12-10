@@ -24,6 +24,37 @@ import {
 } from './types';
 
 /**
+ * Creates a unique key for a symbol based on its location and identity.
+ * Used to deduplicate symbols that may appear multiple times due to
+ * query patterns matching both template wrappers and inner declarations.
+ */
+function symbolLocationKey(symbol: SymbolInfo): string {
+    const uri = symbol.uri;
+    const uriString = (uri as any).fsPath ?? uri.toString();
+    const line = (symbol.range as any).start?.line ?? 0;
+    const col = (symbol.range as any).start?.character ?? 0;
+    // Include qualifiedName to distinguish symbols at the same position
+    // (this can happen in mocks, but in real code the position identifies the symbol)
+    return `${uriString}:${line}:${col}:${symbol.qualifiedName}`;
+}
+
+/**
+ * Deduplicates symbols by their location.
+ * Keeps the first occurrence of each unique location.
+ */
+function deduplicateSymbols(symbols: SymbolInfo[]): SymbolInfo[] {
+    const seen = new Set<string>();
+    return symbols.filter(sym => {
+        const key = symbolLocationKey(sym);
+        if (seen.has(key)) {
+            return false;
+        }
+        seen.add(key);
+        return true;
+    });
+}
+
+/**
  * Converts a SymbolInfo to the AI-friendly ToolSymbolInfo format.
  */
 export function symbolToToolInfo(symbol: SymbolInfo): ToolSymbolInfo {
@@ -58,7 +89,7 @@ export function lookupSymbolLogic(
     }
 
     const resolution = indexer.resolveWithContext(symbolName, scopePath ?? [], {});
-    const candidates: SymbolInfo[] = [];
+    let candidates: SymbolInfo[] = [];
     
     if (resolution.primary) {
         candidates.push(resolution.primary);
@@ -69,14 +100,18 @@ export function lookupSymbolLogic(
         // Fall back to direct lookup without scope context
         const directMatches = indexer.getSymbols(symbolName);
         if (directMatches && directMatches.length > 0) {
-            const results = directMatches.slice(0, 50).map(symbolToToolInfo);
-            return { results, totalCount: directMatches.length };
+            // Deduplicate in case indexer has duplicates
+            const dedupedMatches = deduplicateSymbols(directMatches);
+            const results = dedupedMatches.slice(0, 50).map(symbolToToolInfo);
+            return { results, totalCount: dedupedMatches.length };
         }
         return createErrorResponse(`No symbols found matching "${symbolName}"`, 'SYMBOL_NOT_FOUND');
     }
 
+    // Deduplicate candidates
+    candidates = deduplicateSymbols(candidates);
     const results = candidates.slice(0, 50).map(symbolToToolInfo);
-    return { results, totalCount: resolution.totalCandidates };
+    return { results, totalCount: candidates.length };
 }
 
 /**
@@ -102,8 +137,10 @@ export async function getTypeMembersLogic(
         return createErrorResponse(`No members found for type "${typeName}"`, 'SYMBOL_NOT_FOUND');
     }
 
-    const truncated = resolution.members.length > limit;
-    const results = resolution.members.slice(0, limit).map(symbolToToolInfo);
+    // Deduplicate members
+    const dedupedMembers = deduplicateSymbols(resolution.members);
+    const truncated = dedupedMembers.length > limit;
+    const results = dedupedMembers.slice(0, limit).map(symbolToToolInfo);
 
     return {
         results,
@@ -175,12 +212,14 @@ export function getModuleExportsLogic(
     const fileSymbols = allSymbols.filter(s => s.uri.toString() === uriString);
 
     // Export = top-level symbols or direct children of the module
-    const exports = fileSymbols.filter(s => {
+    let exports = fileSymbols.filter(s => {
         if (s.scopePath.length === 0) return true;
         if (s.scopePath.length === 1 && s.scopePath[0] === context.modulePath) return true;
         return false;
     });
 
+    // Deduplicate exports
+    exports = deduplicateSymbols(exports);
     const truncated = exports.length > limit;
     const results = exports.slice(0, limit).map(symbolToToolInfo);
 
@@ -277,6 +316,9 @@ export function searchSymbolsLogic(
 
     const queryLower = query.toLowerCase();
     let allSymbols = indexer.getAllSymbols();
+    
+    // Deduplicate symbols (safety net for any duplicates from indexing)
+    allSymbols = deduplicateSymbols(allSymbols);
     
     // Filter by file if specified
     if (filePath && getUri) {

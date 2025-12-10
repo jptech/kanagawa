@@ -407,6 +407,24 @@ The `memberCache` is no longer cleared entirely on every file change. Instead:
 
 **Critical Bug Fixed (Nov 2025):** Empty member cache results were being cached before indexing completed, and since they had no contributing URIs, they were never invalidated. This caused member method calls like `other.add()` to fail type inference permanently. The fix: only cache non-empty results.
 
+#### Template Symbol Deduplication (v0.0.5)
+The `definitions.scm` query matches both template wrappers (`class_template`) and inner declarations (`class_decl`), causing duplicate symbols for templated types. This is fixed at multiple levels:
+
+1. **Indexer Level:** `extractSymbols()` now tracks processed name node positions (not just capture node IDs):
+   ```typescript
+   const namePositionKey = `${row}:${col}:${endRow}:${endCol}:${category}`;
+   if (processedNamePositions.has(namePositionKey)) continue;
+   ```
+
+2. **Tool Response Level:** All Copilot tools deduplicate results before returning:
+   ```typescript
+   function symbolLocationKey(symbol: SymbolInfo): string {
+       return `${uriString}:${line}:${col}:${symbol.qualifiedName}`;
+   }
+   ```
+
+This ensures AI agents never receive duplicate symbol entries, regardless of how the query patterns match.
+
 #### LRU Import Resolution Cache (v0.0.3)
 The `resolvedImportsCache` now uses bounded LRU (Least Recently Used) eviction to prevent memory growth:
 - **Limit:** 500 entries maximum

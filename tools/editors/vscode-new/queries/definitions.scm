@@ -3,6 +3,9 @@
   name: (module_name) @module.name) @module
 
 ; Class, struct, union definitions
+; Note: Both templated and non-templated versions are matched.
+; Deduplication happens in extractSymbols() based on name node position.
+
 (class_decl
   name: (identifier) @class.name) @class
 

@@ -687,6 +687,9 @@ export class WorkspaceIndexer {
 
         const { preDocs, postDocs } = this.prepareDocCommentMaps(captures);
         const processedNodes = new Set<number>();
+        // Track processed name positions to avoid duplicates from template wrappers
+        // Key: "startRow:startCol:endRow:endCol:name"
+        const processedNamePositions = new Set<string>();
         const symbols: SymbolInfo[] = [];
         
         // Check cancellation every N symbols for large files
@@ -793,6 +796,14 @@ export class WorkspaceIndexer {
 
             const nameNode = this.findCaptureByName(captures, nameCapture, capture.node);
             if (!nameNode) { continue; }
+
+            // Deduplicate by name node position to avoid duplicates from template wrappers
+            // (e.g., both class_decl and class_template match the same class)
+            const namePositionKey = `${nameNode.startPosition.row}:${nameNode.startPosition.column}:${nameNode.endPosition.row}:${nameNode.endPosition.column}:${category}`;
+            if (processedNamePositions.has(namePositionKey)) {
+                continue;
+            }
+            processedNamePositions.add(namePositionKey);
 
             const range = new vscode.Range(
                 new vscode.Position(nameNode.startPosition.row, nameNode.startPosition.column),
