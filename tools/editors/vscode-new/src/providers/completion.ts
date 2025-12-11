@@ -3,7 +3,7 @@ import * as Parser from 'web-tree-sitter';
 import { WorkspaceIndexer, SymbolInfo } from '../service/indexer';
 import { TreeSitterService } from '../service/treeSitter';
 import { extractModuleFromQualified } from '../utils/importUtils';
-import { pickBestCompletionSymbols } from '../utils/completionUtils';
+import { parseStaticMemberAccessPrefix, pickBestCompletionSymbols } from '../utils/completionUtils';
 import { OPERATION_TIMEOUTS, withTimeout, withProviderGuard } from '../utils/timeout';
 import { healthMonitor } from '../service/healthMonitor';
 
@@ -85,9 +85,19 @@ export class KanagawaCompletionItemProvider implements vscode.CompletionItemProv
                     }
                 }
 
-                // Static member completions (after '::')
-                if (prefix.endsWith('::')) {
-                    const staticItems = await this.provideStaticMemberCompletions(document, position, tree, token, prefix);
+                // Static member completions (after or within '::')
+                // IMPORTANT: enum values are always referenced as `EnumType::Value`,
+                // so we must provide completions both right after `::` and while typing.
+                const staticCtx = parseStaticMemberAccessPrefix(prefix);
+                if (staticCtx) {
+                    const staticItems = await this.provideStaticMemberCompletions(
+                        document,
+                        position,
+                        tree,
+                        token,
+                        staticCtx.typeName,
+                        staticCtx.memberPrefix
+                    );
                     if (staticItems.length > 0) {
                         return new vscode.CompletionList(staticItems, true);
                     }
@@ -134,7 +144,11 @@ export class KanagawaCompletionItemProvider implements vscode.CompletionItemProv
 
         // Tiers 2-5: Workspace symbols (filtered and tiered)
         const symbols = this.indexer.getAllSymbols();
-        const matching = symbols.filter(sym => !currentPrefix || sym.name.startsWith(currentPrefix));
+        // Enum constants should generally be used as `EnumType::Value`, not bare `Value`.
+        // Avoid surfacing them in general completions to reduce noise and prevent invalid inserts.
+        const matching = symbols
+            .filter(sym => sym.category !== 'constant')
+            .filter(sym => !currentPrefix || sym.name.startsWith(currentPrefix));
 
         // Pick best representative symbol per name based on import accessibility.
         // This prevents inaccessible definitions from shadowing accessible ones.
@@ -329,18 +343,24 @@ export class KanagawaCompletionItemProvider implements vscode.CompletionItemProv
         position: vscode.Position,
         tree: Parser.Tree,
         token: vscode.CancellationToken,
-        prefix: string
+        typeName: string,
+        memberPrefix: string
     ): Promise<vscode.CompletionItem[]> {
-        const match = prefix.match(/([A-Za-z_][\w.]*)::$/);
-        if (!match) { return []; }
-        const typeName = match[1];
+        void document;
+        void position;
+        void tree;
+
         if (!typeName) { return []; }
 
-        const members = this.indexer.getMembersForType(typeName, {
+        const resolved = this.indexer.resolveMembersForType(typeName, {
             includeMethods: true,
-            includeFields: true
+            includeFields: true,
+            includeConstants: true,
+            includeTypes: true,
+            namePrefix: memberPrefix || undefined
         });
 
+        const members = resolved.members;
         if (!members.length) { return []; }
 
         const items: vscode.CompletionItem[] = [];
@@ -354,7 +374,11 @@ export class KanagawaCompletionItemProvider implements vscode.CompletionItemProv
 
             const kind = sym.category === 'method'
                 ? vscode.CompletionItemKind.Method
-                : vscode.CompletionItemKind.Field;
+                : sym.category === 'constant'
+                    ? vscode.CompletionItemKind.EnumMember
+                    : sym.category === 'member'
+                        ? vscode.CompletionItemKind.Field
+                        : vscode.CompletionItemKind.Property;
 
             const item = new vscode.CompletionItem(sym.name, kind);
             if (sym.signature) {

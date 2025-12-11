@@ -1477,10 +1477,22 @@ export class WorkspaceIndexer {
             if (params) {
                 end = new vscode.Position(params.endPosition.row, params.endPosition.column);
             }
+        } else if (captureName === 'enum') {
+            // Include the base type (`enum Foo : uint32`) but avoid capturing the body.
+            const baseType = defNode.childForFieldName('base_type');
+            if (baseType) {
+                end = new vscode.Position(baseType.endPosition.row, baseType.endPosition.column);
+            }
         } else if (captureName === 'variable' || captureName === 'member') {
             const initializer = defNode.childForFieldName('initializer');
             if (initializer) {
                 end = new vscode.Position(initializer.endPosition.row, initializer.endPosition.column);
+            }
+        } else if (captureName === 'constant') {
+            // Enum constants can have an assigned value: `Foo = expr`
+            const value = defNode.childForFieldName('value');
+            if (value) {
+                end = new vscode.Position(value.endPosition.row, value.endPosition.column);
             }
         }
 

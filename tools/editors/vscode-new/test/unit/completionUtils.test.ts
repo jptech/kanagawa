@@ -1,6 +1,6 @@
 import { expect } from 'chai';
 import { ResolvedImports } from '../../src/utils/importUtils';
-import { computeCompletionTier, pickBestCompletionSymbols } from '../../src/utils/completionUtils';
+import { computeCompletionTier, parseStaticMemberAccessPrefix, pickBestCompletionSymbols } from '../../src/utils/completionUtils';
 
 describe('completionUtils', () => {
     const createResolvedImports = (opts: {
@@ -60,5 +60,41 @@ describe('completionUtils', () => {
         const picked = best.get('count_t');
         expect(picked!.symbol.qualifiedName).to.equal('base::count_t');
         expect(picked!.tier).to.equal('same_module');
+    });
+
+    describe('parseStaticMemberAccessPrefix', () => {
+        it('parses `EnumType::`', () => {
+            const ctx = parseStaticMemberAccessPrefix('EnumType::');
+            expect(ctx).to.not.equal(undefined);
+            expect(ctx!.typeName).to.equal('EnumType');
+            expect(ctx!.memberPrefix).to.equal('');
+        });
+
+        it('parses `EnumType::Va`', () => {
+            const ctx = parseStaticMemberAccessPrefix('EnumType::Va');
+            expect(ctx).to.not.equal(undefined);
+            expect(ctx!.typeName).to.equal('EnumType');
+            expect(ctx!.memberPrefix).to.equal('Va');
+        });
+
+        it('parses rightmost occurrence in an expression', () => {
+            const ctx = parseStaticMemberAccessPrefix('foo + EnumType::Val');
+            expect(ctx).to.not.equal(undefined);
+            expect(ctx!.typeName).to.equal('EnumType');
+            expect(ctx!.memberPrefix).to.equal('Val');
+        });
+
+        it('supports simple template args', () => {
+            const ctx = parseStaticMemberAccessPrefix('Vec<uint32>::siz');
+            expect(ctx).to.not.equal(undefined);
+            expect(ctx!.typeName).to.equal('Vec<uint32>');
+            expect(ctx!.memberPrefix).to.equal('siz');
+        });
+
+        it('returns undefined when no static access present', () => {
+            expect(parseStaticMemberAccessPrefix('EnumType')).to.equal(undefined);
+            expect(parseStaticMemberAccessPrefix('foo.bar')).to.equal(undefined);
+            expect(parseStaticMemberAccessPrefix('')).to.equal(undefined);
+        });
     });
 });

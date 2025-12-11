@@ -17,6 +17,8 @@ import * as Parser from 'web-tree-sitter';
 import { WorkspaceIndexer, SymbolInfo, SymbolContextHint } from './indexer';
 import { extractModuleFromQualified, isSymbolStrictlyAccessible, ResolvedImports } from '../utils/importUtils';
 import { isModuleOrImportNode } from '../utils/nodeUtils';
+import { rankSymbolsForResolution } from '../utils/resolutionRanking';
+import { extractQualifiedStaticMemberContext } from '../utils/qualifiedIdentifierUtils';
 
 /**
  * Resolution confidence levels, from most to least certain.
@@ -96,8 +98,6 @@ export class SymbolResolutionService {
             };
         }
         
-        const scopePath = this.indexer.getScopePathForNode(identifier);
-
         const accessible: SymbolInfo[] = [];
         const inaccessible: SymbolInfo[] = [];
         const seen = new Set<string>();
@@ -112,6 +112,32 @@ export class SymbolResolutionService {
                 inaccessible.push(sym);
             }
         };
+
+        // Priority 0: Qualified static access (e.g., EnumType::Value)
+        // Enum values are always referenced via qualified name, so the rightmost
+        // identifier must be resolved against its container, not against local/module scope.
+        const qualifiedCtx = extractQualifiedStaticMemberContext(identifier as any);
+        if (qualifiedCtx) {
+            const resolvedImports = this.indexer.getResolvedImports(document.uri);
+            const members = this.indexer.resolveMembersForType(qualifiedCtx.containerName, {
+                includeMethods: true,
+                includeFields: true,
+                includeConstants: true,
+                includeTypes: true
+            }).members;
+
+            const matches = members.filter(m => m.name === qualifiedCtx.memberName);
+            for (const sym of matches) {
+                const isAccessible = this.isSymbolAccessible(sym, resolvedImports);
+                addSymbol(sym, isAccessible);
+            }
+
+            // IMPORTANT: If we're in a qualified static context, do NOT fall back
+            // to unqualified resolution when we can't find the member.
+            return this.computeResult(accessible, inaccessible, options);
+        }
+
+        const scopePath = this.indexer.getScopePathForNode(identifier);
 
         // Priority 1: Local symbol (variable/parameter in scope)
         if (!options.skipLocals) {
@@ -177,7 +203,27 @@ export class SymbolResolutionService {
             }
         }
 
-        return this.computeResult(accessible, inaccessible, options);
+        // FINAL STEP: When there are many candidates, pick a deterministic “best” one.
+        // This is especially important for hover (which shows only the primary), and
+        // prevents random workspace matches from winning when scores tie.
+        const rankedAccessible = rankSymbolsForResolution(accessible, {
+            documentUri: document.uri,
+            resolvedImports,
+            getDeclaringModule: (sym) => this.indexer.getDocumentContext(sym.uri)?.modulePath
+        });
+        const rankedInaccessible = options.includeInaccessible
+            ? rankSymbolsForResolution(inaccessible, {
+                documentUri: document.uri,
+                resolvedImports,
+                getDeclaringModule: (sym) => this.indexer.getDocumentContext(sym.uri)?.modulePath
+            })
+            : [];
+
+        return this.computeResult(
+            rankedAccessible.map(r => r.symbol),
+            rankedInaccessible.map(r => r.symbol),
+            options
+        );
     }
 
     /**

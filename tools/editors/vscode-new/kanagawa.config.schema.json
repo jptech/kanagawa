@@ -35,6 +35,26 @@
                 ["**/generated/**", "**/*.gen.k"],
                 ["test_vectors/**", "benchmarks/**"]
             ]
+        },
+        "hover": {
+            "type": "object",
+            "description": "Hover layout preferences for Kanagawa files.",
+            "properties": {
+                "layout": {
+                    "type": "string",
+                    "enum": ["dense", "expanded"],
+                    "default": "expanded",
+                    "description": "Hover layout style. `expanded` shows headings and spacing; `dense` packs content tighter."
+                },
+                "docMaxLines": {
+                    "type": "integer",
+                    "minimum": 6,
+                    "maximum": 200,
+                    "default": 24,
+                    "description": "Maximum documentation lines to show before collapsing the remainder. Long docs remain scrollable."
+                }
+            },
+            "additionalProperties": false
         }
     },
     "additionalProperties": false

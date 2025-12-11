@@ -90,3 +90,31 @@ export function pickBestCompletionSymbols<T extends CompletionSymbolLike>(
 
     return best;
 }
+
+/**
+ * Parses a static member access context from the text prefix before the cursor.
+ *
+ * Supports patterns like:
+ * - `EnumType::` (memberPrefix = "")
+ * - `EnumType::Va` (memberPrefix = "Va")
+ * - `Foo<uint32>::bar` (simple template args; best-effort)
+ *
+ * This helper is vscode-free and intended for unit testing.
+ */
+export function parseStaticMemberAccessPrefix(
+    linePrefix: string
+): { typeName: string; memberPrefix: string } | undefined {
+    if (!linePrefix) { return undefined; }
+
+    // Match the rightmost `Type::MemberPrefix` at end of prefix.
+    // - Type: identifier with optional dotted qualifiers and optional simple template args.
+    // - MemberPrefix: identifier prefix (may be empty).
+    const match = linePrefix.match(/([A-Za-z_][\w.]*(?:<[^<>]*>)?)::([A-Za-z0-9_]*)$/);
+    if (!match) { return undefined; }
+
+    const typeName = match[1];
+    const memberPrefix = match[2] ?? '';
+
+    if (!typeName) { return undefined; }
+    return { typeName, memberPrefix };
+}

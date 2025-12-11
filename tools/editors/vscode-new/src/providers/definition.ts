@@ -4,6 +4,7 @@ import { WorkspaceIndexer, SymbolInfo } from '../service/indexer';
 import { SymbolResolutionService } from '../service/resolution';
 import { perfLogger, PerfOps } from '../utils/perfLogger';
 import { resolveToIdentifier, isModuleOrImportNode } from '../utils/nodeUtils';
+import { extractQualifiedStaticMemberContext } from '../utils/qualifiedIdentifierUtils';
 import { OPERATION_TIMEOUTS, withTimeout, withProviderGuard } from '../utils/timeout';
 import { healthMonitor } from '../service/healthMonitor';
 
@@ -141,15 +142,63 @@ export class KanagawaDefinitionProvider implements vscode.DefinitionProvider {
                         OPERATION_TIMEOUTS.SYMBOL_RESOLUTION
                     );
 
-                    if (!resolution || resolution.confidence === 'none') {
-                        this.setCache(cacheKey, undefined);
-                        return undefined;
-                    }
-                    
-                    // If primary is undefined but there are inaccessible matches,
-                    // don't jump to them - the user needs to add an import first.
-                    // The hover provider will show the import suggestion.
-                    if (!resolution.primary) {
+                    // Special case: qualified static access (EnumType::Value).
+                    // Even if our strict import-accessibility check thinks the symbol is
+                    // inaccessible, the user is explicitly referencing it; allow jumping to
+                    // the best match (or fall back to the enum/type itself).
+                    if (!resolution || resolution.confidence === 'none' || !resolution.primary) {
+                        const qualifiedCtx = extractQualifiedStaticMemberContext(identifier as any);
+                        if (qualifiedCtx) {
+                            const resolutionWithInaccessible = await withTimeout(
+                                'definition qualified symbol resolution (include inaccessible)',
+                                this.resolutionService.resolveAtPosition(
+                                    { document, position, tree, identifier },
+                                    { includeInaccessible: true }
+                                ),
+                                OPERATION_TIMEOUTS.SYMBOL_RESOLUTION
+                            );
+
+                            if (resolutionWithInaccessible?.primary) {
+                                const primary = resolutionWithInaccessible.primary;
+                                // For exact/high confidence, always jump directly.
+                                if (resolutionWithInaccessible.confidence === 'exact' || resolutionWithInaccessible.confidence === 'high') {
+                                    const loc = new vscode.Location(primary.uri, primary.range);
+                                    this.setCache(cacheKey, loc);
+                                    return loc;
+                                }
+
+                                const allMatches = [primary, ...resolutionWithInaccessible.alternatives];
+                                if (allMatches.length > 1) {
+                                    const locs = this.buildLocationArray(allMatches);
+                                    this.setCache(cacheKey, locs);
+                                    return locs;
+                                }
+
+                                const loc = new vscode.Location(primary.uri, primary.range);
+                                this.setCache(cacheKey, loc);
+                                return loc;
+                            }
+
+                            // Fall back to the enum/type definition if member not found.
+                            const containerResolution = await withTimeout(
+                                'definition qualified container resolution',
+                                this.resolutionService.resolveByName(
+                                    qualifiedCtx.containerName,
+                                    document.uri,
+                                    [],
+                                    { includeInaccessible: true }
+                                ),
+                                OPERATION_TIMEOUTS.SYMBOL_RESOLUTION
+                            );
+
+                            if (containerResolution?.primary) {
+                                const loc = new vscode.Location(containerResolution.primary.uri, containerResolution.primary.range);
+                                this.setCache(cacheKey, loc);
+                                return loc;
+                            }
+                        }
+
+                        // Default behavior: don't jump when we can't resolve (or only have inaccessible matches).
                         this.setCache(cacheKey, undefined);
                         return undefined;
                     }

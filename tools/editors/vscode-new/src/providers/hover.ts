@@ -305,7 +305,21 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
         const icon = CATEGORY_ICONS[sym.category] ?? CATEGORY_ICONS['other'];
         
         // Build signature block
-        const summary = (sym.signature ?? `${sym.detail ?? ''} ${sym.name}`.trim()).trim() || sym.name;
+        let summary = (sym.signature ?? `${sym.detail ?? ''} ${sym.name}`.trim()).trim() || sym.name;
+
+        // Enum constants are always referenced as `EnumType::Value`.
+        // Prefer showing the qualified form in hovers.
+        if (sym.category === 'constant' && sym.scopePath.length > 0) {
+            const container = sym.scopePath[sym.scopePath.length - 1];
+            if (container) {
+                const qualifiedPrefix = `${container}::${sym.name}`;
+                if (sym.signature && sym.signature.trim().startsWith(sym.name)) {
+                    summary = sym.signature.replace(sym.name, qualifiedPrefix);
+                } else {
+                    summary = qualifiedPrefix;
+                }
+            }
+        }
         md.appendCodeblock(summary, 'kanagawa');
 
         // Category + scope + path
