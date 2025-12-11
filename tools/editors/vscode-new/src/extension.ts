@@ -118,6 +118,74 @@ export async function activate(context: vscode.ExtensionContext) {
     const parseDebouncer = new KeyedDebouncer<string>(perfConfig.debounceDelay);
     context.subscriptions.push(parseDebouncer);
 
+    // Debouncers for file indexing and export rebuilds.
+    // We debounce (1) per-file reindex to coalesce rapid edits/saves and (2) a global
+    // module-exports rebuild to avoid O(N) rebuild storms during bulk operations.
+    const indexUpdateDebouncer = new KeyedDebouncer<string>(0);
+    const exportsRebuildDebouncer = new KeyedDebouncer<string>(0);
+    context.subscriptions.push(indexUpdateDebouncer, exportsRebuildDebouncer);
+
+    const computeIndexingDebounces = () => {
+        // Reuse the existing performance debounce as a base signal.
+        // Keep bounded to avoid pathological behavior in large/busy workspaces.
+        const base = vscode.workspace.getConfiguration('kanagawa.performance').get<number>('debounceDelay', 200);
+        const indexDelayMs = Math.min(Math.max(base, 150), 500);
+        const exportsDelayMs = Math.min(Math.max(base * 3, 500), 1500);
+        return { indexDelayMs, exportsDelayMs };
+    };
+
+    const scheduleExportsRebuild = () => {
+        const { exportsDelayMs } = computeIndexingDebounces();
+        exportsRebuildDebouncer.debounce(
+            'moduleExports',
+            async () => {
+                try {
+                    indexer.rebuildModuleExports();
+                } catch (err) {
+                    console.error('Kanagawa: Failed to rebuild module exports:', err);
+                }
+            },
+            exportsDelayMs
+        );
+    };
+
+    const scheduleReindex = (uri: vscode.Uri, reason: 'save' | 'watcher-change' | 'watcher-create') => {
+        const key = uri.toString();
+        const { indexDelayMs } = computeIndexingDebounces();
+
+        indexUpdateDebouncer.debounce(
+            key,
+            async () => {
+                try {
+                    // Respect configured exclude patterns.
+                    const shouldIndex = await indexer.shouldIndexUri(uri);
+                    if (!shouldIndex) {
+                        return;
+                    }
+
+                    if (reason !== 'save') {
+                        console.log(`Kanagawa: Reindexing (via ${reason}):`, key);
+                    }
+
+                    await indexer.updateFile(uri);
+                    scheduleExportsRebuild();
+                } catch (err) {
+                    console.error('Kanagawa: Failed to reindex file:', key, err);
+                }
+            },
+            indexDelayMs
+        );
+    };
+
+    const scheduleRemove = (uri: vscode.Uri) => {
+        try {
+            indexer.removeFile(uri);
+        } catch (err) {
+            console.error('Kanagawa: Failed to remove deleted file from index:', uri.toString(), err);
+        }
+        scheduleExportsRebuild();
+    };
+
     // Create semantic tokens provider with change notification support
     const semanticTokensProvider = new KanagawaSemanticTokensProvider(service, queryManager);
 
@@ -265,9 +333,7 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.workspace.onDidSaveTextDocument((doc: vscode.TextDocument) => {
             if (doc.languageId === 'kanagawa') {
                 console.log('Kanagawa: Document saved, updating index:', doc.uri.toString());
-                indexer.updateFile(doc.uri).catch((err) => {
-                    console.error('Kanagawa: Failed to update index on save:', err);
-                });
+                scheduleReindex(doc.uri, 'save');
             }
         }),
         
@@ -282,6 +348,47 @@ export async function activate(context: vscode.ExtensionContext) {
                 console.log('Kanagawa: Performance configuration updated:', newConfig);
             }
         })
+    );
+
+    // Workspace file watcher: keep index in sync with on-disk changes.
+    // Caveat: This watches workspace folders only (not external import dirs).
+    const watcherDisposables: vscode.Disposable[] = [];
+    const disposeWatchers = () => {
+        for (const d of watcherDisposables) {
+            try {
+                d.dispose();
+            } catch {
+                // ignore
+            }
+        }
+        watcherDisposables.length = 0;
+    };
+
+    const setupWorkspaceWatchers = () => {
+        disposeWatchers();
+
+        const folders = vscode.workspace.workspaceFolders;
+        if (!folders || folders.length === 0) {
+            return;
+        }
+
+        for (const folder of folders) {
+            const pattern = new vscode.RelativePattern(folder, '**/*.{k,pd}');
+            const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+
+            watcherDisposables.push(watcher);
+            watcherDisposables.push(
+                watcher.onDidCreate((uri) => scheduleReindex(uri, 'watcher-create')),
+                watcher.onDidChange((uri) => scheduleReindex(uri, 'watcher-change')),
+                watcher.onDidDelete((uri) => scheduleRemove(uri))
+            );
+        }
+    };
+
+    setupWorkspaceWatchers();
+    context.subscriptions.push(
+        { dispose: disposeWatchers },
+        vscode.workspace.onDidChangeWorkspaceFolders(() => setupWorkspaceWatchers())
     );
 
     // Parse currently active editor - run asynchronously to avoid blocking activation

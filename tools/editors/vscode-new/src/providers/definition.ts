@@ -141,7 +141,15 @@ export class KanagawaDefinitionProvider implements vscode.DefinitionProvider {
                         OPERATION_TIMEOUTS.SYMBOL_RESOLUTION
                     );
 
-                    if (!resolution || resolution.confidence === 'none' || !resolution.primary) {
+                    if (!resolution || resolution.confidence === 'none') {
+                        this.setCache(cacheKey, undefined);
+                        return undefined;
+                    }
+                    
+                    // If primary is undefined but there are inaccessible matches,
+                    // don't jump to them - the user needs to add an import first.
+                    // The hover provider will show the import suggestion.
+                    if (!resolution.primary) {
                         this.setCache(cacheKey, undefined);
                         return undefined;
                     }

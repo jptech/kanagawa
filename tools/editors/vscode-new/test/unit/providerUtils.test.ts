@@ -88,7 +88,8 @@ describe('Provider Quality Utilities', () => {
 
         it('same module symbols are accessible', () => {
             const imports = createResolvedImports({ currentModule: 'data.fifo' });
-            const accessible = isQualifiedNameAccessible('data.fifo::FIFO::push', imports);
+            // Module-level symbol (not a class member)
+            const accessible = isQualifiedNameAccessible('data.fifo::FIFO', imports);
             expect(accessible).to.be.true;
         });
 
@@ -97,8 +98,19 @@ describe('Provider Quality Utilities', () => {
                 currentModule: 'mymodule',
                 importedModules: ['data.fifo']
             });
-            const accessible = isQualifiedNameAccessible('data.fifo::FIFO::push', imports);
+            // Module-level symbol (not a class member)
+            const accessible = isQualifiedNameAccessible('data.fifo::FIFO', imports);
             expect(accessible).to.be.true;
+        });
+
+        it('class members are not accessible as bare identifiers', () => {
+            const imports = createResolvedImports({
+                currentModule: 'mymodule',
+                importedModules: ['data.fifo']
+            });
+            // Class member symbols should NOT be accessible as bare identifiers
+            const accessible = isQualifiedNameAccessible('data.fifo::FIFO::push', imports);
+            expect(accessible).to.be.false;
         });
 
         it('global symbols are always accessible', () => {
@@ -163,8 +175,8 @@ describe('Provider Quality Utilities', () => {
             expect(extractModuleFromQualified('data.fifo::FIFO::push')).to.equal('data.fifo');
         });
 
-        it('returns undefined for names without module', () => {
-            expect(extractModuleFromQualified('FIFO::push')).to.be.undefined;
+        it('extracts single-segment module paths', () => {
+            expect(extractModuleFromQualified('FIFO::push')).to.equal('FIFO');
         });
 
         it('returns undefined for simple names', () => {

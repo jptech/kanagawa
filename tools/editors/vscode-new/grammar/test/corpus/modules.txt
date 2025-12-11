@@ -61,6 +61,84 @@ module control.loop { pipelined_for, parallel_for }
       (identifier))))
 
 ================================================================================
+Module re-export
+================================================================================
+
+module matrix { module numeric.fixed }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_decl
+    name: (module_name
+      (module_identifier_part))
+    (module_exports
+      (module_reference
+        (module_name
+          (module_identifier_part)
+          (module_identifier_part))))))
+
+================================================================================
+Module self-export
+================================================================================
+
+module foo.bar { module foo.bar }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_decl
+    name: (module_name
+      (module_identifier_part)
+      (module_identifier_part))
+    (module_exports
+      (module_reference
+        (module_name
+          (module_identifier_part)
+          (module_identifier_part))))))
+
+================================================================================
+Module difference
+================================================================================
+
+module params { module params \ .cmdargs }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_decl
+    name: (module_name
+      (module_identifier_part))
+    (module_exports
+      (module_diff
+        (module_name
+          (module_identifier_part))
+        (module_name)))))
+
+================================================================================
+Module mixed exports
+================================================================================
+
+module wrapper { Widget, module base, module data.utils \ .cmdargs }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_decl
+    name: (module_name
+      (module_identifier_part))
+    (module_exports
+      (identifier)
+      (module_reference
+        (module_name
+          (module_identifier_part)))
+      (module_diff
+        (module_name
+          (module_identifier_part)
+          (module_identifier_part))
+        (module_name)))))
+
+================================================================================
 Module with nested content
 ================================================================================
 

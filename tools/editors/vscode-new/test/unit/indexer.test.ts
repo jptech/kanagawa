@@ -251,7 +251,7 @@ describe('WorkspaceIndexer', () => {
     describe('Module Export Building', () => {
         it('should extract module from qualified name', () => {
             expect(extractModuleFromQualified('data.fifo::FIFO::push')).to.equal('data.fifo');
-            expect(extractModuleFromQualified('FIFO::push')).to.be.undefined;
+            expect(extractModuleFromQualified('FIFO::push')).to.equal('FIFO');
             expect(extractModuleFromQualified('push')).to.be.undefined;
         });
 
@@ -266,7 +266,10 @@ describe('WorkspaceIndexer', () => {
             moduleExports.set('data.fifo', {
                 modulePath: 'data.fifo',
                 exportedSymbols: new Set(['data.fifo::FIFO', 'data.fifo::FIFO::push']),
-                exportedNames: new Set(['FIFO', 'push'])
+                exportedNames: new Set(['FIFO', 'push']),
+                explicitExports: new Set(['FIFO', 'push']),
+                reExportedModules: new Set(),
+                moduleDifferences: new Map()
             });
 
             const resolved = resolveImports(
@@ -285,7 +288,10 @@ describe('WorkspaceIndexer', () => {
             moduleExports.set('data.fifo', {
                 modulePath: 'data.fifo',
                 exportedSymbols: new Set(['data.fifo::FIFO']),
-                exportedNames: new Set(['FIFO'])
+                exportedNames: new Set(['FIFO']),
+                explicitExports: new Set(['FIFO']),
+                reExportedModules: new Set(),
+                moduleDifferences: new Map()
             });
 
             const resolved = resolveImports(

@@ -3,7 +3,7 @@ import * as Parser from 'web-tree-sitter';
 import { TreeSitterService } from '../service/treeSitter';
 import { WorkspaceIndexer, SymbolInfo } from '../service/indexer';
 import { SymbolResolutionService, ResolutionResult } from '../service/resolution';
-import { extractModuleFromQualified } from '../utils/importUtils';
+import { extractModuleFromQualified, suggestImportsForSymbol } from '../utils/importUtils';
 import { getNodeText, resolveToIdentifier, isModuleOrImportNode } from '../utils/nodeUtils';
 import { perfLogger, PerfOps } from '../utils/perfLogger';
 import { OPERATION_TIMEOUTS, withTimeout, withProviderGuard } from '../utils/timeout';
@@ -223,6 +223,7 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
 
     /**
      * Builds hover markdown content based on resolution result.
+     * Shows import suggestions prominently when the best match requires an import.
      */
     private async buildHoverContent(
         document: vscode.TextDocument,
@@ -230,6 +231,31 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
         prefs: HoverPreferences
     ): Promise<vscode.MarkdownString[]> {
         const markdowns: vscode.MarkdownString[] = [];
+
+        // Case 1: No primary and only inaccessible matches - show import suggestion
+        if (!resolution.primary && resolution.inaccessible.length > 0) {
+            const suggestMd = this.createMarkdown();
+            const inaccessibleSym = resolution.inaccessible[0];
+            
+            // Build a preview of what they'd get
+            const summary = (inaccessibleSym.signature ?? `${inaccessibleSym.detail ?? ''} ${inaccessibleSym.name}`.trim()).trim() || inaccessibleSym.name;
+            suggestMd.appendCodeblock(summary, 'kanagawa');
+            
+            const modulePath = extractModuleFromQualified(inaccessibleSym.qualifiedName);
+            if (modulePath) {
+                suggestMd.appendMarkdown(`\n⚠️ **Symbol not accessible**\n\n`);
+                suggestMd.appendMarkdown(`Add import to use this symbol:\n`);
+                suggestMd.appendCodeblock(`import ${modulePath}`, 'kanagawa');
+                
+                // Show count of other inaccessible matches
+                if (resolution.inaccessible.length > 1) {
+                    suggestMd.appendMarkdown(`\n*+${resolution.inaccessible.length - 1} other inaccessible match${resolution.inaccessible.length === 2 ? '' : 'es'}*`);
+                }
+            }
+            
+            markdowns.push(suggestMd);
+            return markdowns;
+        }
 
         if (!resolution.primary) {
             return markdowns;
@@ -247,13 +273,17 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
 
         markdowns.push(primaryMd);
 
-        // Add import suggestion for inaccessible symbols
-        if (resolution.confidence === 'low' && resolution.inaccessible.length > 0) {
+        // Case 2: Primary is accessible but there are also inaccessible matches
+        // Show import suggestion with lower prominence
+        if (resolution.inaccessible.length > 0) {
             const inaccessibleSym = resolution.inaccessible[0];
             const modulePath = extractModuleFromQualified(inaccessibleSym.qualifiedName);
             if (modulePath) {
-                const suggestMd = new vscode.MarkdownString();
-                suggestMd.appendMarkdown(`\n\n💡 *Did you mean to import \`${modulePath}\`?*`);
+                const suggestMd = this.createMarkdown();
+                suggestMd.appendMarkdown(`\n💡 *Also available from \`${modulePath}\`*`);
+                if (resolution.inaccessible.length > 1) {
+                    suggestMd.appendMarkdown(` *(+${resolution.inaccessible.length - 1} more)*`);
+                }
                 markdowns.push(suggestMd);
             }
         }

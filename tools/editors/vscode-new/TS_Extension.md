@@ -444,6 +444,20 @@ parseDebouncer.debounce(uri, async () => {
 ```
 Default delay: 200ms after typing stops.
 
+#### Workspace File Watching (v0.2.1)
+The extension now keeps the index consistent with on-disk changes by registering a workspace-only `FileSystemWatcher` for `**/*.{k,pd}`.
+
+- **Create/Change:** Schedules a debounced re-index of the affected URI.
+- **Delete:** Removes all symbols and document context for the deleted file.
+- **Global Export Rebuild:** After any reindex/remove, the extension schedules a debounced global rebuild of the module exports index and clears the resolved-imports cache (since it depends on module exports).
+
+**Debounce behavior (tuned for bulk ops):**
+- Per-file indexing uses a short debounce.
+- Module-exports rebuild uses a longer debounce to coalesce many file changes (e.g., `git checkout`).
+- Delays are derived from `kanagawa.performance.debounceDelay` but bounded to avoid pathological values.
+
+**Caveat:** Only workspace folders are watched initially. If your project uses external import dirs outside the workspace, those directories will not automatically trigger indexing when files change on disk (use `Rebuild Index` or edit/open/save within VS Code).
+
 #### Resource Cleanup
 Document close events now properly clean up:
 - Cancel pending debounced operations

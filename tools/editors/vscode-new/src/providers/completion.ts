@@ -3,6 +3,7 @@ import * as Parser from 'web-tree-sitter';
 import { WorkspaceIndexer, SymbolInfo } from '../service/indexer';
 import { TreeSitterService } from '../service/treeSitter';
 import { extractModuleFromQualified } from '../utils/importUtils';
+import { pickBestCompletionSymbols } from '../utils/completionUtils';
 import { OPERATION_TIMEOUTS, withTimeout, withProviderGuard } from '../utils/timeout';
 import { healthMonitor } from '../service/healthMonitor';
 
@@ -133,20 +134,23 @@ export class KanagawaCompletionItemProvider implements vscode.CompletionItemProv
 
         // Tiers 2-5: Workspace symbols (filtered and tiered)
         const symbols = this.indexer.getAllSymbols();
-        for (const sym of symbols) {
-            if (currentPrefix && !sym.name.startsWith(currentPrefix)) continue;
-            if (seenNames.has(sym.name)) continue;
-            seenNames.add(sym.name);
+        const matching = symbols.filter(sym => !currentPrefix || sym.name.startsWith(currentPrefix));
 
-            const tier = this.computeSymbolTier(sym, resolvedImports);
+        // Pick best representative symbol per name based on import accessibility.
+        // This prevents inaccessible definitions from shadowing accessible ones.
+        const bestByName = pickBestCompletionSymbols(matching, resolvedImports);
+
+        const allowInaccessible = currentPrefix.includes('.');
+        for (const [name, entry] of bestByName) {
+            if (seenNames.has(name)) continue; // Locals may already own this name
 
             // Skip inaccessible symbols (unless typing qualified name)
-            if (tier === 'inaccessible' && !currentPrefix.includes('.')) {
+            if (entry.tier === 'inaccessible' && !allowInaccessible) {
                 continue;
             }
 
-            const item = this.createSymbolCompletionItem(sym, tier);
-            items.push(item);
+            seenNames.add(name);
+            items.push(this.createSymbolCompletionItem(entry.symbol, entry.tier));
         }
 
         // Tier 4: Keywords
@@ -161,38 +165,6 @@ export class KanagawaCompletionItemProvider implements vscode.CompletionItemProv
         }
 
         return items;
-    }
-
-    /**
-     * Determines the completion tier for a symbol based on accessibility.
-     */
-    private computeSymbolTier(
-        sym: SymbolInfo,
-        resolvedImports: ReturnType<typeof this.indexer.getResolvedImports> | undefined
-    ): 'same_module' | 'imported' | 'global' | 'inaccessible' {
-        const modulePath = extractModuleFromQualified(sym.qualifiedName);
-
-        // No module = global scope
-        if (!modulePath) {
-            return 'global';
-        }
-
-        if (!resolvedImports) {
-            return 'global'; // No import info, treat as accessible
-        }
-
-        // Same module = highest priority
-        if (modulePath === resolvedImports.currentModule) {
-            return 'same_module';
-        }
-
-        // Imported module
-        if (resolvedImports.importedModules.has(modulePath)) {
-            return 'imported';
-        }
-
-        // Not accessible
-        return 'inaccessible';
     }
 
         /**

@@ -15,7 +15,7 @@
 import * as vscode from 'vscode';
 import * as Parser from 'web-tree-sitter';
 import { WorkspaceIndexer, SymbolInfo, SymbolContextHint } from './indexer';
-import { extractModuleFromQualified } from '../utils/importUtils';
+import { extractModuleFromQualified, isSymbolStrictlyAccessible, ResolvedImports } from '../utils/importUtils';
 import { isModuleOrImportNode } from '../utils/nodeUtils';
 
 /**
@@ -345,33 +345,23 @@ export class SymbolResolutionService {
 
     /**
      * Checks if a symbol is accessible from the current document.
+     * Uses strict accessibility rules that require proper imports.
+     * 
+     * A symbol is accessible if:
+     * 1. It's global (no module prefix) - always accessible
+     * 2. It's in the current module
+     * 3. It's in an imported module's export list (including transitive re-exports)
      */
     isSymbolAccessible(
         symbol: SymbolInfo,
-        resolvedImports: ReturnType<typeof this.indexer.getResolvedImports> | undefined
+        resolvedImports: ResolvedImports | undefined
     ): boolean {
         if (!resolvedImports) {
             return true; // No import info, assume accessible
         }
 
-        const modulePath = extractModuleFromQualified(symbol.qualifiedName);
-
-        // No module = global scope, always accessible
-        if (!modulePath) {
-            return true;
-        }
-
-        // Same module
-        if (modulePath === resolvedImports.currentModule) {
-            return true;
-        }
-
-        // Imported module
-        if (resolvedImports.importedModules.has(modulePath)) {
-            return true;
-        }
-
-        return false;
+        // Use the strict accessibility check from importUtils
+        return isSymbolStrictlyAccessible(symbol.qualifiedName, resolvedImports);
     }
 
     /**

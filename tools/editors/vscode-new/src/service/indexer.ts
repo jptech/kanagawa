@@ -22,7 +22,11 @@ import {
     ResolvedImports,
     resolveImports,
     filterByAccessibility,
-    extractModuleFromQualified
+    extractModuleFromQualified,
+    createEmptyModuleExports,
+    resolveTransitiveExports,
+    resolveImportsWithTransitives,
+    matchesImportPath
 } from '../utils/importUtils';
 import {
     MemberResolutionOptions,
@@ -69,9 +73,26 @@ export interface DocumentImport {
     alias?: string;
 }
 
+/**
+ * Parsed export information from a module declaration's export list.
+ * Represents `module foo { symbol1, module bar, module foo \ .cmdargs }`
+ */
+export interface ParsedModuleExports {
+    /** Simple symbol names explicitly exported */
+    explicitSymbols: Set<string>;
+    /** Module paths to re-export (via `module <path>` syntax) */
+    reExportedModules: Set<string>;
+    /** Module differences: base → exclude (via `module <base> \ <exclude>` syntax) */
+    moduleDifferences: Map<string, string>;
+    /** Whether the module exports itself (all exposable symbols) */
+    exportsItself: boolean;
+}
+
 export interface DocumentContext {
     modulePath?: string;
     imports: DocumentImport[];
+    /** Parsed export list from module declaration, if present */
+    moduleExports?: ParsedModuleExports;
 }
 
 export type SymbolContextHint =
@@ -914,12 +935,50 @@ export class WorkspaceIndexer {
     }
 
     /**
-     * Builds the module exports index from all indexed symbols.
+     * Builds the module exports index from all indexed symbols and parsed export lists.
      * Called after indexing is complete.
+     * 
+     * Phase 1: Build base exports from indexed symbols and document contexts
+     * Phase 2: Resolve explicit symbol re-exports (symbols from imports re-exported by name)
+     * Phase 3: Resolve transitive module re-exports and module differences
      */
     private buildModuleExports(): void {
         this.moduleExports.clear();
         
+        // Phase 1: Build base module exports from indexed symbols
+        // First, initialize exports from document contexts (parsed export lists)
+        for (const [uriStr, context] of this.documentContexts) {
+            if (!context.modulePath) {
+                continue;
+            }
+            
+            let exports = this.moduleExports.get(context.modulePath);
+            if (!exports) {
+                exports = createEmptyModuleExports(context.modulePath);
+                this.moduleExports.set(context.modulePath, exports);
+            }
+            
+            // Populate from parsed module exports if present
+            if (context.moduleExports) {
+                for (const sym of context.moduleExports.explicitSymbols) {
+                    exports.explicitExports.add(sym);
+                }
+                for (const mod of context.moduleExports.reExportedModules) {
+                    exports.reExportedModules.add(mod);
+                }
+                for (const [base, exclude] of context.moduleExports.moduleDifferences) {
+                    exports.moduleDifferences.set(base, exclude);
+                }
+                
+                // Self-export: add all symbols if module exports itself
+                if (context.moduleExports.exportsItself) {
+                    // Mark for later - we'll add all symbols after iterating qualified index
+                    exports.explicitExports.add('__EXPORT_ALL__');
+                }
+            }
+        }
+        
+        // Add symbols from qualified index to their modules
         for (const symbol of this.qualifiedIndex.values()) {
             const modulePath = extractModuleFromQualified(symbol.qualifiedName);
             if (!modulePath) {
@@ -928,20 +987,126 @@ export class WorkspaceIndexer {
             
             let exports = this.moduleExports.get(modulePath);
             if (!exports) {
-                exports = {
-                    modulePath,
-                    exportedSymbols: new Set(),
-                    exportedNames: new Set()
-                };
+                exports = createEmptyModuleExports(modulePath);
                 this.moduleExports.set(modulePath, exports);
             }
             
-            exports.exportedSymbols.add(symbol.qualifiedName);
-            exports.exportedNames.add(symbol.name);
+            // Check if this symbol should be exported
+            // A symbol is exported if:
+            // 1. No explicit exports defined (legacy: export everything)
+            // 2. The symbol name is in explicitExports
+            // 3. The module exports itself (__EXPORT_ALL__ marker)
+            const hasExplicitExports = exports.explicitExports.size > 0;
+            const isExplicitlyExported = exports.explicitExports.has(symbol.name);
+            const exportsAll = exports.explicitExports.has('__EXPORT_ALL__');
+            
+            if (!hasExplicitExports || isExplicitlyExported || exportsAll) {
+                exports.exportedSymbols.add(symbol.qualifiedName);
+                exports.exportedNames.add(symbol.name);
+            }
+        }
+        
+        // Clean up the __EXPORT_ALL__ marker
+        for (const exports of this.moduleExports.values()) {
+            exports.explicitExports.delete('__EXPORT_ALL__');
+        }
+        
+        // Phase 2: Resolve explicit symbol re-exports (e.g., base exports count_t from type.stdtype)
+        // When a module explicitly lists a symbol name in its export list but doesn't define it,
+        // the symbol may come from an imported module. We need to add those symbols to the exporter.
+        this.resolveExplicitSymbolReExports();
+        
+        // Phase 3: Resolve transitive module re-exports for modules with re-exports
+        // This must happen after all base exports are built
+        for (const [modulePath, exports] of this.moduleExports) {
+            if (exports.reExportedModules.size > 0 || exports.moduleDifferences.size > 0) {
+                // Resolve transitive exports (this populates exports.resolvedExports)
+                resolveTransitiveExports(modulePath, this.moduleExports);
+            }
         }
         
         if (this.verbose) {
             console.log(`Kanagawa: Built exports for ${this.moduleExports.size} modules.`);
+            
+            // Log modules with re-exports for debugging
+            let reExportCount = 0;
+            for (const exports of this.moduleExports.values()) {
+                if (exports.reExportedModules.size > 0 || exports.moduleDifferences.size > 0) {
+                    reExportCount++;
+                }
+            }
+            if (reExportCount > 0) {
+                console.log(`Kanagawa: ${reExportCount} modules have re-exports or module differences.`);
+            }
+        }
+    }
+
+    /**
+     * Resolves explicit symbol re-exports where a module lists a symbol name in its exports
+     * but the symbol is defined in an imported module.
+     * 
+     * Example: `base` exports `count_t` but `count_t` is defined in `type.stdtype`.
+     * When `base` imports `type.stdtype`, the `type.stdtype::count_t` symbol should
+     * be accessible through `base`.
+     * 
+     * This method adds such re-exported symbols to the re-exporting module's exportedSymbols.
+     */
+    private resolveExplicitSymbolReExports(): void {
+        // For each module that has explicit exports AND imports
+        for (const [uriStr, context] of this.documentContexts) {
+            if (!context.modulePath || !context.moduleExports) {
+                continue;
+            }
+            
+            const exports = this.moduleExports.get(context.modulePath);
+            if (!exports || exports.explicitExports.size === 0) {
+                continue;
+            }
+            
+            // Find symbols in explicitExports that aren't yet in exportedNames (not locally defined)
+            const missingExports = new Set<string>();
+            for (const symName of exports.explicitExports) {
+                if (!exports.exportedNames.has(symName)) {
+                    missingExports.add(symName);
+                }
+            }
+            
+            if (missingExports.size === 0) {
+                continue;
+            }
+            
+            // Check each import to see if it provides any of the missing symbols
+            for (const imp of context.imports) {
+                const normalizedPath = imp.path.replace(/^\./, '').trim();
+                
+                // Find matching module exports (handles suffix matching)
+                for (const [importedModulePath, importedExports] of this.moduleExports) {
+                    if (!matchesImportPath(importedModulePath, normalizedPath)) {
+                        continue;
+                    }
+                    
+                    // Check if this imported module exports any of our missing symbols
+                    for (const missingName of missingExports) {
+                        if (importedExports.exportedNames.has(missingName)) {
+                            // Found it! Add the imported symbol's qualified name to our exports
+                            for (const qn of importedExports.exportedSymbols) {
+                                // Extract symbol name from qualified name
+                                const parts = qn.split('::');
+                                const symName = parts[parts.length - 1];
+                                if (symName === missingName) {
+                                    exports.exportedSymbols.add(qn);
+                                    exports.exportedNames.add(missingName);
+                                    missingExports.delete(missingName);
+                                    
+                                    if (this.verbose) {
+                                        console.log(`Kanagawa: Module '${context.modulePath}' re-exports '${missingName}' from '${importedModulePath}' (${qn})`);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -982,11 +1147,12 @@ export class WorkspaceIndexer {
             };
         }
         
-        // Resolve imports
-        const resolved = resolveImports(
+        // Resolve imports with transitive export support and implicit base import
+        const resolved = resolveImportsWithTransitives(
             context.modulePath,
             context.imports,
-            this.moduleExports
+            this.moduleExports,
+            { includeImplicitBase: true }
         );
         
         // Evict oldest entry if at limit (first entry in Map is oldest due to insertion order)
@@ -1039,6 +1205,12 @@ export class WorkspaceIndexer {
                 if (nameNode) {
                     context.modulePath = nameNode.text;
                 }
+                
+                // Parse module_exports if present
+                const exportsNode = child.namedChildren.find(n => n.type === 'module_exports');
+                if (exportsNode) {
+                    context.moduleExports = this.parseModuleExports(exportsNode, context.modulePath);
+                }
             }
 
             if (child.type === 'import_decl') {
@@ -1053,6 +1225,66 @@ export class WorkspaceIndexer {
         }
 
         return context;
+    }
+
+    /**
+     * Parses a module_exports node to extract explicit exports, re-exports, and module differences.
+     * 
+     * Grammar:
+     * - `{ symbol1, symbol2 }` → explicit symbol exports
+     * - `{ module bar }` → re-export all from bar
+     * - `{ module foo \ .cmdargs }` → module difference (foo minus cmdargs)
+     * - `{ module foo }` where foo is the current module → self-export (all symbols)
+     * 
+     * @param exportsNode The module_exports AST node
+     * @param currentModulePath The current module's path (for detecting self-exports)
+     * @returns Parsed export information
+     */
+    private parseModuleExports(exportsNode: Parser.SyntaxNode, currentModulePath?: string): ParsedModuleExports {
+        const result: ParsedModuleExports = {
+            explicitSymbols: new Set(),
+            reExportedModules: new Set(),
+            moduleDifferences: new Map(),
+            exportsItself: false
+        };
+        
+        for (const child of exportsNode.namedChildren) {
+            switch (child.type) {
+                case 'identifier':
+                    // Simple symbol export: `symbol1`
+                    result.explicitSymbols.add(child.text);
+                    break;
+                    
+                case 'module_reference': {
+                    // Re-export: `module bar` or self-export `module foo`
+                    const moduleNameNode = child.namedChildren.find(n => n.type === 'module_name');
+                    if (moduleNameNode) {
+                        const reExportPath = moduleNameNode.text;
+                        if (currentModulePath && reExportPath === currentModulePath) {
+                            // Self-export: `module foo { module foo }` → export all
+                            result.exportsItself = true;
+                        } else {
+                            result.reExportedModules.add(reExportPath);
+                        }
+                    }
+                    break;
+                }
+                    
+                case 'module_diff': {
+                    // Module difference: `module foo \ .cmdargs`
+                    // Grammar: seq('module', $.module_name, '\\', $.module_name)
+                    const moduleNames = child.namedChildren.filter(n => n.type === 'module_name');
+                    if (moduleNames.length >= 2) {
+                        const basePath = moduleNames[0].text;
+                        const excludePath = moduleNames[1].text;
+                        result.moduleDifferences.set(basePath, excludePath);
+                    }
+                    break;
+                }
+            }
+        }
+        
+        return result;
     }
 
     /**
@@ -1501,7 +1733,7 @@ export class WorkspaceIndexer {
                 const imports = options?.uri
                     ? this.documentContexts.get(options.uri.toString())?.imports ?? []
                     : [];
-                const symbolModule = info.scopePath.length > 0 && info.scopePath[0].includes('.')
+                const symbolModule = info.scopePath.length > 0
                     ? info.scopePath[0]
                     : undefined;
 
@@ -1836,10 +2068,57 @@ export class WorkspaceIndexer {
         }
         return uris;
     }
+
+    /**
+     * Returns whether a URI should be indexed, based on the active exclude patterns.
+     * Intended for workspace file watching and other event-driven reindex triggers.
+     */
+    public async shouldIndexUri(uri: vscode.Uri): Promise<boolean> {
+        if (uri.scheme !== 'file') {
+            return false;
+        }
+
+        // Always exclude node_modules for performance and consistency with workspace scans.
+        const relativePath = vscode.workspace.asRelativePath(uri, false).replace(/\\/g, '/');
+        if (relativePath.includes('/node_modules/') || relativePath.startsWith('node_modules/')) {
+            return false;
+        }
+
+        const config = await this.getImportConfiguration();
+        return !this.isExcluded(uri, config.excludePatterns);
+    }
     
     async updateFile(uri: vscode.Uri) {
+        const uriStr = uri.toString();
+        // Ensure callers can retry if indexing fails.
+        this.indexedFiles.delete(uriStr);
         this.removeSymbolsForUri(uri);
-        await this.indexFile(uri);
+        try {
+            await this.indexFile(uri);
+        } catch (e) {
+            this.indexedFiles.delete(uriStr);
+            throw e;
+        }
+    }
+
+    /**
+     * Removes all indexed data for a file. Used when a file is deleted.
+     */
+    public removeFile(uri: vscode.Uri): void {
+        const uriStr = uri.toString();
+        this.indexedFiles.delete(uriStr);
+        this.resolvedImportsCache.delete(uriStr);
+        this.perFileCircuitBreakers.delete(uriStr);
+        this.removeSymbolsForUri(uri);
+    }
+
+    /**
+     * Rebuilds the module exports index from the currently indexed files.
+     * This also clears the resolved imports cache since it depends on module exports.
+     */
+    public rebuildModuleExports(): void {
+        this.buildModuleExports();
+        this.resolvedImportsCache.clear();
     }
 
     public async inferTypeFromExpression(document: vscode.TextDocument, expression?: Parser.SyntaxNode, depth: number = 0): Promise<string | undefined> {

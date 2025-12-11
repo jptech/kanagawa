@@ -8,6 +8,7 @@ import {
     isQualifiedNameAccessible,
     computeImportScore,
     filterByAccessibility,
+    isClassMember,
     ModuleExports
 } from '../../src/utils/importUtils';
 
@@ -27,6 +28,37 @@ describe('Import Utilities', () => {
 
         it('handles normal paths unchanged', () => {
             expect(normalizeModulePath('data.fifo')).to.equal('data.fifo');
+        });
+    });
+
+    describe('isClassMember', () => {
+        it('returns false for module-level symbols', () => {
+            // module::Type is at module level, not a class member
+            expect(isClassMember('data.fifo::FIFO')).to.be.false;
+            expect(isClassMember('base::count_t')).to.be.false;
+            expect(isClassMember('control.flow::Pipeline')).to.be.false;
+        });
+
+        it('returns true for class member symbols with module path', () => {
+            // module::Type::member is a class member
+            expect(isClassMember('data.fifo::FIFO::push')).to.be.true;
+            expect(isClassMember('data.counter.saturating::saturating_counter::count_t')).to.be.true;
+        });
+
+        it('returns true for deeply nested members', () => {
+            expect(isClassMember('module.path::Class::Inner::method')).to.be.true;
+        });
+
+        it('returns false for two-part qualified names', () => {
+            // module::Symbol or Type::member (ambiguous) is NOT treated as a class member.
+            // Class members require 3+ segments: module::Type::member.
+            expect(isClassMember('FIFO::push')).to.be.false;
+            expect(isClassMember('saturating_counter::count_t')).to.be.false;
+        });
+
+        it('returns false for simple names', () => {
+            expect(isClassMember('count_t')).to.be.false;
+            expect(isClassMember('FIFO')).to.be.false;
         });
     });
 
@@ -65,8 +97,9 @@ describe('Import Utilities', () => {
             expect(extractModuleFromQualified('data.fifo::FIFO::push')).to.equal('data.fifo');
         });
 
-        it('returns undefined for names without module', () => {
-            expect(extractModuleFromQualified('FIFO::push')).to.be.undefined;
+        it('extracts single-segment module paths', () => {
+            expect(extractModuleFromQualified('FIFO::push')).to.equal('FIFO');
+            expect(extractModuleFromQualified('base::uint32')).to.equal('base');
         });
 
         it('returns undefined for simple names', () => {
@@ -101,17 +134,26 @@ describe('Import Utilities', () => {
             ['data.fifo', {
                 modulePath: 'data.fifo',
                 exportedSymbols: new Set(['data.fifo::FIFO', 'data.fifo::FIFO::push', 'data.fifo::FIFO::pop']),
-                exportedNames: new Set(['FIFO', 'push', 'pop'])
+                exportedNames: new Set(['FIFO', 'push', 'pop']),
+                explicitExports: new Set(['FIFO', 'push', 'pop']),
+                reExportedModules: new Set(),
+                moduleDifferences: new Map()
             }],
             ['data.stack', {
                 modulePath: 'data.stack',
                 exportedSymbols: new Set(['data.stack::Stack', 'data.stack::Stack::push']),
-                exportedNames: new Set(['Stack', 'push'])
+                exportedNames: new Set(['Stack', 'push']),
+                explicitExports: new Set(['Stack', 'push']),
+                reExportedModules: new Set(),
+                moduleDifferences: new Map()
             }],
             ['control.flow', {
                 modulePath: 'control.flow',
                 exportedSymbols: new Set(['control.flow::Pipeline']),
-                exportedNames: new Set(['Pipeline'])
+                exportedNames: new Set(['Pipeline']),
+                explicitExports: new Set(['Pipeline']),
+                reExportedModules: new Set(),
+                moduleDifferences: new Map()
             }]
         ]);
 
@@ -175,6 +217,18 @@ describe('Import Utilities', () => {
         it('returns false for non-imported module names', () => {
             expect(isQualifiedNameAccessible('control.flow::Pipeline', resolved)).to.be.false;
         });
+
+        it('returns false for class members as bare identifiers', () => {
+            // Class members should NOT be accessible as bare identifiers
+            // Even if the module is imported, the member is inside a class
+            expect(isQualifiedNameAccessible('data.fifo::FIFO::push', resolved)).to.be.false;
+            expect(isQualifiedNameAccessible('data.counter.saturating::saturating_counter::count_t', resolved)).to.be.false;
+        });
+
+        it('returns true for class members when forBareIdentifier is false', () => {
+            // When explicitly accessing via qualified syntax, class members should be accessible
+            expect(isQualifiedNameAccessible('data.fifo::FIFO::push', resolved, { forBareIdentifier: false })).to.be.true;
+        });
     });
 
     describe('computeImportScore', () => {
@@ -207,6 +261,12 @@ describe('Import Utilities', () => {
 
         it('gives zero to non-imported modules', () => {
             const score = computeImportScore('control.flow::Pipeline', 'control.flow', resolved);
+            expect(score).to.equal(0);
+        });
+
+        it('gives zero to class members (not accessible as bare identifiers)', () => {
+            // Class members should get zero score since they can't be resolved bare
+            const score = computeImportScore('data.fifo::FIFO::push', 'data.fifo', resolved);
             expect(score).to.equal(0);
         });
     });
@@ -252,6 +312,30 @@ describe('Import Utilities', () => {
             const result = filterByAccessibility(symbols, resolved, { includeInaccessible: true });
             const names = result.map(s => s.qualifiedName);
             expect(names).to.include('control.flow::Pipeline');
+        });
+
+        it('filters out class members even from imported modules', () => {
+            // This is the key test for the bug fix:
+            // saturating_counter::count_t should NOT resolve when looking for count_t
+            const symbolsWithMember = [
+                { qualifiedName: 'base::count_t', scopePath: ['base'] }, // Module-level, should be accessible
+                { qualifiedName: 'data.counter.saturating::saturating_counter::count_t', scopePath: ['data.counter.saturating', 'saturating_counter'] } // Class member, should be filtered
+            ];
+            
+            const resolvedWithBase = {
+                currentModule: 'mymodule',
+                importedModules: new Set(['base', 'data.counter.saturating']),
+                aliasToModule: new Map<string, string>(),
+                accessibleQualifiedNames: new Set(['base::count_t'])
+            };
+
+            const result = filterByAccessibility(symbolsWithMember, resolvedWithBase);
+            const names = result.map(s => s.qualifiedName);
+            
+            // Should keep base::count_t (module-level export)
+            expect(names).to.include('base::count_t');
+            // Should NOT include the class member, even though module is imported
+            expect(names).to.not.include('data.counter.saturating::saturating_counter::count_t');
         });
     });
 });

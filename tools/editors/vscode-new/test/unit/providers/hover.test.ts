@@ -230,13 +230,31 @@ describe('HoverProvider', () => {
 
         function formatDocMarkdownForHover(docMarkdown: string): string | undefined {
             const lines = docMarkdown.split(/\r?\n/).map(line => line.trimEnd());
+
+            // Track where the first meaningful line appears in the original array so we can see banner context
+            let firstMeaningfulIdx = -1;
+            for (let i = 0; i < lines.length; i++) {
+                if (lines[i].trim().length > 0 && !isBannerLine(lines[i])) {
+                    firstMeaningfulIdx = i;
+                    break;
+                }
+            }
+
             const filtered = lines.filter(line => !isBannerLine(line));
             const firstIdx = filtered.findIndex(line => line.trim().length > 0);
             if (firstIdx === -1) { return undefined; }
 
             const headingCandidate = filtered[firstIdx].trim();
             const rest = filtered.slice(firstIdx + 1);
+
+            const bannerContext =
+                firstMeaningfulIdx !== -1 && (
+                    isBannerLine(lines[firstMeaningfulIdx - 1] ?? '') ||
+                    isBannerLine(lines[firstMeaningfulIdx + 1] ?? '')
+                );
+
             const shouldPromoteHeading =
+                bannerContext &&
                 headingCandidate.length > 0 &&
                 !headingCandidate.startsWith('-') &&
                 !headingCandidate.startsWith('*') &&
@@ -251,11 +269,8 @@ describe('HoverProvider', () => {
                 output.push(headingCandidate);
             }
 
-            let body = rest;
-            while (body.length && body[0].trim().length === 0) {
-                body = body.slice(1);
-            }
-            output.push(...body);
+            // Preserve blank lines in the body so paragraph breaks remain visible in hover
+            output.push(...rest);
             return output.join('\n');
         }
 
