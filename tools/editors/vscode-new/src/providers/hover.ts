@@ -17,6 +17,13 @@ interface CachedHoverResult {
     timestamp: number;
 }
 
+type HoverLayoutMode = 'dense' | 'expanded';
+
+interface HoverPreferences {
+    layout: HoverLayoutMode;
+    docMaxLines: number;
+}
+
 /**
  * Result of resolving hover candidates with confidence scoring.
  * Uses ResolutionResult from the SymbolResolutionService.
@@ -129,6 +136,8 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
                         return undefined;
                     }
 
+                    const hoverPrefs = this.getHoverPreferences();
+
                     if (token.isCancellationRequested) { return undefined; }
 
                     const node = tree.rootNode.descendantForPosition({
@@ -172,18 +181,7 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
                             return undefined;
                         }
                         
-                        const md = new vscode.MarkdownString();
-                        md.appendCodeblock(typeInfo.signature, 'kanagawa');
-                        
-                        if (typeInfo.initializer) {
-                            md.appendMarkdown(`\n---\n`);
-                            md.appendMarkdown(`**Initializer**\n\n`);
-                            md.appendCodeblock(typeInfo.initializer, 'kanagawa');
-                        }
-                        
-                        md.appendMarkdown(`\n---\n`);
-                        md.appendMarkdown(`📌 \`${typeInfo.kind}\``);
-                        
+                        const md = this.buildLocalHoverMarkdown(typeInfo);
                         const result = new vscode.Hover(md, hoverRange);
                         this.setCache(cacheKey, result);
                         return result;
@@ -208,7 +206,7 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
                     }
 
                     // Build hover content based on confidence
-                    const markdowns = await this.buildHoverContent(document, resolution);
+                    const markdowns = await this.buildHoverContent(document, resolution, hoverPrefs);
 
                     if (markdowns.length > 0) {
                         const result = new vscode.Hover(markdowns, hoverRange);
@@ -228,7 +226,8 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
      */
     private async buildHoverContent(
         document: vscode.TextDocument,
-        resolution: HoverResolution
+        resolution: HoverResolution,
+        prefs: HoverPreferences
     ): Promise<vscode.MarkdownString[]> {
         const markdowns: vscode.MarkdownString[] = [];
 
@@ -237,7 +236,7 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
         }
 
         // Build primary symbol markdown
-        const primaryMd = await this.buildSymbolMarkdown(document, resolution.primary);
+        const primaryMd = await this.buildSymbolMarkdown(document, resolution.primary, prefs);
         
         // Add alternatives count if there are any
         if (resolution.alternatives.length > 0) {
@@ -267,10 +266,10 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
      */
     private async buildSymbolMarkdown(
         document: vscode.TextDocument,
-        sym: SymbolInfo
+        sym: SymbolInfo,
+        prefs: HoverPreferences
     ): Promise<vscode.MarkdownString> {
-        const md = new vscode.MarkdownString();
-        md.supportHtml = true;
+        const md = this.createMarkdown();
         
         // Get icon for symbol category
         const icon = CATEGORY_ICONS[sym.category] ?? CATEGORY_ICONS['other'];
@@ -279,9 +278,26 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
         const summary = (sym.signature ?? `${sym.detail ?? ''} ${sym.name}`.trim()).trim() || sym.name;
         md.appendCodeblock(summary, 'kanagawa');
 
+        // Category + scope + path
+        const relative = vscode.workspace.asRelativePath(sym.uri, false);
+        const scopeText = sym.scopePath.length > 0 
+            ? `${sym.scopePath.join('::')}` 
+            : '';
+        const metaParts = [
+            `${icon} ${sym.category}`,
+            scopeText,
+            relative ? `📄 ${relative}` : undefined
+        ].filter(Boolean);
+        if (metaParts.length > 0) {
+            md.appendMarkdown(`\n${metaParts.join(' · ')}\n`);
+        }
+
         // Documentation section
         if (sym.docMarkdown) {
-            md.appendMarkdown(`\n${sym.docMarkdown}\n`);
+            const formattedDoc = this.formatDocMarkdownForHover(sym.docMarkdown);
+            if (formattedDoc) {
+                this.appendDocumentation(md, formattedDoc, prefs);
+            }
         }
 
         // Template parameters for applicable symbol types
@@ -294,44 +310,25 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
                 const relevantParams = this.filterRelevantTemplateParams(sym, templateParams);
                 
                 if (relevantParams.length > 0) {
-                    md.appendMarkdown(`\n---\n`);
-                    md.appendMarkdown(`**Template Parameters**\n\n`);
-                    for (const param of relevantParams) {
-                        const label = param.signature ?? param.name;
-                        const doc = param.docMarkdown
-                            ? param.docMarkdown
-                                .split(/\r?\n/)
-                                .map(part => part.trim())
-                                .filter(part => part.length)
-                                .join(' ')
-                            : undefined;
-                        if (doc) {
-                            md.appendMarkdown(`- \`${label}\` — ${doc}\n`);
-                        } else {
-                            md.appendMarkdown(`- \`${label}\`\n`);
-                        }
-                    }
+                    this.appendTemplateParameters(md, relevantParams, prefs.layout);
                 }
             }
         }
 
-        // Metadata section
-        md.appendMarkdown(`\n---\n`);
-        
-        // Category and scope info on one line
-        const scopeText = sym.scopePath.length > 0 
-            ? `${sym.scopePath.join('::')}` 
-            : '';
-        
-        if (scopeText) {
-            md.appendMarkdown(`${icon} \`${sym.category}\` in \`${scopeText}\`\n\n`);
-        } else {
-            md.appendMarkdown(`${icon} \`${sym.category}\`\n\n`);
+        return md;
+    }
+
+    private buildLocalHoverMarkdown(typeInfo: { signature: string; initializer?: string; kind: string }): vscode.MarkdownString {
+        const md = this.createMarkdown();
+        md.appendCodeblock(typeInfo.signature, 'kanagawa');
+
+        md.appendMarkdown(`\n📌 ${typeInfo.kind}\n`);
+
+        if (typeInfo.initializer) {
+            md.appendMarkdown(`\n---\n`);
+            md.appendMarkdown(`**Initializer**\n\n`);
+            md.appendCodeblock(typeInfo.initializer, 'kanagawa');
         }
-        
-        // File location
-        const relative = vscode.workspace.asRelativePath(sym.uri, false);
-        md.appendMarkdown(`📄 *${relative}*`);
 
         return md;
     }
@@ -487,5 +484,122 @@ export class KanagawaHoverProvider implements vscode.HoverProvider {
      */
     private escapeRegex(str: string): string {
         return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    private getHoverPreferences(): HoverPreferences {
+        const config = vscode.workspace.getConfiguration('kanagawa.hover');
+        const layout = config.get<HoverLayoutMode>('layout', 'expanded') ?? 'expanded';
+        const docMaxLinesSetting = config.get<number>('docMaxLines', 24) ?? 24;
+        const docMaxLines = Math.max(6, Math.min(200, docMaxLinesSetting));
+        return { layout, docMaxLines };
+    }
+
+    private createMarkdown(): vscode.MarkdownString {
+        const md = new vscode.MarkdownString();
+        md.supportHtml = true;
+        md.supportThemeIcons = true;
+        md.isTrusted = false;
+        return md;
+    }
+
+    private appendDocumentation(md: vscode.MarkdownString, docMarkdown: string, prefs: HoverPreferences): void {
+        const trimmedDoc = docMarkdown.trim();
+        if (!trimmedDoc) { return; }
+
+        const lines = trimmedDoc.split(/\r?\n/);
+        const maxLines = prefs.docMaxLines;
+        const shouldCollapse = lines.length > maxLines;
+        const visible = shouldCollapse ? lines.slice(0, maxLines).join('\n') : trimmedDoc;
+
+        md.appendMarkdown(`\n---\n`);
+        md.appendMarkdown(`${visible}\n`);
+
+        if (shouldCollapse) {
+            const remaining = lines.length - maxLines;
+            const rest = lines.slice(maxLines).join('\n').trim();
+            if (rest.length > 0) {
+                md.appendMarkdown(`\n<details><summary>Show ${remaining} more line${remaining === 1 ? '' : 's'}</summary>\n\n${rest}\n\n</details>\n`);
+            }
+        }
+    }
+
+    private appendTemplateParameters(md: vscode.MarkdownString, params: SymbolInfo[], layout: HoverLayoutMode): void {
+        const header = layout === 'expanded'
+            ? '\n---\n**Template parameters**\n\n'
+            : '\n';
+        md.appendMarkdown(header);
+
+        for (const param of params) {
+            const label = param.signature ?? param.name;
+            const doc = param.docMarkdown
+                ? param.docMarkdown
+                    .split(/\r?\n/)
+                    .map(part => part.trim())
+                    .filter(part => part.length)
+                    .join(' ')
+                : undefined;
+            if (doc) {
+                md.appendMarkdown(`- \`${label}\` — ${doc}\n`);
+            } else {
+                md.appendMarkdown(`- \`${label}\`\n`);
+            }
+        }
+    }
+
+    private formatDocMarkdownForHover(docMarkdown: string): string | undefined {
+        const lines = docMarkdown.split(/\r?\n/).map(line => line.trimEnd());
+
+        // Track where the first meaningful line appears in the original array so we can see banner context
+        let firstMeaningfulIdx = -1;
+        for (let i = 0; i < lines.length; i++) {
+            if (lines[i].trim().length > 0 && !this.isBannerLine(lines[i])) {
+                firstMeaningfulIdx = i;
+                break;
+            }
+        }
+
+        // Drop banner/separator lines made of slashes, equals, or dashes for the final output
+        const filtered = lines.filter(line => !this.isBannerLine(line));
+
+        // Find first meaningful line for optional heading promotion
+        const firstIdx = filtered.findIndex(line => line.trim().length > 0);
+        if (firstIdx === -1) { return undefined; }
+
+        const headingCandidate = filtered[firstIdx].trim();
+        const rest = filtered.slice(firstIdx + 1);
+
+        const bannerContext =
+            firstMeaningfulIdx !== -1 && (
+                this.isBannerLine(lines[firstMeaningfulIdx - 1] ?? '') ||
+                this.isBannerLine(lines[firstMeaningfulIdx + 1] ?? '')
+            );
+
+        const shouldPromoteHeading =
+            bannerContext &&
+            headingCandidate.length > 0 &&
+            !headingCandidate.startsWith('-') &&
+            !headingCandidate.startsWith('*') &&
+            !headingCandidate.startsWith('@');
+
+        const output: string[] = [];
+        if (shouldPromoteHeading) {
+            output.push(`**${headingCandidate}**`);
+            const hasBody = rest.some(line => line.trim().length > 0);
+            if (hasBody) {
+                output.push('---');
+            }
+        } else {
+            output.push(headingCandidate);
+        }
+
+        // Preserve blank lines in the body so paragraph breaks remain visible in hover
+        output.push(...rest);
+
+        return output.join('\n');
+    }
+
+    private isBannerLine(line: string): boolean {
+        const trimmed = line.trim();
+        return /^[/=\-]{6,}$/.test(trimmed);
     }
 }

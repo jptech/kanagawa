@@ -3004,9 +3004,8 @@ export class WorkspaceIndexer {
                 break;
             }
             const content = trimmed.replace(/^\/\/\s?/, '').trim();
-            if (content.length) {
-                result.unshift(content);
-            }
+            // Preserve blank comment lines as paragraph breaks
+            result.unshift(content);
             line--;
         }
 
@@ -3039,9 +3038,8 @@ export class WorkspaceIndexer {
                 ? this.cleanDocComment(trimmed)
                 : trimmed.replace(/^\/\/\s?/, '').trim();
 
-            if (content.length) {
-                result.unshift(content);
-            }
+            // Always record comment lines; blank lines become empty strings to preserve spacing
+            result.unshift(content);
 
             line--;
         }

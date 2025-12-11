@@ -290,6 +290,7 @@ class Wrapper {
 - **Multiple matches** → Shows primary symbol + "*+N other definitions*"
 - **Inaccessible symbols** → Shows import suggestion: "💡 *Did you mean to import `module.path`?*"
 - **Template instantiation** → Shows instantiated signatures (e.g., `uint32 pop()` instead of `T pop()`)
+- **Layout options** → Signatures render in a Kanagawa code fence, metadata is condensed on one line, and docs are scrollable with a default 24-line clamp. Switch between `expanded` (default) and `dense` layouts via `kanagawa.hover.layout`; adjust doc clamp with `kanagawa.hover.docMaxLines`.
 
 #### Definition Provider
 - **Single exact match** → Jumps directly (no picker dialog)
