@@ -238,6 +238,19 @@ export interface IWorkspaceIndexer {
      * @returns Array of URIs for all indexed files
      */
     getIndexedUris(): vscode.Uri[];
+
+    // === Module Exports (for AI discovery tools) ===
+
+    /**
+     * Returns the qualified names exported by a module.
+     *
+     * When includeTransitive is true, includes re-exported modules and module-difference semantics.
+     * When false, returns only direct exports.
+     */
+    getModuleExportedQualifiedNames(
+        modulePath: string,
+        options?: { includeTransitive?: boolean }
+    ): string[];
     
     // === Index Statistics ===
     

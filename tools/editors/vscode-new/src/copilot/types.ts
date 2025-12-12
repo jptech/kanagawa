@@ -1,8 +1,10 @@
 /**
  * Copilot Tool Types
- * 
+ *
  * Shared types, interfaces, and utilities for the Language Model Tools.
- * This file is kept vscode-free to allow pure logic testing.
+ *
+ * Note: This module is intentionally runtime-agnostic (no `vscode` import) so
+ * it can be used by unit tests that run under Node.
  */
 
 // ============================================================================
@@ -19,7 +21,7 @@ export interface ToolSuccessResponse<T> {
 }
 
 /**
- * Standard error response.
+ * Standard error response wrapper.
  */
 export interface ToolErrorResponse {
     error: string;
@@ -32,9 +34,11 @@ export interface ToolErrorResponse {
 export type ToolErrorCode =
     | 'SYMBOL_NOT_FOUND'
     | 'FILE_NOT_FOUND'
+    | 'INDEX_NOT_READY'
     | 'PARSE_ERROR'
     | 'INVALID_POSITION'
     | 'INVALID_INPUT'
+    | 'CANCELLED'
     | 'INTERNAL_ERROR';
 
 /**
@@ -105,6 +109,41 @@ export interface GetImportsInput {
 // ============================================================================
 
 /**
+ * 1-indexed position for tool outputs (more ergonomic for humans + models).
+ */
+export interface ToolPosition {
+    line: number;
+    character: number;
+}
+
+export interface ToolRange {
+    start: ToolPosition;
+    end: ToolPosition;
+}
+
+/**
+ * Token-efficient range encoding for high-volume list outputs.
+ * Format: [startLine, startCharacter, endLine, endCharacter] (all 1-indexed).
+ */
+export type ToolRangeTuple = [number, number, number, number];
+
+/**
+ * File location for tool outputs.
+ *
+ * `path` should prefer workspace-relative paths when possible. For external
+ * sources (stdlib outside workspace, vendor dirs not in workspace, etc.),
+ * fall back to an absolute path.
+ */
+export interface ToolLocation {
+    /** Stable URI string (e.g., file:///..., untitled:..., etc.) */
+    uri: string;
+    /** Human-friendly path (workspace-relative if possible; absolute fallback) */
+    path: string;
+    /** Optional range of the symbol/selection */
+    range?: ToolRange;
+}
+
+/**
  * Serialized symbol for tool output.
  */
 export interface ToolSymbolInfo {
@@ -115,7 +154,7 @@ export interface ToolSymbolInfo {
     signature?: string;
     documentation?: string;
     typeHint?: string;
-    location: string;
+    location: ToolLocation;
     scopePath: string[];
 }
 
@@ -142,7 +181,10 @@ export type GetTypeMembersOutput = {
  */
 export type InferTypeOutput = {
     type: string;
-    location: string;
+    location: {
+        file: ToolLocation;
+        position: ToolPosition;
+    };
 } | ToolErrorResponse;
 
 /**
@@ -170,6 +212,151 @@ export type GetImportsOutput = {
     currentModule?: string;
     imports: ToolImportInfo[];
     importedModules: string[];
+} | ToolErrorResponse;
+
+// ============================================================================
+// Search / Discovery Tools
+// ============================================================================
+
+/** Input for kanagawa_search_symbols tool. */
+export interface SearchSymbolsInput {
+    query: string;
+    category?: string;
+    filePath?: string;
+    maxFiles?: number;
+    maxMatchesPerFile?: number;
+    limit?: number;
+}
+
+export interface ToolSymbolMatch {
+    name: string;
+    qualifiedName: string;
+    category: string;
+    range?: ToolRangeTuple;
+}
+
+export interface ToolSearchFileMatches {
+    file: ToolLocation;
+    matches: ToolSymbolMatch[];
+}
+
+/** Output for kanagawa_search_symbols tool (token-efficient, grouped by file). */
+export type SearchSymbolsOutput = {
+    query: string;
+    totalCount: number;
+    truncated: boolean;
+    files: ToolSearchFileMatches[];
+} | ToolErrorResponse;
+
+export interface ListModulesInput {
+    prefix?: string;
+    limit?: number;
+}
+
+export interface ToolModuleInfo {
+    modulePath: string;
+    declaringFile?: ToolLocation;
+    exportCount?: number;
+}
+
+export type ListModulesOutput = {
+    results: ToolModuleInfo[];
+    totalCount: number;
+    truncated: boolean;
+} | ToolErrorResponse;
+
+export interface GetModuleApiInput {
+    modulePath: string;
+    includeTransitive?: boolean;
+    limit?: number;
+}
+
+export type GetModuleApiOutput = {
+    modulePath: string;
+    exports: ToolSymbolInfo[];
+    totalCount: number;
+    truncated: boolean;
+} | ToolErrorResponse;
+
+// ============================================================================
+// Symbol details and document symbol listing (token-efficient)
+// ============================================================================
+
+export interface GetSymbolDetailsInput {
+    qualifiedName: string;
+}
+
+export type GetSymbolDetailsOutput = {
+    symbol: ToolSymbolInfo;
+} | ToolErrorResponse;
+
+export interface GetDocumentSymbolsInput {
+    filePath: string;
+    scope?: 'topLevel' | 'all';
+    includeScopePath?: boolean;
+    limit?: number;
+}
+
+export interface ToolDocumentSymbol {
+    name: string;
+    qualifiedName: string;
+    category: string;
+    range?: ToolRangeTuple;
+    scopePath?: string[];
+}
+
+// NOTE: A hierarchical outline tool was intentionally removed because it tended
+// to be higher-token than simply opening the file.
+export type GetDocumentSymbolsOutput = {
+    file: ToolLocation;
+    modulePath?: string;
+    symbols: ToolDocumentSymbol[];
+    truncated: boolean;
+} | ToolErrorResponse;
+
+// ============================================================================
+// Navigation Tools (position-based)
+// ============================================================================
+
+export interface ResolveSymbolAtPositionInput {
+    filePath: string;
+    line: number;
+    character: number;
+    includeInaccessible?: boolean;
+    maxAlternatives?: number;
+}
+
+export type ResolveSymbolAtPositionOutput = {
+    primary?: ToolSymbolInfo;
+    confidence: 'exact' | 'high' | 'medium' | 'low' | 'none';
+    alternatives: ToolSymbolInfo[];
+    inaccessible: ToolSymbolInfo[];
+} | ToolErrorResponse;
+
+export interface GetDefinitionLocationsInput {
+    filePath: string;
+    line: number;
+    character: number;
+    maxLocations?: number;
+}
+
+export type GetDefinitionLocationsOutput = {
+    definitions: ToolLocation[];
+    truncated: boolean;
+} | ToolErrorResponse;
+
+export interface FindReferencesAtPositionInput {
+    filePath: string;
+    line: number;
+    character: number;
+    includeDeclaration?: boolean;
+    limit?: number;
+}
+
+export type FindReferencesAtPositionOutput = {
+    references: ToolLocation[];
+    totalCount: number;
+    truncated: boolean;
 } | ToolErrorResponse;
 
 // ============================================================================

@@ -19,6 +19,10 @@ import {
     getModuleExportsLogic,
     getImportsLogic,
     searchSymbolsLogic,
+    getSymbolDetailsLogic,
+    listModulesLogic,
+    getModuleApiLogic,
+    getDocumentSymbolsLogic,
     symbolToToolInfo
 } from '../../src/copilot/toolLogic';
 
@@ -287,6 +291,87 @@ describe('Copilot Tools', () => {
     });
 
     // ========================================================================
+    // New Discovery / Navigation Tool Logic Tests
+    // ========================================================================
+
+    describe('ListModules', () => {
+        it('should list indexed modules in stable order', () => {
+            const result = listModulesLogic(indexer, { limit: 50 }) as any;
+
+            expect(result.results).to.be.an('array');
+            expect(result.totalCount).to.equal(2);
+            expect(result.results.map((m: any) => m.modulePath)).to.deep.equal(['data.fifo', 'main']);
+            expect(result.results[0].declaringFile).to.have.property('uri');
+            expect(result.results[0].declaringFile).to.have.property('path');
+        });
+    });
+
+    describe('GetModuleApi', () => {
+        it('should return exported symbols for a module', () => {
+            const result = getModuleApiLogic(indexer, { modulePath: 'data.fifo', limit: 100 }) as any;
+
+            expect(result.modulePath).to.equal('data.fifo');
+            expect(result.exports).to.be.an('array');
+
+            const qualified = result.exports.map((e: any) => e.qualifiedName);
+            expect(qualified).to.include('data.fifo::FIFO');
+            expect(qualified).to.include('data.fifo::FIFO::push');
+        });
+
+        it('should respect limit parameter', () => {
+            const result = getModuleApiLogic(indexer, { modulePath: 'data.fifo', limit: 1 }) as any;
+
+            expect(result.exports.length).to.equal(1);
+            expect(result.truncated).to.equal(true);
+        });
+    });
+
+    describe('GetDocumentSymbols', () => {
+        it('should list top-level symbols for a file', () => {
+            const result = getDocumentSymbolsLogic(indexer, { filePath: '/project/src/main.k' }, mockGetUri) as any;
+
+            expect(result.modulePath).to.equal('main');
+            expect(result.file).to.have.property('uri');
+            expect(result.file).to.have.property('path');
+            expect(result.symbols).to.be.an('array');
+
+            const names = result.symbols.map((s: any) => s.name);
+            expect(names).to.include('processData');
+            expect(names).to.include('Config');
+        });
+
+        it('should include scopePath when requested', () => {
+            const result = getDocumentSymbolsLogic(
+                indexer,
+                { filePath: '/project/src/main.k', includeScopePath: true, scope: 'all' },
+                mockGetUri
+            ) as any;
+
+            expect(result.symbols).to.be.an('array');
+            expect(result.symbols.some((s: any) => 'scopePath' in s)).to.equal(true);
+        });
+    });
+
+    describe('GetSymbolDetails', () => {
+        it('should return rich symbol info by qualifiedName', () => {
+            const result = getSymbolDetailsLogic(indexer, { qualifiedName: 'data.fifo::FIFO' }) as any;
+
+            expect(result.symbol).to.be.an('object');
+            expect(result.symbol.name).to.equal('FIFO');
+            expect(result.symbol.qualifiedName).to.equal('data.fifo::FIFO');
+            expect(result.symbol.kind).to.equal('class');
+            expect(result.symbol).to.have.property('location');
+        });
+
+        it('should return error for unknown qualifiedName', () => {
+            const result = getSymbolDetailsLogic(indexer, { qualifiedName: 'nope::Missing' }) as any;
+
+            expect(isErrorResponse(result)).to.be.true;
+            expect(result.code).to.equal('SYMBOL_NOT_FOUND');
+        });
+    });
+
+    // ========================================================================
     // SearchSymbols Tests (using actual searchSymbolsLogic)
     // ========================================================================
 
@@ -294,23 +379,26 @@ describe('Copilot Tools', () => {
         it('should find symbols by prefix', () => {
             const result = searchSymbolsLogic(indexer, { query: 'FIF' }, mockGetUri) as any;
 
-            expect(result.results).to.be.an('array');
-            expect(result.results.length).to.be.greaterThan(0);
-            expect(result.results[0].name).to.equal('FIFO');
+            expect(result.files).to.be.an('array');
+            expect(result.files.length).to.be.greaterThan(0);
+            const firstMatch = result.files[0].matches[0];
+            expect(firstMatch.name).to.equal('FIFO');
         });
 
         it('should find symbols by substring', () => {
             const result = searchSymbolsLogic(indexer, { query: 'Data' }, mockGetUri) as any;
 
-            expect(result.results).to.be.an('array');
-            expect(result.results.some((r: any) => r.name.toLowerCase().includes('data'))).to.be.true;
+            expect(result.files).to.be.an('array');
+            const allMatches = result.files.flatMap((f: any) => f.matches);
+            expect(allMatches.some((m: any) => m.name.toLowerCase().includes('data'))).to.be.true;
         });
 
         it('should filter by category', () => {
             const result = searchSymbolsLogic(indexer, { query: 'pu', category: 'method' }, mockGetUri) as any;
 
-            expect(result.results).to.be.an('array');
-            const categories = result.results.map((r: any) => r.category);
+            expect(result.files).to.be.an('array');
+            const allMatches = result.files.flatMap((f: any) => f.matches);
+            const categories = allMatches.map((r: any) => r.category);
             expect(categories.every((c: string) => c === 'method')).to.be.true;
         });
 
@@ -321,9 +409,9 @@ describe('Copilot Tools', () => {
                 mockGetUri
             ) as any;
 
-            expect(result.results).to.be.an('array');
-            // All results should be from main.k
-            expect(result.results.every((r: any) => r.location.includes('main.k'))).to.be.true;
+            expect(result.files).to.be.an('array');
+            expect(result.files.length).to.equal(1);
+            expect(result.files[0].file.path).to.include('main.k');
         });
 
         it('should return error for short query', () => {
@@ -348,7 +436,8 @@ describe('Copilot Tools', () => {
 
             const result = searchSymbolsLogic(indexer, { query: 'testFunc', limit: 3 }, mockGetUri) as any;
 
-            expect(result.results.length).to.equal(3);
+            const returnedCount = result.files.reduce((sum: number, f: any) => sum + f.matches.length, 0);
+            expect(returnedCount).to.equal(3);
             expect(result.truncated).to.be.true;
             expect(result.totalCount).to.equal(10);
         });
@@ -381,6 +470,10 @@ describe('Copilot Tools', () => {
             expect(symbol).to.have.property('category');
             expect(symbol).to.have.property('location');
             expect(symbol).to.have.property('scopePath');
+
+            // Verify location structure
+            expect(symbol.location).to.have.property('uri');
+            expect(symbol.location).to.have.property('path');
         });
 
         it('should return valid JSON structure for error', () => {
@@ -393,11 +486,17 @@ describe('Copilot Tools', () => {
             expect(typeof result.code).to.equal('string');
         });
 
-        it('should format location as file:line', () => {
+        it('should return a structured location with range', () => {
             const result = lookupSymbolLogic(indexer, { symbolName: 'FIFO' }) as any;
 
             const location = result.results[0].location;
-            expect(location).to.match(/.*:\d+$/);  // file:line format
+            expect(location).to.be.an('object');
+            expect(location.path).to.be.a('string');
+            expect(location.uri).to.be.a('string');
+            if (location.range) {
+                expect(location.range.start.line).to.be.a('number');
+                expect(location.range.start.character).to.be.a('number');
+            }
         });
     });
 

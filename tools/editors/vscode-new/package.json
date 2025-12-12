@@ -180,7 +180,7 @@
           },
           "required": ["symbolName"]
         },
-        "when": "resourceLangId == kanagawa"
+        "when": "true"
       },
       {
         "name": "kanagawa_get_type_members",
@@ -215,7 +215,7 @@
           },
           "required": ["typeName"]
         },
-        "when": "resourceLangId == kanagawa"
+        "when": "true"
       },
       {
         "name": "kanagawa_infer_type",
@@ -243,7 +243,7 @@
           },
           "required": ["filePath", "line", "character"]
         },
-        "when": "resourceLangId == kanagawa"
+        "when": "true"
       },
       {
         "name": "kanagawa_get_module_exports",
@@ -268,7 +268,7 @@
           },
           "required": ["filePath"]
         },
-        "when": "resourceLangId == kanagawa"
+        "when": "true"
       },
       {
         "name": "kanagawa_get_imports",
@@ -288,7 +288,7 @@
           },
           "required": ["filePath"]
         },
-        "when": "resourceLangId == kanagawa"
+        "when": "true"
       },
       {
         "name": "kanagawa_search_symbols",
@@ -297,7 +297,7 @@
         "icon": "$(search)",
         "canBeReferencedInPrompt": true,
         "userDescription": "Search for symbols by name pattern in Kanagawa code",
-        "modelDescription": "Searches for symbols (classes, functions, structs, variables, etc.) by prefix or substring match. Useful for exploring an unfamiliar codebase when you don't know exact symbol names. Can filter by category (class, function, struct, etc.) or limit search to a specific file. Use this when the user wants to find symbols matching a pattern, explore what's available, or locate definitions without knowing exact names.",
+        "modelDescription": "Searches for symbols by prefix or substring match. Returns token-efficient, grouped results (by file) with thin match entries (name, qualifiedName, category, range). For token efficiency, match ranges are encoded as a tuple [startLine,startCharacter,endLine,endCharacter] (1-indexed). Use this for discovery; if you need full details for a symbol (signature/docs/type), call kanagawa_get_symbol_details with the qualifiedName.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -313,15 +313,243 @@
               "type": "string",
               "description": "Optional: limit search to symbols in this file"
             },
+            "maxFiles": {
+              "type": "number",
+              "default": 20,
+              "description": "Maximum number of files to return matches from"
+            },
+            "maxMatchesPerFile": {
+              "type": "number",
+              "default": 10,
+              "description": "Maximum number of matches to return per file"
+            },
             "limit": {
               "type": "number",
-              "default": 50,
-              "description": "Maximum number of symbols to return"
+              "default": 200,
+              "description": "Optional overall cap on returned matches (applied after grouping)"
             }
           },
           "required": ["query"]
         },
-        "when": "resourceLangId == kanagawa"
+        "when": "true"
+      },
+      {
+        "name": "kanagawa_get_symbol_details",
+        "displayName": "Get Symbol Details",
+        "toolReferenceName": "kanagawaSymbolDetails",
+        "icon": "$(symbol-property)",
+        "canBeReferencedInPrompt": true,
+        "userDescription": "Get full details for a symbol by qualified name",
+        "modelDescription": "Fetches full details for a single symbol using its qualifiedName (signature, documentation, typeHint, scopePath, and location). Use this after discovery tools like kanagawa_search_symbols, kanagawa_get_module_api, or kanagawa_get_document_symbols.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "qualifiedName": {
+              "type": "string",
+              "description": "Fully qualified name (e.g., 'data.fifo::FIFO::push')"
+            }
+          },
+          "required": ["qualifiedName"]
+        },
+        "when": "true"
+      },
+      {
+        "name": "kanagawa_resolve_symbol_at_position",
+        "displayName": "Resolve Symbol at Cursor",
+        "toolReferenceName": "kanagawaResolve",
+        "icon": "$(symbol-reference)",
+        "canBeReferencedInPrompt": true,
+        "userDescription": "Resolve the identifier at a specific position (like hover/definition)",
+        "modelDescription": "Resolves the identifier at a specific file position using Kanagawa's context-aware resolver (locals > members > same-module > imports > global). Returns the primary match, confidence, alternatives, and optionally inaccessible symbols that may require importing a module. Use this to ground an identifier before editing or calling other tools.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "filePath": {
+              "type": "string",
+              "description": "Path to the Kanagawa source file (absolute or workspace-relative)"
+            },
+            "line": {
+              "type": "number",
+              "description": "Line number (1-indexed)"
+            },
+            "character": {
+              "type": "number",
+              "description": "Character position on the line (1-indexed)"
+            },
+            "includeInaccessible": {
+              "type": "boolean",
+              "default": true,
+              "description": "Include symbols that are not currently accessible due to missing imports"
+            },
+            "maxAlternatives": {
+              "type": "number",
+              "default": 10,
+              "description": "Maximum number of alternative candidates to return"
+            }
+          },
+          "required": ["filePath", "line", "character"]
+        },
+        "when": "true"
+      },
+      {
+        "name": "kanagawa_get_definition_locations",
+        "displayName": "Get Definition Locations",
+        "toolReferenceName": "kanagawaDefinition",
+        "icon": "$(symbol-event)",
+        "canBeReferencedInPrompt": true,
+        "userDescription": "Get definition location(s) for identifier at cursor",
+        "modelDescription": "Returns the definition location(s) for the identifier at the specified position. Use this to jump to the defining declaration(s) or to disambiguate overloaded/ambiguous names.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "filePath": {
+              "type": "string",
+              "description": "Path to the Kanagawa source file (absolute or workspace-relative)"
+            },
+            "line": {
+              "type": "number",
+              "description": "Line number (1-indexed)"
+            },
+            "character": {
+              "type": "number",
+              "description": "Character position on the line (1-indexed)"
+            },
+            "maxLocations": {
+              "type": "number",
+              "default": 10,
+              "description": "Maximum number of locations to return"
+            }
+          },
+          "required": ["filePath", "line", "character"]
+        },
+        "when": "true"
+      },
+      {
+        "name": "kanagawa_find_references",
+        "displayName": "Find References",
+        "toolReferenceName": "kanagawaReferences",
+        "icon": "$(references)",
+        "canBeReferencedInPrompt": true,
+        "userDescription": "Find references for identifier at cursor",
+        "modelDescription": "Finds references/usages for the identifier at the specified position across the indexed workspace (and stdlib, if indexed). Uses the same references engine as the editor's Find References provider.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "filePath": {
+              "type": "string",
+              "description": "Path to the Kanagawa source file (absolute or workspace-relative)"
+            },
+            "line": {
+              "type": "number",
+              "description": "Line number (1-indexed)"
+            },
+            "character": {
+              "type": "number",
+              "description": "Character position on the line (1-indexed)"
+            },
+            "includeDeclaration": {
+              "type": "boolean",
+              "default": false,
+              "description": "Include the declaration location in the results"
+            },
+            "limit": {
+              "type": "number",
+              "default": 200,
+              "description": "Maximum number of references to return"
+            }
+          },
+          "required": ["filePath", "line", "character"]
+        },
+        "when": "true"
+      },
+      {
+        "name": "kanagawa_list_modules",
+        "displayName": "List Modules",
+        "toolReferenceName": "kanagawaModules",
+        "icon": "$(symbol-namespace)",
+        "canBeReferencedInPrompt": true,
+        "userDescription": "List indexed Kanagawa modules",
+        "modelDescription": "Lists all indexed Kanagawa modules (workspace + stdlib if indexed). Use this when exploring an unfamiliar codebase to discover available modules/namespaces.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "prefix": {
+              "type": "string",
+              "description": "Optional: only return modules starting with this prefix (e.g., 'data.')"
+            },
+            "limit": {
+              "type": "number",
+              "default": 200,
+              "description": "Maximum number of modules to return"
+            }
+          }
+        },
+        "when": "true"
+      },
+      {
+        "name": "kanagawa_get_module_api",
+        "displayName": "Get Module API",
+        "toolReferenceName": "kanagawaModuleApi",
+        "icon": "$(symbol-interface)",
+        "canBeReferencedInPrompt": true,
+        "userDescription": "List exported symbols for a module",
+        "modelDescription": "Returns exported symbols for a module (optionally including transitive re-exports). Use this to discover stdlib/workspace APIs, public functions, types, and constants exposed by a module.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "modulePath": {
+              "type": "string",
+              "description": "Module path (e.g., 'data.fifo', 'base')"
+            },
+            "includeTransitive": {
+              "type": "boolean",
+              "default": true,
+              "description": "Include transitive re-exports and module differences"
+            },
+            "limit": {
+              "type": "number",
+              "default": 200,
+              "description": "Maximum number of exported symbols to return"
+            }
+          },
+          "required": ["modulePath"]
+        },
+        "when": "true"
+      },
+      {
+        "name": "kanagawa_get_document_symbols",
+        "displayName": "Get Document Symbols",
+        "toolReferenceName": "kanagawaDocSymbols",
+        "icon": "$(symbol-file)",
+        "canBeReferencedInPrompt": true,
+        "userDescription": "Get a token-efficient symbol list for a Kanagawa file",
+        "modelDescription": "Returns a token-efficient list of symbols in a Kanagawa file (top-level by default). Each entry includes name, qualifiedName, category, and range; the file location is returned once. For token efficiency, symbol ranges are encoded as a tuple [startLine,startCharacter,endLine,endCharacter] (1-indexed). Use this instead of a full outline when deciding what to open/edit.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "filePath": {
+              "type": "string",
+              "description": "Path to the Kanagawa source file (absolute or workspace-relative)"
+            },
+            "scope": {
+              "type": "string",
+              "default": "topLevel",
+              "description": "Either 'topLevel' (default) or 'all'"
+            },
+            "includeScopePath": {
+              "type": "boolean",
+              "default": false,
+              "description": "Include the scopePath array for each symbol (more tokens)"
+            },
+            "limit": {
+              "type": "number",
+              "default": 200,
+              "description": "Maximum number of symbols to include"
+            }
+          },
+          "required": ["filePath"]
+        },
+        "when": "true"
       }
     ],
     "configuration": {

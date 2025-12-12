@@ -7,20 +7,37 @@
  */
 
 import { IWorkspaceIndexer, SymbolInfo } from '../service/IWorkspaceIndexer';
+import { matchesImportPath } from '../utils/importUtils';
 import {
     LookupSymbolInput,
     LookupSymbolOutput,
     GetTypeMembersInput,
     GetTypeMembersOutput,
-    InferTypeInput,
-    InferTypeOutput,
     GetModuleExportsInput,
     GetModuleExportsOutput,
     GetImportsInput,
     GetImportsOutput,
     ToolSymbolInfo,
+    ToolLocation,
+    ToolRange,
+    ToolRangeTuple,
+    ToolPosition,
     ToolErrorResponse,
-    createErrorResponse
+    createErrorResponse,
+    SearchSymbolsInput,
+    SearchSymbolsOutput,
+    ToolSymbolMatch,
+    ToolSearchFileMatches,
+    ListModulesInput,
+    ListModulesOutput,
+    ToolModuleInfo,
+    GetModuleApiInput,
+    GetModuleApiOutput,
+    GetSymbolDetailsInput,
+    GetSymbolDetailsOutput,
+    GetDocumentSymbolsInput,
+    GetDocumentSymbolsOutput,
+    ToolDocumentSymbol
 } from './types';
 
 /**
@@ -54,14 +71,55 @@ function deduplicateSymbols(symbols: SymbolInfo[]): SymbolInfo[] {
     });
 }
 
+function toToolPosition(pos: any): ToolPosition {
+    const line = typeof pos?.line === 'number' ? pos.line : 0;
+    const character = typeof pos?.character === 'number' ? pos.character : 0;
+    return { line: line + 1, character: character + 1 };
+}
+
+function toToolRange(range: any): ToolRange | undefined {
+    const start = range?.start;
+    const end = range?.end;
+    if (!start || !end) {
+        return undefined;
+    }
+    return {
+        start: toToolPosition(start),
+        end: toToolPosition(end)
+    };
+}
+
+function toToolRangeTuple(range: any): ToolRangeTuple | undefined {
+    const start = range?.start;
+    const end = range?.end;
+    if (!start || !end) {
+        return undefined;
+    }
+
+    const sl = typeof start?.line === 'number' ? start.line + 1 : 1;
+    const sc = typeof start?.character === 'number' ? start.character + 1 : 1;
+    const el = typeof end?.line === 'number' ? end.line + 1 : sl;
+    const ec = typeof end?.character === 'number' ? end.character + 1 : sc;
+
+    return [sl, sc, el, ec];
+}
+
+function toToolLocation(uriLike: any, rangeLike?: any): ToolLocation {
+    const uriString = uriLike?.toString ? uriLike.toString() : String(uriLike);
+    const fsPath = (uriLike as any)?.fsPath;
+    return {
+        uri: uriString,
+        // NOTE: tools.ts will rewrite this to workspace-relative when possible.
+        // For unit tests and non-workspace contexts, keeping fsPath is fine.
+        path: typeof fsPath === 'string' ? fsPath : uriString,
+        range: toToolRange(rangeLike)
+    };
+}
+
 /**
  * Converts a SymbolInfo to the AI-friendly ToolSymbolInfo format.
  */
 export function symbolToToolInfo(symbol: SymbolInfo): ToolSymbolInfo {
-    const uri = symbol.uri;
-    const uriString = (uri as any).fsPath ?? uri.toString();
-    const line = (symbol.range as any).start?.line ?? 0;
-    
     return {
         name: symbol.name,
         qualifiedName: symbol.qualifiedName,
@@ -70,7 +128,7 @@ export function symbolToToolInfo(symbol: SymbolInfo): ToolSymbolInfo {
         signature: symbol.signature,
         documentation: symbol.docMarkdown,
         typeHint: symbol.typeHint,
-        location: `${uriString}:${line + 1}`,
+        location: toToolLocation(symbol.uri, symbol.range),
         scopePath: symbol.scopePath
     };
 }
@@ -150,43 +208,6 @@ export async function getTypeMembersLogic(
 }
 
 /**
- * Core logic for InferType tool.
- */
-export async function inferTypeLogic(
-    indexer: IWorkspaceIndexer,
-    input: InferTypeInput,
-    getDocument: (filePath: string) => any | undefined
-): Promise<InferTypeOutput> {
-    const { filePath, line, character } = input;
-    
-    if (!filePath || typeof filePath !== 'string') {
-        return createErrorResponse('filePath is required and must be a string', 'INVALID_INPUT');
-    }
-    if (typeof line !== 'number' || typeof character !== 'number') {
-        return createErrorResponse('line and character must be numbers', 'INVALID_INPUT');
-    }
-
-    const document = getDocument(filePath);
-    if (!document) {
-        return createErrorResponse(`File not found: ${filePath}`, 'FILE_NOT_FOUND');
-    }
-
-    const type = await indexer.inferTypeFromExpression(document, undefined, 0);
-    
-    if (!type) {
-        return createErrorResponse(
-            `Could not infer type at ${filePath}:${line}:${character}`,
-            'SYMBOL_NOT_FOUND'
-        );
-    }
-
-    return {
-        type,
-        location: `${filePath}:${line}:${character}`
-    };
-}
-
-/**
  * Core logic for GetModuleExports tool.
  */
 export function getModuleExportsLogic(
@@ -253,11 +274,14 @@ export function getImportsLogic(
 
     const resolved = indexer.getResolvedImports(uri);
 
-    const imports = context.imports.map(imp => ({
-        path: imp.path,
-        alias: imp.alias,
-        resolved: resolved.importedModules.has(imp.path)
-    }));
+    const imports = context.imports.map(imp => {
+        const resolvedViaAnyMatch = Array.from(resolved.importedModules).some(m => matchesImportPath(m, imp.path));
+        return {
+            path: imp.path,
+            alias: imp.alias,
+            resolved: resolvedViaAnyMatch
+        };
+    });
 
     return {
         currentModule: resolved.currentModule,
@@ -271,31 +295,6 @@ export function getImportsLogic(
 // ============================================================================
 
 /**
- * Input for symbol search.
- */
-export interface SearchSymbolsInput {
-    /** Search query (prefix match on symbol names) */
-    query: string;
-    /** Optional: filter by category ('class', 'function', 'struct', etc.) */
-    category?: string;
-    /** Optional: filter to symbols in a specific file */
-    filePath?: string;
-    /** Maximum results to return (default 50) */
-    limit?: number;
-}
-
-/**
- * Output for symbol search.
- */
-export interface SearchSymbolsOutput {
-    results?: ToolSymbolInfo[];
-    totalCount?: number;
-    truncated?: boolean;
-    error?: string;
-    code?: string;
-}
-
-/**
  * Core logic for SearchSymbols tool.
  * Performs prefix-based fuzzy search across all indexed symbols.
  */
@@ -304,7 +303,14 @@ export function searchSymbolsLogic(
     input: SearchSymbolsInput,
     getUri?: (filePath: string) => any
 ): SearchSymbolsOutput {
-    const { query, category, filePath, limit = 50 } = input;
+    const {
+        query,
+        category,
+        filePath,
+        maxFiles = 20,
+        maxMatchesPerFile = 10,
+        limit = 200
+    } = input;
     
     if (!query || typeof query !== 'string') {
         return createErrorResponse('query is required and must be a string', 'INVALID_INPUT');
@@ -332,99 +338,230 @@ export function searchSymbolsLogic(
         allSymbols = allSymbols.filter(s => s.category === category);
     }
     
-    // Prefix match on name (case-insensitive)
-    const matches = allSymbols.filter(s => 
-        s.name.toLowerCase().startsWith(queryLower) ||
-        s.name.toLowerCase().includes(queryLower)
-    );
-    
-    // Sort: exact prefix matches first, then contains matches
+    // Prefix/substring match on name (case-insensitive)
+    const matches = allSymbols.filter(s => {
+        const nameLower = s.name.toLowerCase();
+        return nameLower.startsWith(queryLower) || nameLower.includes(queryLower);
+    });
+
+    // Deterministic ordering: startsWith first, then name, then qualifiedName.
     matches.sort((a, b) => {
-        const aStartsWith = a.name.toLowerCase().startsWith(queryLower);
-        const bStartsWith = b.name.toLowerCase().startsWith(queryLower);
+        const aName = a.name.toLowerCase();
+        const bName = b.name.toLowerCase();
+        const aStartsWith = aName.startsWith(queryLower);
+        const bStartsWith = bName.startsWith(queryLower);
         if (aStartsWith && !bStartsWith) return -1;
         if (!aStartsWith && bStartsWith) return 1;
-        return a.name.localeCompare(b.name);
+        const nameCmp = a.name.localeCompare(b.name);
+        if (nameCmp !== 0) return nameCmp;
+        return a.qualifiedName.localeCompare(b.qualifiedName);
     });
 
     if (matches.length === 0) {
         return createErrorResponse(`No symbols found matching "${query}"`, 'SYMBOL_NOT_FOUND');
     }
 
-    const truncated = matches.length > limit;
-    const results = matches.slice(0, limit).map(symbolToToolInfo);
+    const totalCount = matches.length;
+    const fileGroups = new Map<string, { uri: any; matches: SymbolInfo[] }>();
+    let emitted = 0;
+    let truncated = false;
+
+    for (const sym of matches) {
+        if (emitted >= limit) {
+            truncated = true;
+            break;
+        }
+
+        const uriString = sym.uri.toString();
+        let group = fileGroups.get(uriString);
+        if (!group) {
+            if (fileGroups.size >= maxFiles) {
+                truncated = true;
+                continue;
+            }
+            group = { uri: sym.uri, matches: [] };
+            fileGroups.set(uriString, group);
+        }
+
+        if (group.matches.length >= maxMatchesPerFile) {
+            truncated = true;
+            continue;
+        }
+
+        group.matches.push(sym);
+        emitted++;
+    }
+
+    const files: ToolSearchFileMatches[] = [];
+    for (const group of fileGroups.values()) {
+        const fileLoc: ToolLocation = toToolLocation(group.uri);
+        const fileMatches: ToolSymbolMatch[] = group.matches.map(s => ({
+            name: s.name,
+            qualifiedName: s.qualifiedName,
+            category: s.category,
+            range: toToolRangeTuple(s.range)
+        }));
+        files.push({ file: fileLoc, matches: fileMatches });
+    }
+
+    if (emitted < totalCount) {
+        truncated = true;
+    }
 
     return {
-        results,
-        totalCount: matches.length,
+        query,
+        totalCount,
+        truncated,
+        files
+    };
+}
+
+// ============================================================================
+// Symbol Details
+// ============================================================================
+
+export function getSymbolDetailsLogic(
+    indexer: IWorkspaceIndexer,
+    input: GetSymbolDetailsInput
+): GetSymbolDetailsOutput {
+    const { qualifiedName } = input;
+    if (!qualifiedName || typeof qualifiedName !== 'string') {
+        return createErrorResponse('qualifiedName is required and must be a string', 'INVALID_INPUT');
+    }
+
+    const sym = indexer.resolveQualified(qualifiedName);
+    if (!sym) {
+        return createErrorResponse(`No symbol found for qualifiedName "${qualifiedName}"`, 'SYMBOL_NOT_FOUND');
+    }
+
+    return { symbol: symbolToToolInfo(sym) };
+}
+
+// ============================================================================
+// Module / Outline Discovery
+// ============================================================================
+
+export function listModulesLogic(
+    indexer: IWorkspaceIndexer,
+    input: ListModulesInput
+): ListModulesOutput {
+    const { prefix, limit = 200 } = input;
+
+    let modulePaths = new Map<string, ToolModuleInfo>();
+    for (const uri of indexer.getIndexedUris()) {
+        const ctx = indexer.getDocumentContext(uri);
+        if (!ctx?.modulePath) continue;
+        if (prefix && !ctx.modulePath.startsWith(prefix)) continue;
+
+        if (!modulePaths.has(ctx.modulePath)) {
+            modulePaths.set(ctx.modulePath, {
+                modulePath: ctx.modulePath,
+                declaringFile: toToolLocation(uri)
+            });
+        }
+    }
+
+    const all = Array.from(modulePaths.values());
+    all.sort((a, b) => a.modulePath.localeCompare(b.modulePath));
+
+    const truncated = all.length > limit;
+    return {
+        results: all.slice(0, limit),
+        totalCount: all.length,
         truncated
     };
 }
 
-/**
- * Input for finding references/usages.
- */
-export interface FindReferencesInput {
-    /** The symbol name to find references to */
-    symbolName: string;
-    /** Optional: the qualified name for more precise matching */
-    qualifiedName?: string;
-    /** Maximum results to return (default 50) */
-    limit?: number;
-}
-
-/**
- * Output for finding references.
- */
-export interface FindReferencesOutput {
-    /** The symbol being referenced */
-    symbol?: ToolSymbolInfo;
-    /** Locations where this symbol is referenced */
-    references?: Array<{
-        filePath: string;
-        line: number;
-        context?: string;
-    }>;
-    referenceCount?: number;
-    error?: string;
-    code?: string;
-}
-
-/**
- * Core logic for FindReferences tool.
- * Note: This is a simplified version - full reference tracking would require
- * more sophisticated analysis. This returns the symbol definition info.
- */
-export function findReferencesLogic(
+export function getModuleApiLogic(
     indexer: IWorkspaceIndexer,
-    input: FindReferencesInput
-): FindReferencesOutput {
-    const { symbolName, qualifiedName, limit = 50 } = input;
-    
-    if (!symbolName || typeof symbolName !== 'string') {
-        return createErrorResponse('symbolName is required and must be a string', 'INVALID_INPUT');
+    input: GetModuleApiInput,
+    options?: { includeTransitiveDefault?: boolean }
+): GetModuleApiOutput {
+    const { modulePath, includeTransitive = options?.includeTransitiveDefault ?? true, limit = 200 } = input;
+
+    if (!modulePath || typeof modulePath !== 'string') {
+        return createErrorResponse('modulePath is required and must be a string', 'INVALID_INPUT');
     }
 
-    // Try qualified lookup first
-    let symbol: SymbolInfo | undefined;
-    if (qualifiedName) {
-        symbol = indexer.resolveQualified(qualifiedName);
-    }
-    
-    if (!symbol) {
-        const symbols = indexer.getSymbols(symbolName);
-        symbol = symbols?.[0];
+    const exportedQualifiedNames = indexer.getModuleExportedQualifiedNames(modulePath, { includeTransitive });
+    const exportedSymbols: SymbolInfo[] = [];
+    for (const qualifiedName of exportedQualifiedNames) {
+        const sym = indexer.resolveQualified(qualifiedName);
+        if (sym) {
+            exportedSymbols.push(sym);
+        }
     }
 
-    if (!symbol) {
-        return createErrorResponse(`Symbol not found: ${symbolName}`, 'SYMBOL_NOT_FOUND');
-    }
+    // Deterministic ordering for tool output.
+    const candidates = deduplicateSymbols(exportedSymbols);
+    candidates.sort((a, b) => a.qualifiedName.localeCompare(b.qualifiedName));
 
-    // For now, return the symbol definition
-    // Full reference tracking would require scanning all files for usages
+    const truncated = candidates.length > limit;
     return {
-        symbol: symbolToToolInfo(symbol),
-        references: [],
-        referenceCount: 0
+        modulePath,
+        exports: candidates.slice(0, limit).map(symbolToToolInfo),
+        totalCount: candidates.length,
+        truncated
+    };
+}
+
+export function getDocumentSymbolsLogic(
+    indexer: IWorkspaceIndexer,
+    input: GetDocumentSymbolsInput,
+    getUri: (filePath: string) => any
+): GetDocumentSymbolsOutput {
+    const { filePath, scope = 'topLevel', includeScopePath = false, limit = 200 } = input;
+
+    if (!filePath || typeof filePath !== 'string') {
+        return createErrorResponse('filePath is required and must be a string', 'INVALID_INPUT');
+    }
+
+    const uri = getUri(filePath);
+    const ctx = indexer.getDocumentContext(uri);
+    if (!ctx) {
+        return createErrorResponse(`File not indexed: ${filePath}`, 'FILE_NOT_FOUND');
+    }
+
+    const uriString = uri.toString();
+    let symbols = deduplicateSymbols(indexer.getAllSymbols()).filter(s => s.uri.toString() === uriString);
+
+    if (scope === 'topLevel') {
+        const modulePath = ctx.modulePath;
+        symbols = symbols.filter(s => {
+            if ((s.scopePath?.length ?? 0) === 0) return true;
+            if (modulePath && s.scopePath.length === 1 && s.scopePath[0] === modulePath) return true;
+            return false;
+        });
+    }
+
+    symbols.sort((a, b) => {
+        const al = (a.range as any)?.start?.line ?? 0;
+        const bl = (b.range as any)?.start?.line ?? 0;
+        if (al !== bl) return al - bl;
+        const ac = (a.range as any)?.start?.character ?? 0;
+        const bc = (b.range as any)?.start?.character ?? 0;
+        if (ac !== bc) return ac - bc;
+        return a.qualifiedName.localeCompare(b.qualifiedName);
+    });
+
+    const all: ToolDocumentSymbol[] = symbols.map(s => {
+        const base: ToolDocumentSymbol = {
+            name: s.name,
+            qualifiedName: s.qualifiedName,
+            category: s.category,
+            range: toToolRangeTuple(s.range)
+        };
+        if (includeScopePath) {
+            base.scopePath = s.scopePath;
+        }
+        return base;
+    });
+
+    const truncated = all.length > limit;
+    return {
+        file: toToolLocation(uri),
+        modulePath: ctx.modulePath,
+        symbols: all.slice(0, limit),
+        truncated
     };
 }

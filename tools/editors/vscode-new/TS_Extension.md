@@ -685,7 +685,7 @@ Both `resolvedImportsCache` and `memberCache` now use bounded LRU eviction:
 **Goal:** Expose the Kanagawa symbol index to AI agents via VS Code's Language Model Tools API.
 
 #### Overview
-The extension registers 6 Language Model Tools that enable GitHub Copilot and other AI agents to query the Kanagawa codebase semantically. These tools provide structured JSON responses optimized for AI consumption.
+The extension registers 13 Language Model Tools that enable GitHub Copilot and other AI agents to query the Kanagawa codebase semantically. These tools provide structured JSON responses optimized for AI consumption.
 
 #### Architecture
 ```
@@ -711,7 +711,14 @@ src/copilot/
 | `kanagawa_infer_type` | Infer type at a position | `filePath`, `line`, `character` |
 | `kanagawa_get_module_exports` | List symbols exported by a file | `filePath` |
 | `kanagawa_get_imports` | Show imports for a file | `filePath` |
-| `kanagawa_search_symbols` | Search symbols by prefix/substring | `query`, optional `category`, `filePath` |
+| `kanagawa_search_symbols` | Search symbols by prefix/substring (grouped by file) | `query`, optional `category`, `filePath` |
+| `kanagawa_get_symbol_details` | Fetch rich symbol info by `qualifiedName` | `qualifiedName` |
+| `kanagawa_resolve_symbol_at_position` | Resolve symbol under cursor (primary + alternatives + confidence) | `filePath`, `line`, `character` |
+| `kanagawa_get_definition_locations` | Definition location(s) for symbol under cursor | `filePath`, `line`, `character` |
+| `kanagawa_find_references` | Find references for symbol under cursor | `filePath`, `line`, `character` |
+| `kanagawa_list_modules` | List indexed module paths | optional `prefix` |
+| `kanagawa_get_module_api` | List exported symbols for a module | `modulePath`, optional `includeTransitive` |
+| `kanagawa_get_document_symbols` | Token-efficient symbol listing for a file | `filePath`, optional `scope`, `includeScopePath` |
 
 #### Tool: kanagawa_lookup_symbol
 Finds symbol definitions matching a name, with optional scope disambiguation:
@@ -729,7 +736,14 @@ Finds symbol definitions matching a name, with optional scope disambiguation:
     "category": "method",
     "signature": "void push(T value)",
     "documentation": "Pushes a value onto the queue",
-    "location": "/project/src/fifo.k:42",
+        "location": {
+            "uri": "file:///...",
+            "path": "src/fifo.k",
+            "range": {
+                "start": { "line": 42, "character": 1 },
+                "end": { "line": 42, "character": 5 }
+            }
+        },
     "scopePath": ["data.fifo", "FIFO"]
   }],
   "totalCount": 1
@@ -766,15 +780,18 @@ Enables AI agents to explore the codebase with fuzzy search:
 
 // Output
 {
-  "results": [{
-    "name": "FIFO",
-    "qualifiedName": "data.fifo::FIFO",
-    "kind": "class",
-    "location": "/stdlib/data/fifo.k:15",
-    "documentation": "Generic FIFO queue implementation"
-  }],
-  "totalCount": 1,
-  "truncated": false
+    "query": "FIF",
+    "totalCount": 1,
+    "truncated": false,
+    "files": [{
+        "file": { "uri": "file:///...", "path": "stdlib/data/fifo.k" },
+        "matches": [{
+            "name": "FIFO",
+            "qualifiedName": "data.fifo::FIFO",
+            "category": "class",
+            "range": [1, 1, 1, 5]
+        }]
+    }]
 }
 ```
 
@@ -816,6 +833,9 @@ export function registerCopilotTools(
     // ... other tools
 }
 ```
+
+#### Visibility
+Tool visibility is not gated by the active editor language (the extension contributes tools with `when: "true"`), so tools can appear available even when a non-Kanagawa file is focused.
 
 #### Testing
 The pure logic functions in `toolLogic.ts` are tested with a mock indexer:
@@ -992,7 +1012,7 @@ async function loadWasm(context: vscode.ExtensionContext) {
 5.  **Config Hot Reload:** Performance settings apply immediately via `onDidChangeConfiguration`.
 
 ### Phase 12: GitHub Copilot Integration (v0.0.5) ✅
-1.  **Language Model Tools:** Implemented 6 VS Code Language Model Tools for Copilot agents.
+1.  **Language Model Tools:** Implemented 12 VS Code Language Model Tools for Copilot agents.
 2.  **Pure Logic Architecture:** Extracted tool logic to `toolLogic.ts` for testing without vscode dependencies.
 3.  **Symbol Search:** Added `kanagawa_search_symbols` for AI-driven codebase exploration.
 4.  **Tool Test Suite:** 41 comprehensive tests covering all tool logic paths.
@@ -1053,7 +1073,7 @@ The extension includes several documentation files:
 *   **Test Coverage:** 1229 passing unit tests covering all utility modules and providers.
 *   **Thread Safety:** Concurrent document opens handled gracefully via mutex serialization.
 *   **Error Handling:** All background operations have proper `.catch()` handlers (no unhandled promise rejections).
-*   **AI Integration:** 6 Language Model Tools enable Copilot agents to query the codebase semantically.
+*   **AI Integration:** 12 Language Model Tools enable Copilot agents to query the codebase semantically.
 
 ## 10. Robustness & Reliability
 

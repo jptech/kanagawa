@@ -2082,6 +2082,52 @@ export class WorkspaceIndexer {
     }
 
     /**
+     * Returns the qualified names exported by a module.
+     *
+     * This is primarily intended for AI tooling and discoverability features.
+     */
+    public getModuleExportedQualifiedNames(
+        modulePath: string,
+        options?: { includeTransitive?: boolean }
+    ): string[] {
+        const includeTransitive = options?.includeTransitive ?? true;
+
+        if (!modulePath) {
+            return [];
+        }
+
+        // Prefer exact match, but allow suffix/prefix matching (like import resolution) as a fallback.
+        const exact = this.moduleExports.get(modulePath);
+        const matchingModulePaths: string[] = [];
+
+        if (exact) {
+            matchingModulePaths.push(modulePath);
+        } else {
+            for (const candidate of this.moduleExports.keys()) {
+                if (matchesImportPath(candidate, modulePath)) {
+                    matchingModulePaths.push(candidate);
+                }
+            }
+        }
+
+        const out = new Set<string>();
+        for (const mp of matchingModulePaths) {
+            const exports = this.moduleExports.get(mp);
+            if (!exports) continue;
+
+            const qns = includeTransitive
+                ? resolveTransitiveExports(mp, this.moduleExports)
+                : exports.exportedSymbols;
+
+            for (const qn of qns) {
+                out.add(qn);
+            }
+        }
+
+        return Array.from(out).sort((a, b) => a.localeCompare(b));
+    }
+
+    /**
      * Returns whether a URI should be indexed, based on the active exclude patterns.
      * Intended for workspace file watching and other event-driven reindex triggers.
      */

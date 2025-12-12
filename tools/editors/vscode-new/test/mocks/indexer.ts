@@ -365,6 +365,23 @@ export class MockWorkspaceIndexer implements IWorkspaceIndexer {
         return uris;
     }
 
+    getModuleExportedQualifiedNames(
+        modulePath: string,
+        _options?: { includeTransitive?: boolean }
+    ): string[] {
+        // For unit tests we approximate module exports by returning all symbols
+        // whose qualified name is in the requested module.
+        const prefix = modulePath + '::';
+        const qualifiedNames: string[] = [];
+        for (const sym of this.qualifiedIndex.values()) {
+            if (sym.qualifiedName.startsWith(prefix)) {
+                qualifiedNames.push(sym.qualifiedName);
+            }
+        }
+        qualifiedNames.sort((a, b) => a.localeCompare(b));
+        return qualifiedNames;
+    }
+
     getStats(): { totalSymbols: number; uniqueFiles: number; recentlyIndexed: number; verbose: boolean } {
         const files = new Set<string>();
         for (const list of this.symbols.values()) {

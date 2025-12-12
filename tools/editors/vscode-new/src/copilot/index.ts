@@ -5,7 +5,7 @@
  */
 
 import * as vscode from 'vscode';
-import { IWorkspaceIndexer } from '../service/IWorkspaceIndexer';
+import { WorkspaceIndexer } from '../service/indexer';
 import { TreeSitterService } from '../service/treeSitter';
 import {
     LookupSymbolTool,
@@ -13,7 +13,14 @@ import {
     InferTypeTool,
     GetModuleExportsTool,
     GetImportsTool,
-    SearchSymbolsTool
+    SearchSymbolsTool,
+    GetSymbolDetailsTool,
+    ResolveSymbolAtPositionTool,
+    GetDefinitionLocationsTool,
+    FindReferencesAtPositionTool,
+    ListModulesTool,
+    GetModuleApiTool,
+    GetDocumentSymbolsTool
 } from './tools';
 
 /**
@@ -26,7 +33,15 @@ export const TOOL_NAMES = {
     INFER_TYPE: 'kanagawa_infer_type',
     GET_MODULE_EXPORTS: 'kanagawa_get_module_exports',
     GET_IMPORTS: 'kanagawa_get_imports',
-    SEARCH_SYMBOLS: 'kanagawa_search_symbols'
+    SEARCH_SYMBOLS: 'kanagawa_search_symbols',
+    GET_SYMBOL_DETAILS: 'kanagawa_get_symbol_details',
+
+    RESOLVE_AT_POSITION: 'kanagawa_resolve_symbol_at_position',
+    GET_DEFINITIONS: 'kanagawa_get_definition_locations',
+    FIND_REFERENCES: 'kanagawa_find_references',
+    LIST_MODULES: 'kanagawa_list_modules',
+    GET_MODULE_API: 'kanagawa_get_module_api',
+    GET_DOCUMENT_SYMBOLS: 'kanagawa_get_document_symbols'
 } as const;
 
 /**
@@ -39,7 +54,7 @@ export const TOOL_NAMES = {
  */
 export function registerCopilotTools(
     context: vscode.ExtensionContext,
-    indexer: IWorkspaceIndexer,
+    indexer: WorkspaceIndexer,
     treeSitterService: TreeSitterService
 ): vscode.Disposable[] {
     const disposables: vscode.Disposable[] = [];
@@ -104,6 +119,63 @@ export function registerCopilotTools(
             )
         );
         console.log(`Kanagawa: Registered tool ${TOOL_NAMES.SEARCH_SYMBOLS}`);
+
+        disposables.push(
+            vscode.lm.registerTool(
+                TOOL_NAMES.GET_SYMBOL_DETAILS,
+                new GetSymbolDetailsTool(indexer)
+            )
+        );
+        console.log(`Kanagawa: Registered tool ${TOOL_NAMES.GET_SYMBOL_DETAILS}`);
+
+        // New v2 navigation + discovery tools
+        disposables.push(
+            vscode.lm.registerTool(
+                TOOL_NAMES.RESOLVE_AT_POSITION,
+                new ResolveSymbolAtPositionTool(indexer, treeSitterService)
+            )
+        );
+        console.log(`Kanagawa: Registered tool ${TOOL_NAMES.RESOLVE_AT_POSITION}`);
+
+        disposables.push(
+            vscode.lm.registerTool(
+                TOOL_NAMES.GET_DEFINITIONS,
+                new GetDefinitionLocationsTool(indexer, treeSitterService)
+            )
+        );
+        console.log(`Kanagawa: Registered tool ${TOOL_NAMES.GET_DEFINITIONS}`);
+
+        disposables.push(
+            vscode.lm.registerTool(
+                TOOL_NAMES.FIND_REFERENCES,
+                new FindReferencesAtPositionTool(treeSitterService, indexer)
+            )
+        );
+        console.log(`Kanagawa: Registered tool ${TOOL_NAMES.FIND_REFERENCES}`);
+
+        disposables.push(
+            vscode.lm.registerTool(
+                TOOL_NAMES.LIST_MODULES,
+                new ListModulesTool(indexer)
+            )
+        );
+        console.log(`Kanagawa: Registered tool ${TOOL_NAMES.LIST_MODULES}`);
+
+        disposables.push(
+            vscode.lm.registerTool(
+                TOOL_NAMES.GET_MODULE_API,
+                new GetModuleApiTool(indexer)
+            )
+        );
+        console.log(`Kanagawa: Registered tool ${TOOL_NAMES.GET_MODULE_API}`);
+
+        disposables.push(
+            vscode.lm.registerTool(
+                TOOL_NAMES.GET_DOCUMENT_SYMBOLS,
+                new GetDocumentSymbolsTool(indexer)
+            )
+        );
+        console.log(`Kanagawa: Registered tool ${TOOL_NAMES.GET_DOCUMENT_SYMBOLS}`);
 
         console.log(`Kanagawa: Successfully registered ${disposables.length} Copilot tools`);
     } catch (error) {
