@@ -13,6 +13,7 @@ export { matchesGlobPattern } from '../utils/globUtils';
 export class ImportConfigService {
     private cachedConfig: ImportConfiguration | undefined;
     private watcher: vscode.FileSystemWatcher | undefined;
+    private localWatcher: vscode.FileSystemWatcher | undefined;
     private readonly changeEmitter = new vscode.EventEmitter<void>();
     readonly onDidChange = this.changeEmitter.event;
 
@@ -20,12 +21,19 @@ export class ImportConfigService {
 
     async init(context: vscode.ExtensionContext): Promise<void> {
         if (this.workspaceFolder) {
-            const pattern = new vscode.RelativePattern(this.workspaceFolder, 'kanagawa.config.json');
-            this.watcher = vscode.workspace.createFileSystemWatcher(pattern);
+            const sharedPattern = new vscode.RelativePattern(this.workspaceFolder, 'kanagawa.config.json');
+            this.watcher = vscode.workspace.createFileSystemWatcher(sharedPattern);
             this.watcher.onDidCreate(() => this.invalidate());
             this.watcher.onDidChange(() => this.invalidate());
             this.watcher.onDidDelete(() => this.invalidate());
             context.subscriptions.push(this.watcher);
+
+            const localPattern = new vscode.RelativePattern(this.workspaceFolder, 'kanagawa.config.local.json');
+            this.localWatcher = vscode.workspace.createFileSystemWatcher(localPattern);
+            this.localWatcher.onDidCreate(() => this.invalidate());
+            this.localWatcher.onDidChange(() => this.invalidate());
+            this.localWatcher.onDidDelete(() => this.invalidate());
+            context.subscriptions.push(this.localWatcher);
         }
 
         const configListener = vscode.workspace.onDidChangeConfiguration(event => {
@@ -63,33 +71,48 @@ export class ImportConfigService {
 
     private async readWorkspaceConfig(): Promise<ImportConfiguration> {
         if (!this.workspaceFolder) { return { importPaths: [], excludePatterns: [] }; }
-        const uri = vscode.Uri.joinPath(this.workspaceFolder.uri, 'kanagawa.config.json');
-        try {
-            const data = await vscode.workspace.fs.readFile(uri);
-            const parsed = JSON.parse(Buffer.from(data).toString('utf8'));
-            const config = {
-                importPaths: this.normalizePaths(this.ensureStringArray(parsed.importPaths)),
-                stdlibPath: parsed.stdlibPath ? this.toAbsolute(parsed.stdlibPath) : undefined,
-                excludePatterns: this.ensureStringArray(parsed.exclude)
-            };
-            
-            // Log successful config load
-            const pathCount = config.importPaths.length;
-            const excludeCount = config.excludePatterns.length;
-            const parts = [
-                `${pathCount} import path${pathCount !== 1 ? 's' : ''}`
-            ];
-            if (config.stdlibPath) {
-                parts.push(`stdlib: ${config.stdlibPath}`);
+        const shared = await this.readConfigFile('kanagawa.config.json');
+        const local = await this.readConfigFile('kanagawa.config.local.json');
+
+        const merged: ImportConfiguration = {
+            importPaths: this.mergePaths(shared.config.importPaths, local.config.importPaths),
+            stdlibPath: local.config.stdlibPath ?? shared.config.stdlibPath,
+            excludePatterns: this.mergePatterns(shared.config.excludePatterns, local.config.excludePatterns)
+        };
+
+        if (shared.loaded || local.loaded) {
+            const sourceLabel = local.loaded
+                ? (shared.loaded ? 'kanagawa.config.json + kanagawa.config.local.json' : 'kanagawa.config.local.json')
+                : 'kanagawa.config.json';
+            const pathCount = merged.importPaths.length;
+            const excludeCount = merged.excludePatterns.length;
+            const parts = [`${pathCount} import path${pathCount !== 1 ? 's' : ''}`];
+            if (merged.stdlibPath) {
+                parts.push(`stdlib: ${merged.stdlibPath}`);
             }
             if (excludeCount > 0) {
                 parts.push(`${excludeCount} exclude pattern${excludeCount !== 1 ? 's' : ''}`);
             }
-            console.log(`Kanagawa: Loaded kanagawa.config.json from ${this.workspaceFolder.name}: ${parts.join(', ')}`);
-            
-            return config;
+            console.log(`Kanagawa: Loaded ${sourceLabel} from ${this.workspaceFolder.name}: ${parts.join(', ')}`);
+        }
+
+        return merged;
+    }
+
+    private async readConfigFile(fileName: 'kanagawa.config.json' | 'kanagawa.config.local.json'): Promise<{ config: ImportConfiguration; loaded: boolean }>{
+        if (!this.workspaceFolder) { return { config: { importPaths: [], excludePatterns: [] }, loaded: false }; }
+        const uri = vscode.Uri.joinPath(this.workspaceFolder.uri, fileName);
+        try {
+            const data = await vscode.workspace.fs.readFile(uri);
+            const parsed = JSON.parse(Buffer.from(data).toString('utf8'));
+            const config: ImportConfiguration = {
+                importPaths: this.normalizePaths(this.ensureStringArray((parsed as any).importPaths)),
+                stdlibPath: (parsed as any).stdlibPath ? this.toAbsolute(String((parsed as any).stdlibPath)) : undefined,
+                excludePatterns: this.ensureStringArray((parsed as any).exclude)
+            };
+            return { config, loaded: true };
         } catch {
-            return { importPaths: [], excludePatterns: [] };
+            return { config: { importPaths: [], excludePatterns: [] }, loaded: false };
         }
     }
 

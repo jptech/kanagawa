@@ -1,6 +1,6 @@
 # Kanagawa Language Support for VS Code
 
-[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](CHANGELOG.md)
 
 A lightweight, fast language extension for the Kanagawa hardware description language. Provides IDE features through "LSP-Lite" architecture—all features run in-process using Tree-sitter parsing, with no external language server required.
 
@@ -25,6 +25,17 @@ A lightweight, fast language extension for the Kanagawa hardware description lan
 - **Template Instantiation** — Full type resolution through generic types
 - **Diagnostics** — Extension health monitoring and troubleshooting tools
 
+### GitHub Copilot (Language Model Tools)
+
+This extension can expose its semantic index to GitHub Copilot agents via **VS Code Language Model Tools**.
+
+- Tooling is registered via `vscode.lm.registerTool` when the LM API is available.
+- Tool visibility is not gated by active language (contributed with `when: "true"`).
+- High-volume outputs are designed to be token-efficient:
+    - `kanagawa_search_symbols` returns grouped results by file
+    - `kanagawa_get_document_symbols` returns a flat symbol list (top-level by default)
+    - Ranges for these list tools use tuple encoding: `[startLine,startChar,endLine,endChar]` (1-indexed)
+
 ## Getting Started
 
 ### Installation
@@ -38,7 +49,7 @@ A lightweight, fast language extension for the Kanagawa hardware description lan
 | Extension | Description |
 |-----------|-------------|
 | `.k` | Kanagawa source files |
-| `.pd` | Kanagawa definition files |
+| `.pd` | PipeDream (old name for Kanagawa) source files |
 
 ### First-Time Setup
 
@@ -46,20 +57,26 @@ On first activation, the extension scans your workspace for Kanagawa files. Prog
 
 ## Configuration
 
-Configuration comes from two sources: a project-level `kanagawa.config.json` file and VS Code settings. The two sources are merged according to specific rules for each setting.
+Configuration comes from three sources:
+
+- A project-level `kanagawa.config.json` file (recommended to commit)
+- An optional `kanagawa.config.local.json` file (recommended to gitignore)
+- VS Code settings
+
+These sources are merged according to specific rules for each setting.
 
 ### Configuration Merging Rules
 
 | Setting | Merge Behavior |
 |---------|----------------|
-| `importPaths` | **Combined** — Paths from both sources are merged and deduplicated. Project config paths are added first, then VS Code settings. |
-| `stdlibPath` | **Override** — VS Code settings take precedence. If set in VS Code, the project config value is ignored. |
-| `exclude` | **Combined** — Patterns from both sources are merged and deduplicated. |
+| `importPaths` | **Combined** — `kanagawa.config.json` + `kanagawa.config.local.json` + VS Code settings are merged and deduplicated (in that order). |
+| `stdlibPath` | **Override** — VS Code settings take precedence. Otherwise `kanagawa.config.local.json` overrides `kanagawa.config.json`. |
+| `exclude` | **Combined** — `kanagawa.config.json` + `kanagawa.config.local.json` + VS Code settings are merged and deduplicated (in that order). |
 
 This means:
-- ✅ You can define shared import paths in `kanagawa.config.json` and add personal paths in VS Code settings
-- ✅ Team members can check `kanagawa.config.json` into source control for consistent project configuration
-- ✅ Individual developers can override `stdlibPath` in their VS Code settings without modifying project files
+- ✅ You can commit shared defaults in `kanagawa.config.json`
+- ✅ You can keep machine-specific paths (like `stdlibPath`) in `kanagawa.config.local.json` without modifying project files
+- ✅ Individual developers can still override `stdlibPath` in VS Code settings without touching either file
 
 ### Project Configuration (`kanagawa.config.json`)
 
@@ -86,6 +103,18 @@ Create a `kanagawa.config.json` file in your workspace root for project-specific
 | `exclude` | `string[]` | Glob patterns for files/folders to exclude from indexing. Combined with VS Code settings. |
 
 > **Tip**: Check `kanagawa.config.json` into source control so all team members use consistent import paths.
+
+### Local Project Configuration (`kanagawa.config.local.json`)
+
+Optionally create a `kanagawa.config.local.json` file in your workspace root for machine-specific settings. It uses the same schema as `kanagawa.config.json` and is merged on top of it.
+
+Common use case: overriding `stdlibPath` per machine.
+
+```json
+{
+    "stdlibPath": "C:/dev/kanagawa/stdlib"
+}
+```
 
 ### VS Code Settings
 

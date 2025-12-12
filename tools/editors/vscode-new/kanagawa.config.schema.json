@@ -1,7 +1,7 @@
 {
     "$schema": "http://json-schema.org/draft-07/schema#",
     "title": "Kanagawa Project Configuration",
-    "description": "Configuration file for Kanagawa VS Code extension project settings",
+    "description": "Configuration file for Kanagawa VS Code extension project settings (used by kanagawa.config.json and kanagawa.config.local.json)",
     "type": "object",
     "properties": {
         "importPaths": {

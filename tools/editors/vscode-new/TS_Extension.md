@@ -157,7 +157,7 @@ graph TD
 ### 3.6. Configurable Import Search Paths
 **Goal:** Allow projects to reference Kanagawa sources outside the workspace tree while keeping per-user overrides easy to manage.
 
-*   **Workspace Configuration (`kanagawa.config.json`):** Optional JSON file at the root of the workspace. Example:
+*   **Workspace Configuration (`kanagawa.config.json`):** Optional JSON file at the root of the workspace (recommended to commit). Example:
     ```json
     {
         "importPaths": [
@@ -168,11 +168,13 @@ graph TD
     }
     ```
     Relative entries are resolved against the workspace root.
+*   **Local Workspace Overlay (`kanagawa.config.local.json`):** Optional JSON file at the root of the workspace (recommended to gitignore). Uses the same schema as `kanagawa.config.json` and is merged on top of it.
+    *   **Precedence within project files:** local overrides shared for `stdlibPath`; arrays like `importPaths` are combined (shared first, then local) with dedupe.
 *   **User Settings (`kanagawa.compiler.*`):** Two new VS Code settings live under the `Kanagawa` category:
     *   `kanagawa.compiler.importPaths`: Array of additional search roots.
     *   `kanagawa.compiler.stdlibPath`: Optional override for the standard library.
     Settings paths are resolved relative to the workspace and take precedence over workspace JSON values.
-*   **Merge Strategy:** The `ImportConfigService` loads workspace entries first, then appends user settings (deduplicated after normalization). Standard library overrides follow the same precedence (settings win over workspace; both beat defaults).
+*   **Merge Strategy:** The `ImportConfigService` loads `kanagawa.config.json`, then overlays `kanagawa.config.local.json`, then appends user settings (deduplicated after normalization). Standard library overrides follow the same precedence (settings win; then local; then shared; both beat defaults).
 *   **Live Updates:** The service watches the workspace file and listens for configuration changes. Updates clear cached lookup data and schedule a full re-index, so new search roots are scanned automatically without a manual reload.
 *   **Index Coverage:** When indexing, the extension now walks each configured import root (skipping common build folders) and indexes every `*.k` file it finds, alongside the main workspace tree.
 

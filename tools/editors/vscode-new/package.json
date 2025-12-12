@@ -152,7 +152,10 @@
     ],
     "jsonValidation": [
       {
-        "fileMatch": "kanagawa.config.json",
+        "fileMatch": [
+          "kanagawa.config.json",
+          "kanagawa.config.local.json"
+        ],
         "url": "./kanagawa.config.schema.json"
       }
     ],

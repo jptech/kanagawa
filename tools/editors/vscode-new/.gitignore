@@ -23,6 +23,9 @@ yarn-error.log*
 *.tmp
 .env.local
 
+# Local project config (machine-specific)
+kanagawa.config.local.json
+
 # Build artifacts
 *.vsix
 
