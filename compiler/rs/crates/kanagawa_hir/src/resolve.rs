@@ -196,11 +196,11 @@ impl<'a> Resolver<'a> {
     }
 
     fn resolve_extern(&mut self, e: &mut HirExtern) {
-        self.resolve_item(&mut e.item);
+        self.resolve_type(&mut e.extern_type);
     }
 
     fn resolve_export(&mut self, e: &mut HirExport2) {
-        self.resolve_item(&mut e.item);
+        self.resolve_type(&mut e.exported_type);
     }
 
     fn resolve_block(&mut self, block: &mut HirBlock) {

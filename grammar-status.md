@@ -31,14 +31,16 @@ Test coverage is primarily under:
 
 ## High-level Status
 
-| Component | Status | Test Count |
-|-----------|--------|------------|
-| Lexer | Working | 4 tests |
-| CST Parser | Working | 38 tests |
-| AST Types | Working | - |
-| CST→AST Lowering | Working | 35 tests |
-| HIR Types | Working | 25 tests |
-| AST→HIR Lowering | Working | 39 tests (0 ignored) |
+| Component | Status | Test Count | Library Coverage |
+|-----------|--------|------------|------------------|
+| Lexer | Working | 4 tests | - |
+| CST Parser | Working | 38 tests | 116/124 (93.5%) |
+| AST Types | Working | - | - |
+| CST→AST Lowering | **100%** | 35 tests | **116/116 (100.0%)** |
+| HIR Types | Working | 25 tests | - |
+| AST→HIR Lowering | Working | 39 tests (0 ignored) | 144/409 (35.2%) |
+
+*Last updated: 2025-12-15*
 
 ## 1) Lexical Structure
 
@@ -168,10 +170,16 @@ The `kanagawa_ast` crate provides typed AST definitions and CST→AST lowering:
 
 ### CST→AST Lowering Coverage
 
-The `lower_file()` function converts CST to AST with the following capabilities:
+The `lower_file()` function converts CST to AST with **100% success rate** on all CST-parseable library files (116/116).
 
 - **Fully lowered:** Modules, imports, all declaration types, all statement types, all expression types including built-in expressions (`mux`, `concat`, `fan_out`, `static`, `bitsizeof`, `bytesizeof`, `clog2`)
 - **Partially lowered:** `bitoffsetof`/`byteoffsetof` (require Type and field name, not expressions)
+
+Recent fixes (2025-12-15):
+- Empty parentheses `()` in function type contexts now handled via `Expr::Unit`
+- `bitsizeof`/`bytesizeof` operators now properly parsed and lowered to `SizeofExpr`
+- Static if block parsing fixed to handle `{...}` blocks correctly
+- Template-template parameter defaults now distinguish type vs expression arguments
 
 ## 9) Test Summary
 
@@ -365,11 +373,12 @@ Cross-referencing with language requirements from grammar.md:
 
 Recommended next steps for the Rust frontend:
 
-1. **Implement full type checking**: Build on HIR infrastructure for semantic validation
-2. **Complete `bitoffsetof`/`byteoffsetof` lowering**: Extract Type and field name arguments properly
-3. **Implement AST→ParseTree emission**: Use the existing C ABI seam (`compiler/cpp/parse_tree.h`) to emit ParseTree for the C++ backend
-4. **Integration testing**: End-to-end tests compiling real `.k` files through the Rust frontend
-5. **Cross-module name resolution**: Implement module loading and cross-file symbol resolution
+1. **Fix hyphenated module names**: 8 files fail CST parse due to hyphenated module name segments (e.g., `agilex-7`, `arria-10`)
+2. **Improve HIR lowering**: Increase pass rate from 35.2% by resolving undefined symbol errors
+3. **Implement full type checking**: Build on HIR infrastructure for semantic validation
+4. **Complete `bitoffsetof`/`byteoffsetof` lowering**: Extract Type and field name arguments properly
+5. **Implement AST→ParseTree emission**: Use the existing C ABI seam (`compiler/cpp/parse_tree.h`) to emit ParseTree for the C++ backend
+6. **Cross-module name resolution**: Implement module loading and cross-file symbol resolution
 
 ## 15) Tree-sitter Mismatches
 

@@ -264,20 +264,20 @@ pub struct HirStaticAssert {
     pub condition: HirExpr,
 }
 
-/// An extern declaration.
+/// An extern declaration: `extern Foo;` or `extern Foo<T, N>;`
 #[derive(Debug, Clone)]
 pub struct HirExtern {
     pub span: Span,
     pub attrs: Vec<TyAttr>,
-    pub item: Box<HirItem>,
+    pub extern_type: Ty,
 }
 
-/// An export declaration.
+/// An export declaration: `export Foo;` or `export Foo<T, N>;`
 #[derive(Debug, Clone)]
 pub struct HirExport2 {
     pub span: Span,
     pub attrs: Vec<TyAttr>,
-    pub item: Box<HirItem>,
+    pub exported_type: Ty,
 }
 
 // ============================================================================

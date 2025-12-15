@@ -574,21 +574,21 @@ impl Lowerer {
 
     fn lower_extern(&mut self, e: &ast::ExternDecl) -> Result<HirExtern, LowerError> {
         let attrs = self.lower_attrs(&e.attrs);
-        let item = self.lower_decl(&e.decl)?;
+        let extern_type = self.lower_type(&e.extern_type);
         Ok(HirExtern {
             span: e.span,
             attrs,
-            item: Box::new(item),
+            extern_type,
         })
     }
 
     fn lower_export_decl(&mut self, e: &ast::ExportDecl) -> Result<HirExport2, LowerError> {
         let attrs = self.lower_attrs(&e.attrs);
-        let item = self.lower_decl(&e.decl)?;
+        let exported_type = self.lower_type(&e.exported_type);
         Ok(HirExport2 {
             span: e.span,
             attrs,
-            item: Box::new(item),
+            exported_type,
         })
     }
 

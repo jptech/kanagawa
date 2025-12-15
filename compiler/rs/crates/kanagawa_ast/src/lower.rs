@@ -903,6 +903,15 @@ impl Lowerer {
                         then_decl = self.lower_decl(&n)?;
                     }
                 }
+                // Handle Block nodes containing declarations
+                rowan::NodeOrToken::Node(n) if n.kind() == SyntaxKind::Block => {
+                    let decl_block = self.lower_decl_block(&n)?;
+                    if saw_else {
+                        else_decl = Some(Decl::DeclBlock(decl_block));
+                    } else if then_decl.is_none() {
+                        then_decl = Some(Decl::DeclBlock(decl_block));
+                    }
+                }
                 _ => {}
             }
         }
@@ -916,6 +925,21 @@ impl Lowerer {
             then_decl: Box::new(then_decl),
             else_decl: else_decl.map(Box::new),
         })
+    }
+
+    fn lower_decl_block(&mut self, node: &SyntaxNode) -> Result<DeclBlock> {
+        let span = self.span(node);
+        let mut decls = Vec::new();
+
+        for child in node.children() {
+            if self.is_decl_kind(child.kind()) {
+                if let Some(decl) = self.lower_decl(&child)? {
+                    decls.push(decl);
+                }
+            }
+        }
+
+        Ok(DeclBlock { span, decls })
     }
 
     fn lower_static_assert_decl(&mut self, node: &SyntaxNode) -> Result<StaticAssertDecl> {
@@ -940,46 +964,46 @@ impl Lowerer {
     fn lower_extern_decl(&mut self, node: &SyntaxNode) -> Result<ExternDecl> {
         let span = self.span(node);
         let mut attrs = Vec::new();
-        let mut decl = None;
+        let mut extern_type = None;
 
         for child in node.children() {
             match child.kind() {
                 SyntaxKind::Attrs => attrs.extend(self.lower_attrs(&child)?),
-                _ if self.is_decl_kind(child.kind()) => {
-                    decl = self.lower_decl(&child)?;
+                SyntaxKind::Type => {
+                    extern_type = Some(self.lower_type(&child)?);
                 }
                 _ => {}
             }
         }
 
-        let decl = decl.ok_or(LowerError::MissingChild("extern declaration"))?;
+        let extern_type = extern_type.ok_or(LowerError::MissingChild("extern type"))?;
         Ok(ExternDecl {
             span,
             attrs,
-            decl: Box::new(decl),
+            extern_type,
         })
     }
 
     fn lower_export_decl(&mut self, node: &SyntaxNode) -> Result<ExportDecl> {
         let span = self.span(node);
         let mut attrs = Vec::new();
-        let mut decl = None;
+        let mut exported_type = None;
 
         for child in node.children() {
             match child.kind() {
                 SyntaxKind::Attrs => attrs.extend(self.lower_attrs(&child)?),
-                _ if self.is_decl_kind(child.kind()) => {
-                    decl = self.lower_decl(&child)?;
+                SyntaxKind::Type => {
+                    exported_type = Some(self.lower_type(&child)?);
                 }
                 _ => {}
             }
         }
 
-        let decl = decl.ok_or(LowerError::MissingChild("export declaration"))?;
+        let exported_type = exported_type.ok_or(LowerError::MissingChild("export type"))?;
         Ok(ExportDecl {
             span,
             attrs,
-            decl: Box::new(decl),
+            exported_type,
         })
     }
 
@@ -1260,7 +1284,13 @@ impl Lowerer {
             }
         }
 
-        let body = body.ok_or(LowerError::MissingChild("do-while body"))?;
+        // If no body was found (e.g., `do ; while (cond);`), use an empty block.
+        let body = body.unwrap_or_else(|| {
+            Box::new(Stmt::Block(Block {
+                span: span.clone(),
+                stmts: Vec::new(),
+            }))
+        });
         let condition = condition.ok_or(LowerError::MissingChild("do-while condition"))?;
 
         Ok(DoWhileStmt {
@@ -1770,15 +1800,30 @@ impl Lowerer {
     fn lower_unary_expr(&mut self, node: &SyntaxNode) -> Result<Expr> {
         let span = self.span(node);
         let mut operand = None;
+        let mut type_operand = None;
         let mut op = UnaryOp::Neg;
         let mut op_first = false;
         let mut found_op = false;
         let mut found_operand = false;
+        let mut sizeof_kind: Option<SizeofKind> = None;
 
         // Iterate through children in order to detect prefix vs postfix
         for elem in node.children_with_tokens() {
             match elem {
                 rowan::NodeOrToken::Token(token) => {
+                    // Check for sizeof operators first
+                    match token.kind() {
+                        SyntaxKind::KwBitsizeof => {
+                            sizeof_kind = Some(SizeofKind::Bits);
+                            continue;
+                        }
+                        SyntaxKind::KwBytesizeof => {
+                            sizeof_kind = Some(SizeofKind::Bytes);
+                            continue;
+                        }
+                        _ => {}
+                    }
+
                     let matched_op = match token.kind() {
                         SyntaxKind::Minus => Some(UnaryOp::Neg),
                         SyntaxKind::Not => Some(UnaryOp::Not),
@@ -1800,9 +1845,30 @@ impl Lowerer {
                     if self.is_expr_kind(child.kind()) && operand.is_none() {
                         operand = Some(self.lower_expr(&child)?);
                         found_operand = true;
+                    } else if child.kind() == SyntaxKind::Type && type_operand.is_none() {
+                        // For sizeof operators, the operand can be a type
+                        type_operand = Some(self.lower_type(&child)?);
                     }
                 }
             }
+        }
+
+        // Handle sizeof expressions
+        if let Some(kind) = sizeof_kind {
+            // Try to get operand from expression first, then from type
+            let sizeof_operand = if let Some(expr) = operand {
+                expr
+            } else if let Some(ty) = type_operand {
+                // Wrap type in TypeExpr
+                Expr::TypeExpr(TypeExpr { span, ty })
+            } else {
+                return Err(LowerError::MissingChild("sizeof operand"));
+            };
+            return Ok(Expr::Sizeof(SizeofExpr {
+                span,
+                kind,
+                operand: Box::new(sizeof_operand),
+            }));
         }
 
         // Adjust inc/dec operators based on prefix vs postfix
@@ -2055,6 +2121,20 @@ impl Lowerer {
         for child in node.children() {
             if child.kind() == SyntaxKind::Type {
                 ty = Some(self.lower_type(&child)?);
+            } else if child.kind() == SyntaxKind::TypeTemplateArgs {
+                // Cast expressions use `cast<T>(x)` syntax, where T is inside TypeTemplateArgs.
+                // Extract the type from the first TypeTemplateArg child.
+                for arg in child.children() {
+                    if arg.kind() == SyntaxKind::TypeTemplateArg {
+                        for type_child in arg.children() {
+                            if type_child.kind() == SyntaxKind::Type {
+                                ty = Some(self.lower_type(&type_child)?);
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
             } else if self.is_expr_kind(child.kind()) {
                 expr = Some(self.lower_expr(&child)?);
             }
@@ -2083,7 +2163,9 @@ impl Lowerer {
             }
         }
 
-        Err(LowerError::MissingChild("parenthesized expression"))
+        // Empty parentheses `()` - treat as a unit expression
+        // This commonly appears in function type contexts like `() -> bool`
+        Ok(Expr::Unit(span))
     }
 
     fn lower_initializer_list(&mut self, node: &SyntaxNode) -> Result<InitializerList> {

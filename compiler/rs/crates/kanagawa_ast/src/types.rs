@@ -118,6 +118,16 @@ pub enum Decl {
     Extern(ExternDecl),
     /// Export declaration
     Export(ExportDecl),
+    /// Block of declarations: `{ decl1; decl2; ... }`
+    /// Used for static if branches that contain multiple declarations
+    DeclBlock(DeclBlock),
+}
+
+/// A block containing multiple declarations.
+#[derive(Debug, Clone)]
+pub struct DeclBlock {
+    pub span: Span,
+    pub decls: Vec<Decl>,
 }
 
 /// A function declaration or definition.
@@ -302,20 +312,20 @@ pub struct StaticAssertDecl {
     pub condition: Expr,
 }
 
-/// Extern declaration wrapper.
+/// Extern declaration: `extern Foo;` or `extern Foo<T, N>;`
 #[derive(Debug, Clone)]
 pub struct ExternDecl {
     pub span: Span,
     pub attrs: Vec<Attribute>,
-    pub decl: Box<Decl>,
+    pub extern_type: Type,
 }
 
-/// Export declaration wrapper.
+/// Export declaration: `export Foo;` or `export Foo<T, N>;`
 #[derive(Debug, Clone)]
 pub struct ExportDecl {
     pub span: Span,
     pub attrs: Vec<Attribute>,
-    pub decl: Box<Decl>,
+    pub exported_type: Type,
 }
 
 // ============================================================================
@@ -612,6 +622,8 @@ pub enum Expr {
     DesignatedInitializer(DesignatedInitializer),
     /// Parenthesized expression.
     Paren(ParenExpr),
+    /// Unit/void expression: `()` - empty parentheses, often used in function type contexts
+    Unit(Span),
     /// Type as expression (for decltype comparisons, etc).
     TypeExpr(TypeExpr),
     /// Lambda expression.

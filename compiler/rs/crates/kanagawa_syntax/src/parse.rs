@@ -34,6 +34,10 @@ struct Parser<'a> {
     pos: usize,
     builder: GreenNodeBuilder<'a>,
     diagnostics: Vec<Diagnostic>,
+    /// Count of pending `>` tokens from split `>>` tokens.
+    /// When closing a template with `>>`, we consume one `>` and increment this.
+    /// The next template close consumes from this counter first.
+    pending_gt_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,6 +214,7 @@ impl<'a> Parser<'a> {
             pos: 0,
             builder: GreenNodeBuilder::new(),
             diagnostics,
+            pending_gt_count: 0,
         }
     }
 
@@ -255,6 +260,11 @@ impl<'a> Parser<'a> {
                         // Static variable declaration: `static type name = init;`
                         self.parse_static_var_decl();
                     }
+                }
+                SyntaxKind::KwConst => {
+                    // `const type name = init;` - a global const declaration.
+                    // Handle explicitly to avoid relying on limited lookahead for `;`.
+                    self.parse_global_var_decl();
                 }
                 SyntaxKind::Error => self.wrap_error_token(),
                 _ => {
@@ -359,18 +369,18 @@ impl<'a> Parser<'a> {
                     self.parse_static_var_decl();
                 }
             }
+            SyntaxKind::LBrace => {
+                // Handle block FIRST, before looks_like_function_ahead() which would scan
+                // past the block and incorrectly match declarations after it.
+                self.builder.start_node(SyntaxKind::Block.into());
+                self.consume_balanced_pair(SyntaxKind::LBrace, SyntaxKind::RBrace);
+                self.builder.finish_node();
+            }
             _ => {
                 if self.looks_like_function_ahead() {
                     self.parse_function_item();
                 } else if self.looks_like_global_var_ahead() {
                     self.parse_global_var_decl();
-                } else if self.at(SyntaxKind::LBrace) {
-                    // Allow block as a decl-like arm.
-                    // Keep this shape-first: treat it as a balanced brace region. This avoids
-                    // depending on statement-or-decl disambiguation inside the arm.
-                    self.builder.start_node(SyntaxKind::Block.into());
-                    self.consume_balanced_pair(SyntaxKind::LBrace, SyntaxKind::RBrace);
-                    self.builder.finish_node();
                 } else {
                     self.consume_until_item_boundary();
                 }
@@ -689,7 +699,14 @@ impl<'a> Parser<'a> {
         // Path-ish types: `Foo::Bar<T>`.
         // Save checkpoint before base type for potential array wrapping.
         let base_checkpoint = self.builder.checkpoint();
-        let _ = self.try_parse_type_path();
+        let parsed_path = self.try_parse_type_path();
+
+        // If we couldn't parse a type path, we haven't consumed any tokens,
+        // so we should return false to prevent infinite loops.
+        if !parsed_path {
+            self.builder.finish_node();
+            return false;
+        }
 
         // Array suffix: `T[N][M]`.
         if self.at(SyntaxKind::LBracket) {
@@ -883,11 +900,17 @@ impl<'a> Parser<'a> {
             }
 
             self.builder.start_node(SyntaxKind::TypeTemplateArg.into());
-            // Try type first when it plausibly starts a type. Otherwise parse a value expression
-            // in template-arg restricted mode.
-            if self.looks_like_type_start() {
-                let _ = self.try_parse_type();
+            // Try type first when it plausibly starts a type. If type parsing fails
+            // (returns false), fall back to expression parsing.
+            let parsed_as_type = if self.looks_like_type_start() {
+                self.try_parse_type()
             } else {
+                false
+            };
+
+            // If we couldn't parse as a type, try as an expression.
+            // This handles cases like `(expr)` which looks_like_type_start but isn't a type.
+            if !parsed_as_type {
                 self.parse_expr_node(
                     ExprMode::TemplateArgRestricted,
                     &[SyntaxKind::Comma, SyntaxKind::Gt, SyntaxKind::Shr],
@@ -903,28 +926,55 @@ impl<'a> Parser<'a> {
             break;
         }
 
-        // Close: accept `>` or `>>` as a close without diagnostics.
-        if self.at(SyntaxKind::Gt) || self.at(SyntaxKind::Shr) {
-            self.bump();
-        } else {
-            // Recovery: scan forward to a reasonable boundary.
-            while !self.at(SyntaxKind::Eof)
-                && !self.at(SyntaxKind::Gt)
-                && !self.at(SyntaxKind::Shr)
-                && !self.at(SyntaxKind::Comma)
-                && !self.at(SyntaxKind::RParen)
-                && !self.at(SyntaxKind::RBracket)
-                && !self.at(SyntaxKind::RBrace)
-                && !self.at(SyntaxKind::Semi)
-            {
-                self.bump();
-            }
-            if self.at(SyntaxKind::Gt) || self.at(SyntaxKind::Shr) {
-                self.bump();
-            }
-        }
+        // Close: accept `>` or `>>` as a close, handling `>>` splitting for nested templates.
+        self.close_template_bracket();
 
         self.builder.finish_node();
+    }
+
+    /// Close a template argument list with `>`, handling `>>` token splitting.
+    /// For nested templates like `Foo<Bar<T>>`, the `>>` token needs to close both.
+    fn close_template_bracket(&mut self) {
+        // First check if we have a pending `>` from a previous `>>` split.
+        // In that case, the token was already emitted, we just need to record that
+        // the outer template is closed.
+        if self.pending_gt_count > 0 {
+            self.pending_gt_count -= 1;
+            return;
+        }
+
+        // If we have a `>`, consume it normally.
+        if self.at(SyntaxKind::Gt) {
+            self.bump();
+            return;
+        }
+
+        // If we have `>>`, we need to split it: emit the token but record that
+        // another `>` is available for an outer template close.
+        if self.at(SyntaxKind::Shr) {
+            self.bump();
+            self.pending_gt_count += 1;
+            return;
+        }
+
+        // Recovery: scan forward to a reasonable boundary.
+        while !self.at(SyntaxKind::Eof)
+            && !self.at(SyntaxKind::Gt)
+            && !self.at(SyntaxKind::Shr)
+            && !self.at(SyntaxKind::Comma)
+            && !self.at(SyntaxKind::RParen)
+            && !self.at(SyntaxKind::RBracket)
+            && !self.at(SyntaxKind::RBrace)
+            && !self.at(SyntaxKind::Semi)
+        {
+            self.bump();
+        }
+        if self.at(SyntaxKind::Gt) {
+            self.bump();
+        } else if self.at(SyntaxKind::Shr) {
+            self.bump();
+            self.pending_gt_count += 1;
+        }
     }
 
     fn parse_array_type_suffixes_at(&mut self, checkpoint: rowan::Checkpoint) {
@@ -1556,6 +1606,10 @@ impl<'a> Parser<'a> {
                 self.parse_offsetof_call_expr(kind);
                 true
             }
+            SyntaxKind::KwBitsizeof | SyntaxKind::KwBytesizeof => {
+                self.parse_sizeof_expr(terminators);
+                true
+            }
             _ => self.parse_primary_expr(mode, terminators),
         }
     }
@@ -1627,6 +1681,58 @@ impl<'a> Parser<'a> {
 
         // Silence unused-variable lint if we ever extend this to share impl.
         let _ = kw;
+    }
+
+    fn parse_sizeof_expr(&mut self, terminators: &[SyntaxKind]) {
+        // Parse `bitsizeof T`, `bitsizeof(T)`, `bitsizeof expr`, `bitsizeof(expr)`.
+        // Similarly for `bytesizeof`.
+        // The argument can be either a type or an expression.
+        let checkpoint = self.builder.checkpoint();
+        self.builder
+            .start_node_at(checkpoint, SyntaxKind::UnaryExpr.into());
+
+        self.bump(); // consume 'bitsizeof' or 'bytesizeof'
+        self.eat_trivia();
+
+        // Check for parenthesized form
+        if self.at(SyntaxKind::LParen) {
+            // Could be `sizeof(Type)` or `sizeof(expr)`.
+            // Parse as a parenthesized expression which will handle either case.
+            self.builder.start_node(SyntaxKind::ParenExpr.into());
+            self.bump(); // consume '('
+            self.eat_trivia();
+            if !self.at(SyntaxKind::RParen) {
+                // Try parsing as type first, fall back to expression
+                if self.looks_like_type_start() {
+                    let parsed_type = self.try_parse_type();
+                    if !parsed_type {
+                        self.parse_expr_node(ExprMode::Normal, &[SyntaxKind::RParen]);
+                    }
+                } else {
+                    self.parse_expr_node(ExprMode::Normal, &[SyntaxKind::RParen]);
+                }
+                self.eat_trivia();
+            }
+            if self.at(SyntaxKind::RParen) {
+                self.bump();
+            }
+            self.builder.finish_node(); // ParenExpr
+        } else {
+            // Non-parenthesized: `sizeof T` or `sizeof expr`.
+            // Try parsing as type if it looks like one, otherwise expression.
+            if self.looks_like_type_start() {
+                let parsed_type = self.try_parse_type();
+                if !parsed_type {
+                    // Fall back to expression parsing with high precedence
+                    self.parse_expr_bp(ExprMode::Normal, 13, terminators);
+                }
+            } else {
+                // Parse as expression with high precedence (tighter than most operators)
+                self.parse_expr_bp(ExprMode::Normal, 13, terminators);
+            }
+        }
+
+        self.builder.finish_node(); // UnaryExpr
     }
 
     fn parse_primary_expr(&mut self, mode: ExprMode, terminators: &[SyntaxKind]) -> bool {
@@ -2107,10 +2213,19 @@ impl<'a> Parser<'a> {
         let mut ident_before_assign: usize = 0;
         let mut saw_assign_op: bool = false;
         let mut saw_lparen_before_assign: bool = false;
+        // Track if we see `.` between identifiers at top level before assignment.
+        // Patterns like `a.b = x;` are assignments, not var decls.
+        let mut saw_dot_between_idents: bool = false;
+        // Track if we see `[` at top level right after an identifier before assignment.
+        // Patterns like `a[i] = x;` are subscript assignments, not var decls.
+        // (Note: `T[N] name = x;` is a var decl, but there the first token is a type not ident.)
+        let mut saw_bracket_after_first_ident: bool = false;
 
         let mut prev_nontrivia: Option<SyntaxKind> = None;
 
-        for i in offset..(offset + 128) {
+        // Scan up to 1024 tokens ahead to handle complex nested statements with lambdas
+        // and large struct initializers with many mux() calls
+        for i in offset..(offset + 1024) {
             let Some(t) = self.tokens.get(self.pos + i) else {
                 break;
             };
@@ -2129,7 +2244,21 @@ impl<'a> Parser<'a> {
                     paren += 1;
                 }
                 SyntaxKind::RParen => paren = paren.saturating_sub(1),
-                SyntaxKind::LBracket => bracket += 1,
+                SyntaxKind::LBracket => {
+                    // If we see `[` right after the first identifier at top level before assignment,
+                    // it's a subscript pattern like `arr[i] = x;` which is an assignment.
+                    if paren == 0
+                        && bracket == 0
+                        && brace == 0
+                        && angle == 0
+                        && !saw_assign_op
+                        && ident_before_assign == 1
+                        && is_decl_ident_like(prev_nontrivia.unwrap_or(SyntaxKind::Eof))
+                    {
+                        saw_bracket_after_first_ident = true;
+                    }
+                    bracket += 1;
+                }
                 SyntaxKind::RBracket => bracket = bracket.saturating_sub(1),
                 SyntaxKind::LBrace => {
                     if paren == 0 && bracket == 0 && brace == 0 && angle == 0 && !saw_assign_op {
@@ -2142,6 +2271,18 @@ impl<'a> Parser<'a> {
                 SyntaxKind::Lt if self.is_template_lt_at(self.pos + i) => angle += 1,
                 SyntaxKind::Gt => angle = angle.saturating_sub(1),
                 SyntaxKind::Shr => angle = angle.saturating_sub(2),
+                SyntaxKind::Dot
+                    if paren == 0
+                        && bracket == 0
+                        && brace == 0
+                        && angle == 0
+                        && !saw_assign_op
+                        && ident_before_assign >= 1 =>
+                {
+                    // Seeing `.` after at least one identifier (before assignment) means
+                    // this is a member access expression, not a var decl.
+                    saw_dot_between_idents = true;
+                }
                 k if is_decl_ident_like(k)
                     && paren == 0
                     && bracket == 0
@@ -2162,6 +2303,16 @@ impl<'a> Parser<'a> {
                     }
                     if k == SyntaxKind::Semi {
                         let _ = ident_top;
+                        // If we saw `.` between identifiers, it's a member access (assignment), not a var decl.
+                        if saw_dot_between_idents {
+                            return false;
+                        }
+                        // If we saw `[` after the first identifier AND there's no second identifier,
+                        // it's a subscript like `arr[i] = x;` which is an assignment.
+                        // But `T[N] name = x;` (ident_before_assign==2) is a var decl.
+                        if saw_bracket_after_first_ident && ident_before_assign == 1 {
+                            return false;
+                        }
                         // Allow function-type declarations like `(T)->U name;` which contain a top-level
                         // paren group before the variable name.
                         return ident_before_assign >= 2
@@ -2887,13 +3038,38 @@ impl<'a> Parser<'a> {
             // - `typename T` or just `T` for type params
             // - `type name` for value params (e.g., `int N`)
             // - `type name = default` for params with defaults
-            if self.at(SyntaxKind::KwTypename) {
-                self.bump(); // consume 'typename'
+            // - `template <...> typename Name = default` for template template params
+            //
+            // Track whether this is a type parameter (default should be a type)
+            // or a value parameter (default should be an expression)
+            let mut is_type_param = false;
+            let mut is_auto_param = false;
+
+            if self.at(SyntaxKind::KwTemplate) {
+                // Template template parameter: `template <typename, auto> typename Memory = default`
+                is_type_param = true;
+                self.bump(); // consume 'template'
+                self.eat_trivia();
+                // Parse the nested template params
+                if self.at(SyntaxKind::Lt) {
+                    self.parse_template_params();
+                    self.eat_trivia();
+                }
+                // Expect 'typename' or 'class' followed by name
+                if self.at(SyntaxKind::KwTypename) || self.at(SyntaxKind::KwClass) {
+                    self.bump();
+                    self.eat_trivia();
+                }
+            } else if self.at(SyntaxKind::KwTypename) || self.at(SyntaxKind::KwClass) {
+                is_type_param = true;
+                self.bump(); // consume 'typename' or 'class'
                 self.eat_trivia();
             }
 
             // Parse the type (for value params) or name (for type params)
             if self.looks_like_type_start() && !self.at(SyntaxKind::Gt) {
+                // Check if this is `auto` type
+                is_auto_param = self.at(SyntaxKind::KwAuto);
                 self.parse_type_or_fallback();
                 self.eat_trivia();
             }
@@ -2908,8 +3084,21 @@ impl<'a> Parser<'a> {
             if self.at(SyntaxKind::Eq) {
                 self.bump();
                 self.eat_trivia();
-                // Parse default - could be type or expression
-                if self.looks_like_type_start() {
+
+                // Decide whether to parse default as type or expression:
+                // - For type params (typename T), default is a type
+                // - For auto params (auto N), default is an expression
+                // - For other value params (int N), could be either, but expression is safer
+                //
+                // Special cases that indicate expression:
+                // - `((...)` - nested parens (expression, not function type)
+                // - `auto` param type (default must be expression)
+                let is_nested_paren = self.at(SyntaxKind::LParen) && {
+                    self.peek_next_nontrivia_kind(1) == Some(SyntaxKind::LParen)
+                };
+
+                // For type params, parse as type; otherwise parse as expression
+                if is_type_param && !is_nested_paren {
                     self.parse_type_or_fallback();
                 } else {
                     self.parse_expr_node(ExprMode::TemplateArgRestricted, &[SyntaxKind::Comma, SyntaxKind::Gt, SyntaxKind::Shr]);
@@ -3395,7 +3584,16 @@ impl<'a> Parser<'a> {
         self.expect(SyntaxKind::KwExtern);
         self.eat_trivia();
 
-        self.parse_common_decl_after_wrappers();
+        // `extern` is followed by a type (possibly with template args), then semicolon.
+        // Examples: `extern Foo;` or `extern Foo<T, N>;`
+        if !self.try_parse_type() {
+            self.error_here("Expected type after 'extern'");
+        }
+
+        self.eat_trivia_excluding_post_doc();
+        if self.at(SyntaxKind::Semi) {
+            self.bump();
+        }
 
         self.builder.finish_node();
     }
@@ -3408,7 +3606,16 @@ impl<'a> Parser<'a> {
         self.expect(SyntaxKind::KwExport);
         self.eat_trivia();
 
-        self.parse_common_decl_after_wrappers();
+        // `export` is followed by a type (possibly with template args), then semicolon.
+        // Examples: `export Foo;` or `export Foo<T, N>;`
+        if !self.try_parse_type() {
+            self.error_here("Expected type after 'export'");
+        }
+
+        self.eat_trivia_excluding_post_doc();
+        if self.at(SyntaxKind::Semi) {
+            self.bump();
+        }
 
         self.builder.finish_node();
     }
