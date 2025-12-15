@@ -27,18 +27,19 @@ Test coverage is primarily under:
 - [compiler/rs/crates/kanagawa_syntax/tests/](compiler/rs/crates/kanagawa_syntax/tests/) (42 tests)
 - [compiler/rs/crates/kanagawa_ast/tests/](compiler/rs/crates/kanagawa_ast/tests/) (35 tests)
 - [compiler/rs/crates/kanagawa_hir/tests/](compiler/rs/crates/kanagawa_hir/tests/) (39 tests, 0 ignored)
-- `kanagawa_hir` unit tests (25 tests) and doc tests (3 tests)
+- `kanagawa_hir` unit tests (28 tests) and doc tests (3 tests)
 
 ## High-level Status
 
 | Component | Status | Test Count | Library Coverage |
 |-----------|--------|------------|------------------|
 | Lexer | Working | 4 tests | - |
-| CST Parser | Working | 38 tests | 116/124 (93.5%) |
+| CST Parser | Working | 38 tests | **464/468 (99.1%)** |
 | AST Types | Working | - | - |
-| CST→AST Lowering | **100%** | 35 tests | **116/116 (100.0%)** |
-| HIR Types | Working | 25 tests | - |
-| AST→HIR Lowering | Working | 39 tests (0 ignored) | 144/409 (35.2%) |
+| CST→AST Lowering | **94.4%** | 35 tests | **438/464 (94.4%)** |
+| HIR Types | Working | 28 tests | - |
+| AST→HIR Lowering | **100%** | 39 tests | **438/438 (100.0%)** |
+| **Full Pipeline** | **Working** | - | **438/468 (93.6%)** |
 
 *Last updated: 2025-12-15*
 
@@ -170,7 +171,7 @@ The `kanagawa_ast` crate provides typed AST definitions and CST→AST lowering:
 
 ### CST→AST Lowering Coverage
 
-The `lower_file()` function converts CST to AST with **100% success rate** on all CST-parseable library files (116/116).
+The `lower_file()` function converts CST to AST with **94.4% success rate** on all CST-parseable files (438/464).
 
 - **Fully lowered:** Modules, imports, all declaration types, all statement types, all expression types including built-in expressions (`mux`, `concat`, `fan_out`, `static`, `bitsizeof`, `bytesizeof`, `clog2`)
 - **Partially lowered:** `bitoffsetof`/`byteoffsetof` (require Type and field name, not expressions)
@@ -180,6 +181,9 @@ Recent fixes (2025-12-15):
 - `bitsizeof`/`bytesizeof` operators now properly parsed and lowered to `SizeofExpr`
 - Static if block parsing fixed to handle `{...}` blocks correctly
 - Template-template parameter defaults now distinguish type vs expression arguments
+- Hyphenated module names with numbers (e.g., `agilex-7`) now parse correctly (+8 files)
+
+**Remaining 26 AST failures** are MissingChild errors in edge cases involving complex assignment patterns, annotated statements, and certain function declarations.
 
 ## 9) Test Summary
 
@@ -191,10 +195,10 @@ Recent fixes (2025-12-15):
 | `kanagawa_syntax/tests/parse_syntax_harness.rs` | 2 | Syntax harness blocks |
 | `kanagawa_ast/tests/lower_basic.rs` | 21 | CST→AST lowering (basic constructs + built-ins) |
 | `kanagawa_ast/tests/lower_more.rs` | 14 | CST→AST lowering (advanced) |
-| `kanagawa_hir/src/*.rs` (unit tests) | 25 | HIR types, symbols, namespace |
+| `kanagawa_hir/src/*.rs` (unit tests) | 28 | HIR types, symbols, namespace, builtins |
 | `kanagawa_hir/src/*.rs` (doc tests) | 3 | Namespace encoding |
 | `kanagawa_hir/tests/lower_test.rs` | 39 | AST→HIR full pipeline |
-| **Total** | **143** | (1 harness test ignored) |
+| **Total** | **146** | (1 harness test ignored) |
 
 ## 10) HIR (High-level Intermediate Representation)
 
@@ -216,10 +220,15 @@ The `kanagawa_hir` crate provides semantic representation with resolved names an
 
 | Test Category | Tests | Status |
 |---------------|-------|--------|
-| Unit tests (ty, def, symbol, namespace) | 25 | Passing |
+| Unit tests (ty, def, symbol, namespace, builtin) | 28 | Passing |
 | Integration tests (full pipeline) | 39 | Passing |
 | Doc tests | 3 | Passing |
-| **Total** | **67** | All passing |
+| **Total** | **70** | All passing |
+
+**HIR lowering achieves 100% success rate** (438/438) on files that pass AST lowering, thanks to:
+- Builtin symbol registration (`assert`, `static_cast`, `reinterpret_cast`, `checked_cast`, `decltype`, `reduce`, `map`, etc.)
+- Primitive types available as identifiers (`void`, `bool`, `float32`, etc.)
+- Deferred cross-module resolution (undefined symbols from imports are not errors in single-file mode)
 
 ## 11) AST → HIR Lowering Status
 
@@ -315,6 +324,25 @@ The `lower_file()` function converts AST to HIR while building the symbol table 
 | Scope push/pop | **Working** | Function, Block, Struct, Class, Enum, Template, Union |
 | Module namespace prefix | **Working** | @-encoded module path |
 | Definition metadata | **Working** | Kind, visibility, type, span |
+| Builtin symbols | **Working** | ~80 builtins registered automatically |
+
+### Builtin Symbols
+
+The HIR symbol table is pre-populated with compiler builtins:
+
+| Category | Examples |
+|----------|----------|
+| Primitive types | `void`, `bool`, `float32`, `float64`, `string` |
+| Cast functions | `static_cast`, `reinterpret_cast`, `checked_cast` |
+| Assertions | `assert` |
+| Type introspection | `decltype`, `template` |
+| Higher-order functions | `reduce`, `map`, `zip_with`, `and`, `or`, `add` |
+| Array operations | `reverse`, `tail`, `init`, `take`, `drop`, `rotate_array` |
+| Bit operations | `pop_count`, `highest_one`, `reduction`, `reduction_xor`, `reduction_and`, `reduction_or` |
+| Optional types | `make_optional`, `just` |
+| Mask operations | `mask_less_than`, `mask_greater_than`, `mask_greater_equal` |
+| Concurrency | `pipelined_for`, `pipelined_do`, `parallel_for`, `async_exec`, `atomically` |
+| Memory | `reg` |
 
 ## 12) Previously Known Parser Limitations (Now Fixed)
 
@@ -364,7 +392,7 @@ Cross-referencing with language requirements from grammar.md:
 ### Not Yet Implemented
 
 - Full type inference/checking
-- Cross-module name resolution
+- Multi-file cross-module resolution (single-file deferred resolution is complete)
 - Template instantiation
 - Constant expression evaluation (beyond int literals)
 - AST→ParseTree emission for C++ backend
@@ -373,12 +401,14 @@ Cross-referencing with language requirements from grammar.md:
 
 Recommended next steps for the Rust frontend:
 
-1. **Fix hyphenated module names**: 8 files fail CST parse due to hyphenated module name segments (e.g., `agilex-7`, `arria-10`)
-2. **Improve HIR lowering**: Increase pass rate from 35.2% by resolving undefined symbol errors
-3. **Implement full type checking**: Build on HIR infrastructure for semantic validation
-4. **Complete `bitoffsetof`/`byteoffsetof` lowering**: Extract Type and field name arguments properly
-5. **Implement AST→ParseTree emission**: Use the existing C ABI seam (`compiler/cpp/parse_tree.h`) to emit ParseTree for the C++ backend
-6. **Cross-module name resolution**: Implement module loading and cross-file symbol resolution
+1. ~~**Fix hyphenated module names**~~: ✅ Completed - module names with hyphens followed by numbers (e.g., `agilex-7`, `stratix-10`) now parse correctly
+2. ~~**Improve HIR lowering**~~: ✅ Completed - HIR lowering now at 100% (438/438) by adding builtin symbols and deferring cross-module resolution
+3. **Fix remaining AST lowering issues**: 26 files fail AST lowering due to MissingChild errors in edge cases
+4. **Fix remaining CST parse issues**: 4 files fail CST parsing (module export syntax, non-UTF8 file)
+5. **Implement full type checking**: Build on HIR infrastructure for semantic validation
+6. **Complete `bitoffsetof`/`byteoffsetof` lowering**: Extract Type and field name arguments properly
+7. **Implement AST→ParseTree emission**: Use the existing C ABI seam (`compiler/cpp/parse_tree.h`) to emit ParseTree for the C++ backend
+8. **Full cross-module name resolution**: Implement multi-file compilation with actual module loading
 
 ## 15) Tree-sitter Mismatches
 

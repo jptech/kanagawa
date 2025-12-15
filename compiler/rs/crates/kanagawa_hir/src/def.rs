@@ -49,6 +49,8 @@ pub enum DefKind {
     Field,
     /// Lambda capture.
     Capture,
+    /// Builtin symbol (compiler intrinsic).
+    Builtin,
 }
 
 /// Visibility of a definition.

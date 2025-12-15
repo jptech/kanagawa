@@ -3762,14 +3762,15 @@ impl<'a> Parser<'a> {
         if k == SyntaxKind::Ident || is_keyword_kind(k) {
             self.bump();
 
-            // Allow hyphens inside module segments as `name - name - name`.
+            // Allow hyphens inside module segments as `name-name-name` or `name-7`.
+            // Module names can contain numbers after hyphens (e.g., `agilex-7`, `stratix-10`).
             while self.at(SyntaxKind::Minus) {
                 self.bump();
                 let k = self.current();
-                if k == SyntaxKind::Ident || is_keyword_kind(k) {
+                if k == SyntaxKind::Ident || is_keyword_kind(k) || self.is_number_token(k) {
                     self.bump();
                 } else {
-                    self.error_here("Expected identifier after '-' in module name segment");
+                    self.error_here("Expected identifier or number after '-' in module name segment");
                     break;
                 }
             }
@@ -3778,6 +3779,11 @@ impl<'a> Parser<'a> {
         }
 
         self.builder.finish_node();
+    }
+
+    /// Check if a token is a numeric literal (for module name segments like `agilex-7`).
+    fn is_number_token(&self, k: SyntaxKind) -> bool {
+        matches!(k, SyntaxKind::IntDec | SyntaxKind::IntHex | SyntaxKind::IntBin | SyntaxKind::IntOct)
     }
 
     fn parse_module_exports(&mut self) {

@@ -93,6 +93,11 @@ impl<'a> Resolver<'a> {
             HirItem::StaticAssert(sa) => self.resolve_static_assert(sa),
             HirItem::Extern(e) => self.resolve_extern(e),
             HirItem::Export(e) => self.resolve_export(e),
+            HirItem::DeclBlock(db) => {
+                for item in &mut db.items {
+                    self.resolve_item(item);
+                }
+            }
         }
     }
 
@@ -420,6 +425,10 @@ impl<'a> Resolver<'a> {
             HirExprKind::EnumValue { value, .. } => self.resolve_expr(value),
 
             HirExprKind::NamedValue(e) => self.resolve_expr(e),
+
+            HirExprKind::Unit => {
+                // Unit expression has no sub-expressions to resolve
+            }
         }
     }
 

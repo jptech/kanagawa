@@ -74,6 +74,15 @@ pub enum HirItem {
     StaticAssert(HirStaticAssert),
     Extern(HirExtern),
     Export(HirExport2),
+    /// Block of declarations (from static if branches, etc.)
+    DeclBlock(HirDeclBlock),
+}
+
+/// A block of declarations.
+#[derive(Debug, Clone)]
+pub struct HirDeclBlock {
+    pub span: Span,
+    pub items: Vec<HirItem>,
 }
 
 /// A function definition.
@@ -531,6 +540,8 @@ pub enum HirExprKind {
     Lambda(Box<HirLambda>),
     Sizeof { kind: HirSizeofKind, operand: Box<HirExpr> },
     Offsetof { kind: HirOffsetofKind, ty: Ty, field: String },
+    /// Unit/void expression `()` - empty parentheses in function type contexts
+    Unit,
 
     // Enum value.
     EnumValue { enum_ty: Ty, variant: String, value: Box<HirExpr> },

@@ -7,6 +7,7 @@
 //!
 //! HIR is produced by lowering the AST and performing name resolution.
 
+mod builtin;
 mod def;
 mod hir;
 mod lower;

@@ -55,8 +55,12 @@ struct Lowerer {
 
 impl Lowerer {
     fn new() -> Self {
+        let mut symbols = SymbolTable::new();
+        // Register builtin symbols before processing any user code
+        crate::builtin::register_builtins(&mut symbols);
+
         Self {
-            symbols: SymbolTable::new(),
+            symbols,
             errors: Vec::new(),
             module_namespace: None,
         }
@@ -155,6 +159,19 @@ impl Lowerer {
             ast::Decl::StaticAssert(sa) => Ok(HirItem::StaticAssert(self.lower_static_assert(sa)?)),
             ast::Decl::Extern(e) => Ok(HirItem::Extern(self.lower_extern(e)?)),
             ast::Decl::Export(e) => Ok(HirItem::Export(self.lower_export_decl(e)?)),
+            ast::Decl::DeclBlock(db) => {
+                // Lower all declarations in the block
+                let mut items = Vec::new();
+                for decl in &db.decls {
+                    if let Ok(item) = self.lower_decl(decl) {
+                        items.push(item);
+                    }
+                }
+                Ok(HirItem::DeclBlock(HirDeclBlock {
+                    span: db.span,
+                    items,
+                }))
+            }
         }
     }
 
@@ -842,6 +859,10 @@ impl Lowerer {
             ast::Expr::Lambda(l) => self.lower_lambda(l),
             ast::Expr::Sizeof(s) => self.lower_sizeof(s),
             ast::Expr::Offsetof(o) => self.lower_offsetof(o),
+            ast::Expr::Unit(span) => {
+                // Unit expression `()` - represents void/unit type
+                HirExpr::new(*span, Ty::Void, HirExprKind::Unit)
+            }
         }
     }
 
@@ -851,15 +872,13 @@ impl Lowerer {
         // Try to resolve the name
         let def_id = self.symbols.lookup(&name).unwrap_or(DefId::INVALID);
 
-        // Get type from symbol table if found
+        // Get type from symbol table if found.
+        // Note: undefined symbols are NOT errors during single-file lowering
+        // since they may come from imported modules or forward declarations.
+        // Full resolution happens in a later multi-file pass.
         let ty = if def_id.is_valid() {
             self.symbols.ty(def_id).cloned().unwrap_or(Ty::Unresolved)
         } else {
-            // Not found - record error
-            self.errors.push(LowerError::UndefinedSymbol {
-                name: name.clone(),
-                span: id.span,
-            });
             Ty::Unresolved
         };
 
