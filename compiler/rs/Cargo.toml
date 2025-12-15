@@ -8,6 +8,7 @@ members = [
     "crates/kanagawa_syntax",
     "crates/kanagawa_ast",
     "crates/kanagawa_hir",
+    "crates/kanagawa_typeck",
 ]
 
 [workspace.package]
