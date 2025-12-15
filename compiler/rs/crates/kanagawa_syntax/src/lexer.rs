@@ -82,6 +82,8 @@ enum TokenKind {
     AndAndEq,
     #[token("||=")]
     OrOrEq,
+    #[token("^^=")]
+    XorXorEq,
     #[token("&&")]
     AndAnd,
     #[token("||")]
@@ -294,6 +296,7 @@ fn map_token_kind(kind: TokenKind, text: &str) -> SyntaxKind {
         TokenKind::XorXor => SyntaxKind::XorXor,
         TokenKind::AndAndEq => SyntaxKind::AndAndEq,
         TokenKind::OrOrEq => SyntaxKind::OrOrEq,
+        TokenKind::XorXorEq => SyntaxKind::XorXorEq,
         TokenKind::PlusEq => SyntaxKind::PlusEq,
         TokenKind::MinusEq => SyntaxKind::MinusEq,
         TokenKind::StarEq => SyntaxKind::StarEq,

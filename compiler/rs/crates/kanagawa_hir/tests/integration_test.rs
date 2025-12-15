@@ -3,6 +3,20 @@
 //! This test suite validates the Rust frontend by running actual Kanagawa source
 //! files from the repository through CST parsing, AST lowering, and HIR lowering.
 
+/// Files that are expected to fail (e.g., binary test data, intentionally malformed).
+/// These are excluded from pass rate calculations.
+const EXPECTED_FAILURES: &[&str] = &[
+    // Binary test file - contains non-UTF-8 data
+    "test/syntax/imports/binary.k",
+];
+
+/// Check if a path matches an expected failure pattern.
+fn is_expected_failure(path: &std::path::Path, repo_root: &std::path::Path) -> bool {
+    let relative = path.strip_prefix(repo_root).unwrap_or(path);
+    let relative_str = relative.to_string_lossy();
+    EXPECTED_FAILURES.iter().any(|pattern| relative_str.ends_with(pattern))
+}
+
 use kanagawa_ast::lower_file as lower_to_ast;
 use kanagawa_hir::lower_file as lower_to_hir;
 use kanagawa_syntax::parse_file;
@@ -41,6 +55,22 @@ impl StageResult {
     }
 }
 
+/// Extract the first code snippet from a test harness file.
+/// Harness files contain multiple code snippets separated by `expected:N` lines.
+/// Returns the original content if not a harness file.
+fn extract_first_snippet(src: &str) -> &str {
+    // Check if this is a harness file by looking for `expected:` pattern
+    if let Some(idx) = src.find("\nexpected:") {
+        // Return content up to (but not including) the `expected:` line
+        &src[..idx]
+    } else if let Some(idx) = src.find("\nwarning:") {
+        // Also handle files that end with warning: markers
+        &src[..idx]
+    } else {
+        src
+    }
+}
+
 /// Test a single file through the full pipeline (internal, without timeout).
 fn test_file_internal(path: &Path) -> FileResult {
     let src = match std::fs::read_to_string(path) {
@@ -55,8 +85,11 @@ fn test_file_internal(path: &Path) -> FileResult {
         }
     };
 
+    // Extract first snippet from harness files
+    let src = extract_first_snippet(&src);
+
     // Stage 1: CST parsing
-    let parse = parse_file(&src);
+    let parse = parse_file(src);
     let cst_result = if parse.diagnostics.is_empty() {
         StageResult::Success
     } else {
@@ -189,11 +222,18 @@ fn run_integration_tests() -> (Vec<FileResult>, String) {
     let library_dir = repo_root.join("library");
     let test_dir = repo_root.join("test");
 
-    // Collect all .k files
+    // Collect all .k files, excluding expected failures
     let mut all_files = Vec::new();
     all_files.extend(find_k_files(&library_dir));
     all_files.extend(find_k_files(&test_dir));
 
+    // Filter out expected failures
+    let expected_failure_count = all_files.iter().filter(|p| is_expected_failure(p, repo_root)).count();
+    all_files.retain(|p| !is_expected_failure(p, repo_root));
+
+    if expected_failure_count > 0 {
+        eprintln!("Skipping {} expected failure(s)", expected_failure_count);
+    }
     eprintln!("Found {} .k files to test", all_files.len());
 
     // Test each file

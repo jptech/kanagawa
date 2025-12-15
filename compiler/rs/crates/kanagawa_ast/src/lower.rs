@@ -1376,6 +1376,7 @@ impl Lowerer {
     }
 
     fn lower_for_body(&mut self, node: &SyntaxNode) -> Result<Stmt> {
+        let span = self.span(node);
         for child in node.children() {
             match child.kind() {
                 SyntaxKind::Block => {
@@ -1387,6 +1388,17 @@ impl Lowerer {
                         return Ok(stmt);
                     }
                 }
+            }
+        }
+        // Check for empty body (semicolon after the for header)
+        // This is valid syntax: `for (x : 10);` or `static for (x : 10);`
+        for token in node.children_with_tokens().filter_map(|it| it.into_token()) {
+            if token.kind() == SyntaxKind::Semi {
+                // Return an empty block for the empty body
+                return Ok(Stmt::Block(Block {
+                    span,
+                    stmts: Vec::new(),
+                }));
             }
         }
         Err(LowerError::MissingChild("for body"))

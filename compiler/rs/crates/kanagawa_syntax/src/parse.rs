@@ -199,6 +199,7 @@ fn is_assignment_like_op(kind: SyntaxKind) -> bool {
             | SyntaxKind::CaretEq
             | SyntaxKind::AndAndEq
             | SyntaxKind::OrOrEq
+            | SyntaxKind::XorXorEq
     )
 }
 
@@ -1622,7 +1623,10 @@ impl<'a> Parser<'a> {
         self.builder
             .start_node_at(checkpoint, SyntaxKind::CallExpr.into());
 
+        // Wrap the keyword in an IdentExpr node for the callee
+        self.builder.start_node(SyntaxKind::IdentExpr.into());
         self.bump();
+        self.builder.finish_node();
         self.eat_trivia();
 
         self.builder.start_node(SyntaxKind::ArgList.into());
@@ -3823,23 +3827,36 @@ impl<'a> Parser<'a> {
         self.builder.start_node(SyntaxKind::ExportItem.into());
 
         if self.at(SyntaxKind::KwModule) {
-            // module <name> [\\ <name>]
-            self.builder.start_node(SyntaxKind::ModuleReference.into());
-            self.bump();
-            self.eat_trivia();
-            self.parse_module_name();
-
-            self.eat_trivia();
-            if self.at(SyntaxKind::Backslash) {
-                self.builder.start_node(SyntaxKind::ModuleDiff.into());
+            // Could be:
+            // 1. `module <name> [\\ <name>]` - module re-export
+            // 2. Just `module` as an identifier being exported (e.g., `{module}`)
+            //
+            // We peek ahead to distinguish: if followed by identifier/keyword for module name,
+            // treat as module re-export; otherwise treat as identifier export.
+            let next = self.peek_next_nontrivia_kind(1).unwrap_or(SyntaxKind::Eof);
+            if next == SyntaxKind::Ident || is_keyword_kind(next) || next == SyntaxKind::Dot {
+                // module <name> [\\ <name>]
+                self.builder.start_node(SyntaxKind::ModuleReference.into());
                 self.bump();
                 self.eat_trivia();
                 self.parse_module_name();
-                self.builder.finish_node();
-            }
 
-            self.builder.finish_node();
-        } else if self.at(SyntaxKind::Ident) {
+                self.eat_trivia();
+                if self.at(SyntaxKind::Backslash) {
+                    self.builder.start_node(SyntaxKind::ModuleDiff.into());
+                    self.bump();
+                    self.eat_trivia();
+                    self.parse_module_name();
+                    self.builder.finish_node();
+                }
+
+                self.builder.finish_node();
+            } else {
+                // Just `module` as an exported identifier
+                self.bump();
+            }
+        } else if self.at(SyntaxKind::Ident) || is_keyword_kind(self.current()) {
+            // Allow keywords as exported identifiers
             self.bump();
         } else {
             self.error_here("Expected export item");

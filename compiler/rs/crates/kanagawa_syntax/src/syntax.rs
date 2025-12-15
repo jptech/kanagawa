@@ -64,6 +64,7 @@ pub enum SyntaxKind {
     CaretEq,
     AndAndEq,
     OrOrEq,
+    XorXorEq,
 
     EqEq,
     Not,
