@@ -429,3 +429,60 @@ Current status: `cargo test -p kanagawa_syntax` passes.
   - Interpolation boundaries are found with brace-depth tracking so nested `{...}` in the embedded expression text are handled (e.g. initializer lists inside the interpolation).
   - Parsing is intentionally permissive and does not emit diagnostics.
 - Added `kanagawa_syntax/tests/parse_strings.rs` to assert the new nodes are present and diagnostic-free.
+
+---
+
+## 2025-12-14 (AST layer)
+
+### Created `kanagawa_ast` crate (CST→AST lowering)
+
+- Added `compiler/rs/crates/kanagawa_ast/` to the workspace with the following structure:
+  - `src/lib.rs` - crate entry point, exports `lower_file`, `LowerError`, and all types
+  - `src/span.rs` - source span tracking (`Span`) for AST nodes
+  - `src/types.rs` - comprehensive typed AST definitions (~900 lines):
+    - `File`, `ModuleDecl`, `ImportDecl` for top-level structure
+    - `Decl` enum with variants: `Function`, `Variable`, `Struct`, `Enum`, `Class`, `Union`, `Using`, `StaticAssert`, `Template`, `StaticIf`
+    - `Stmt` enum with variants: `Block`, `Expr`, `Return`, `If`, `Switch`, `While`, `DoWhile`, `CStyleFor`, `RangeFor`, `StaticFor`, `Break`, `Barrier`, `Reorder`, `Atomic`, `Annotated`
+    - `Expr` enum with variants: literals, binary/unary ops, call, member, subscript, cast, lambda, etc.
+    - `Type` enum: `Primitive`, `Integer`, `Named`, `Array`, `Function`, `Decltype`, `Pointer`
+  - `src/lower.rs` - CST→AST lowering logic (~2200 lines)
+  - `tests/lower_basic.rs` - 17 unit tests for AST lowering
+
+### CST→AST lowering features
+
+- Implemented `lower_file(&SyntaxNode) -> Result<File>` that converts rowan CST nodes to typed AST
+- Handles:
+  - Module declarations with exports
+  - Import declarations with optional aliases
+  - Function declarations/definitions with parameters, return types, and bodies
+  - Struct/enum/class/union declarations with members
+  - Type alias (`using`) declarations
+  - `static_assert` declarations
+  - All statement types (if/else, switch/case, loops, return, etc.)
+  - Binary and unary expressions with proper operator parsing
+  - Call expressions with argument lists
+  - Literal expressions (integers, booleans, strings)
+
+### CST parser fix: statement keyword heuristic
+
+- Fixed a bug where `return a + b;` was incorrectly parsed as a `LocalVarDecl` instead of `ReturnStmt`
+- Root cause: `looks_like_local_var_decl_ahead_from_offset()` found 2 identifiers (`a`, `b`) and matched the heuristic for a variable declaration
+- Fix: Added early check in the heuristic to reject statement-only keywords (`return`, `if`, `while`, `for`, `do`, `switch`, `break`, `barrier`, `case`, `default`) that can never start a type
+- Impact: All 42 `kanagawa_syntax` tests pass, all 17 `kanagawa_ast` tests pass
+
+### Tests
+
+- Added unit tests in `kanagawa_ast/tests/lower_basic.rs`:
+  - `lowers_empty_file`, `lowers_module_declaration`, `lowers_import_declaration`
+  - `lowers_simple_function_def`, `lowers_function_with_params`
+  - `lowers_struct_declaration`, `lowers_enum_declaration`, `lowers_class_declaration`
+  - `lowers_using_declaration`, `lowers_static_assert`
+  - `lowers_if_statement`, `lowers_do_while_loop`, `lowers_range_for_loop`
+  - `lowers_binary_expressions`, `lowers_call_expression`, `lowers_integer_types`
+  - `lowers_real_library_file` (parses and lowers `library/data/optional.k`)
+
+### Current status
+
+- `cargo test -p kanagawa_ast` passes (17 tests)
+- `cargo test -p kanagawa_syntax` passes (42 tests)
+- Next steps: Expand AST type coverage, add more complex expression lowering, begin work on semantic analysis or ParseTree C ABI emission

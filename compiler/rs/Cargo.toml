@@ -6,6 +6,8 @@ members = [
     "crates/kanagawa_parsetree",
     "crates/kanagawa_driver",
     "crates/kanagawa_syntax",
+    "crates/kanagawa_ast",
+    "crates/kanagawa_hir",
 ]
 
 [workspace.package]

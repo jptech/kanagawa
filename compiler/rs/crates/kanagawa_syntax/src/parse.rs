@@ -2060,6 +2060,27 @@ impl<'a> Parser<'a> {
     }
 
     fn looks_like_local_var_decl_ahead_from_offset(&self, offset: usize) -> bool {
+        // Reject statement-only keywords that can never start a type.
+        // These keywords should be parsed as statements, not local variable declarations.
+        let first_nontrivia = self.peek_next_nontrivia_kind(offset);
+        if matches!(
+            first_nontrivia,
+            Some(
+                SyntaxKind::KwReturn
+                    | SyntaxKind::KwIf
+                    | SyntaxKind::KwWhile
+                    | SyntaxKind::KwFor
+                    | SyntaxKind::KwDo
+                    | SyntaxKind::KwSwitch
+                    | SyntaxKind::KwBreak
+                    | SyntaxKind::KwBarrier
+                    | SyntaxKind::KwCase
+                    | SyntaxKind::KwDefault
+            )
+        ) {
+            return false;
+        }
+
         // Shape-first heuristic:
         // - must end in a top-level ';'
         // - must have at least 2 top-level identifiers (type-ish + name)

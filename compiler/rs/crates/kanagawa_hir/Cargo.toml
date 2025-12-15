@@ -1,0 +1,10 @@
+[package]
+name = "kanagawa_hir"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kanagawa_ast = { path = "../kanagawa_ast" }
+
+[dev-dependencies]
+kanagawa_syntax = { path = "../kanagawa_syntax" }

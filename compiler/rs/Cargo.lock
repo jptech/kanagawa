@@ -115,6 +115,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kanagawa_ast"
+version = "0.1.0"
+dependencies = [
+ "kanagawa_syntax",
+ "rowan",
+ "thiserror",
+]
+
+[[package]]
 name = "kanagawa_driver"
 version = "0.1.0"
 dependencies = [
@@ -122,6 +131,14 @@ dependencies = [
  "kanagawa_parsetree",
  "kanagawa_syntax",
  "libloading",
+]
+
+[[package]]
+name = "kanagawa_hir"
+version = "0.1.0"
+dependencies = [
+ "kanagawa_ast",
+ "kanagawa_syntax",
 ]
 
 [[package]]
