@@ -25,8 +25,8 @@ The Rust frontend currently implements four layers:
 
 Test coverage is primarily under:
 - [compiler/rs/crates/kanagawa_syntax/tests/](compiler/rs/crates/kanagawa_syntax/tests/) (42 tests)
-- [compiler/rs/crates/kanagawa_ast/tests/](compiler/rs/crates/kanagawa_ast/tests/) (17 tests)
-- [compiler/rs/crates/kanagawa_hir/tests/](compiler/rs/crates/kanagawa_hir/tests/) (39 tests, 9 ignored)
+- [compiler/rs/crates/kanagawa_ast/tests/](compiler/rs/crates/kanagawa_ast/tests/) (35 tests)
+- [compiler/rs/crates/kanagawa_hir/tests/](compiler/rs/crates/kanagawa_hir/tests/) (39 tests, 0 ignored)
 - `kanagawa_hir` unit tests (25 tests) and doc tests (3 tests)
 
 ## High-level Status
@@ -36,9 +36,9 @@ Test coverage is primarily under:
 | Lexer | Working | 4 tests |
 | CST Parser | Working | 38 tests |
 | AST Types | Working | - |
-| CST→AST Lowering | Working | 17 tests |
+| CST→AST Lowering | Working | 35 tests |
 | HIR Types | Working | 25 tests |
-| AST→HIR Lowering | Working | 30 tests (+9 ignored) |
+| AST→HIR Lowering | Working | 39 tests (0 ignored) |
 
 ## 1) Lexical Structure
 
@@ -134,21 +134,21 @@ Test coverage is primarily under:
 | Member access `x.field` | Working | Working | Expression parsing |
 | Array subscript `arr[i]` | Working | Working | Expression parsing |
 | `cast<Type>(expr)` | Working | Working | `tests/parse_builtin_terms.rs` |
-| `mux(sel, a, b, ...)` | Working | Partial* | `tests/parse_builtin_terms.rs` |
-| `concat(a, b, ...)` | Working | Partial* | `tests/parse_builtin_terms.rs` |
-| `fan_out<N>(expr)` | Working | Partial* | `tests/parse_builtin_terms.rs` |
-| `lutmul(a, b)` | Working | Partial* | `tests/parse_builtin_terms.rs` |
-| `static(expr)` | Working | Partial* | CST as CallExpr |
-| `bitsizeof(T)` / `bytesizeof(T)` | Working | Partial* | `tests/parse_builtin_terms.rs` |
-| `bitoffsetof(T, field)` / `byteoffsetof(T, field)` | Working | Partial* | `tests/parse_builtin_terms.rs` |
-| `clog2(expr)` | Working | Partial* | CST as UnaryExpr |
+| `mux(sel, a, b, ...)` | Working | Working | `tests/parse_builtin_terms.rs`, `tests/lower_basic.rs` |
+| `concat(a, b, ...)` | Working | Working | `tests/parse_builtin_terms.rs`, `tests/lower_basic.rs` |
+| `fan_out<N>(expr)` | Working | Working | `tests/parse_builtin_terms.rs` |
+| `lutmul(a, b)` | Working | Working | `tests/parse_builtin_terms.rs` |
+| `static(expr)` | Working | Working | `tests/lower_basic.rs` |
+| `bitsizeof(T)` / `bytesizeof(T)` | Working | Working | `tests/parse_builtin_terms.rs`, `tests/lower_basic.rs` |
+| `bitoffsetof(T, field)` / `byteoffsetof(T, field)` | Working | Partial | `tests/parse_builtin_terms.rs` |
+| `clog2(expr)` | Working | Working | AST recognition in `lower_call_expr` |
 | Template argument expressions (restricted mode) | Working | Working | `tests/parse_expressions.rs` |
 | Lambdas `[captures](params) -> T { body }` | Working | Working | `tests/parse_lambda.rs` |
 | Initializer lists `{a, b, c}` | Working | Working | `tests/parse_initializers.rs` |
 | Designated initializers `{.x = a}` | Working | Working | `tests/parse_initializers.rs` |
 | Interpolated strings `"{expr}"` | Working | Working | `tests/parse_strings.rs` |
 
-*\*Partial: These built-in expressions are correctly parsed in CST (as CallExpr/UnaryExpr) but lowered to generic CallExpr in AST rather than dedicated AST node types. The AST type definitions exist (`MuxExpr`, `ConcatExpr`, etc.) but the lowering does not yet convert calls to these specific types.*
+*Note: `bitoffsetof` and `byteoffsetof` require special handling as they take a Type and field name rather than expressions. These are not yet fully lowered to dedicated AST types.*
 
 ## 8) AST Layer Details
 
@@ -170,8 +170,8 @@ The `kanagawa_ast` crate provides typed AST definitions and CST→AST lowering:
 
 The `lower_file()` function converts CST to AST with the following capabilities:
 
-- **Fully lowered:** Modules, imports, all declaration types, all statement types, most expression types
-- **Partially lowered:** Built-in expressions (`mux`, `concat`, `fan_out`, `lutmul`, `static`, sizeof/offsetof variants) - parsed as CallExpr
+- **Fully lowered:** Modules, imports, all declaration types, all statement types, all expression types including built-in expressions (`mux`, `concat`, `fan_out`, `static`, `bitsizeof`, `bytesizeof`, `clog2`)
+- **Partially lowered:** `bitoffsetof`/`byteoffsetof` (require Type and field name, not expressions)
 
 ## 9) Test Summary
 
@@ -181,11 +181,12 @@ The `lower_file()` function converts CST to AST with the following capabilities:
 | `kanagawa_syntax/tests/lexer_repo.rs` | 4 | Lexer correctness |
 | `kanagawa_syntax/tests/parse_*.rs` | 31 | CST parsing |
 | `kanagawa_syntax/tests/parse_syntax_harness.rs` | 2 | Syntax harness blocks |
-| `kanagawa_ast/tests/lower_basic.rs` | 17 | CST→AST lowering |
+| `kanagawa_ast/tests/lower_basic.rs` | 21 | CST→AST lowering (basic constructs + built-ins) |
+| `kanagawa_ast/tests/lower_more.rs` | 14 | CST→AST lowering (advanced) |
 | `kanagawa_hir/src/*.rs` (unit tests) | 25 | HIR types, symbols, namespace |
 | `kanagawa_hir/src/*.rs` (doc tests) | 3 | Namespace encoding |
 | `kanagawa_hir/tests/lower_test.rs` | 39 | AST→HIR full pipeline |
-| **Total** | **126** | (10 ignored: 1 harness, 9 parser limitations) |
+| **Total** | **143** | (1 harness test ignored) |
 
 ## 10) HIR (High-level Intermediate Representation)
 
@@ -208,9 +209,9 @@ The `kanagawa_hir` crate provides semantic representation with resolved names an
 | Test Category | Tests | Status |
 |---------------|-------|--------|
 | Unit tests (ty, def, symbol, namespace) | 25 | Passing |
-| Integration tests (full pipeline) | 30 | Passing |
+| Integration tests (full pipeline) | 39 | Passing |
 | Doc tests | 3 | Passing |
-| **Total** | **58** | (9 ignored due to parser limitations) |
+| **Total** | **67** | All passing |
 
 ## 11) AST → HIR Lowering Status
 
@@ -223,11 +224,11 @@ The `lower_file()` function converts AST to HIR while building the symbol table 
 | Functions | **Working** | Full signature, params, body; DefId assigned |
 | Variables | **Working** | Type, init, flags (const/static) |
 | Structs | **Working** | Members with types and initializers |
-| Enums | **Partial** | Variants work; base type parsing has parser issues |
-| Classes | **Partial** | Members and methods; parser issue with assignments in methods |
+| Enums | **Working** | Variants and base type fully parsed |
+| Classes | **Working** | Members and methods fully supported |
 | Unions | **Working** | Members with types |
 | Using (type alias) | **Working** | Alias name and target type |
-| Templates | **Partial** | Item lowered; template params not populated by parser |
+| Templates | **Working** | Item and template params lowered |
 | Static if (decl) | **Working** | Condition and branches |
 | Static assert | **Working** | Condition |
 | Extern/Export | **Working** | Attributes and wrapped item |
@@ -239,7 +240,7 @@ The `lower_file()` function converts AST to HIR while building the symbol table 
 | Block | **Working** | Nested scopes created |
 | Return | **Working** | Optional value |
 | If/else | **Working** | Condition and branches |
-| Switch | **Partial** | Expression lowered; cases not populated by parser |
+| Switch | **Working** | Expression and cases fully lowered |
 | Do-while | **Working** | Condition, body, attributes |
 | Range-for | **Working** | Loop variable gets DefId |
 | Static for | **Working** | Loop variable gets DefId |
@@ -249,7 +250,7 @@ The `lower_file()` function converts AST to HIR while building the symbol table 
 | Reorder/Atomic | **Working** | Body statement |
 | Break | **Working** | Span only |
 | Expr stmt | **Working** | Expression |
-| Assignment | **Partial** | Parser doesn't create AssignExpr in some contexts |
+| Assignment | **Working** | LHS and RHS fully extracted |
 | Var decl (local) | **Working** | Type, init, DefId |
 | Annotated | **Working** | Attributes and wrapped statement |
 
@@ -291,7 +292,7 @@ The `lower_file()` function converts AST to HIR while building the symbol table 
 | Parameterized integers (int<N>) | **Partial** | Returns Ty::Unresolved |
 | Const types | **Working** | Ty::Const wrapper |
 | Named types | **Working** | Resolved via symbol table |
-| Array types | **Partial** | Parser issue with dimensions |
+| Array types | **Working** | Element type and dimensions fully parsed |
 | Function types | **Working** | Params, return type, attrs |
 | Typename (dependent) | **Partial** | Returns Ty::Unresolved |
 | Decltype | **Partial** | Returns Ty::Unresolved |
@@ -307,20 +308,21 @@ The `lower_file()` function converts AST to HIR while building the symbol table 
 | Module namespace prefix | **Working** | @-encoded module path |
 | Definition metadata | **Working** | Kind, visibility, type, span |
 
-## 12) Known Parser Limitations Affecting HIR
+## 12) Previously Known Parser Limitations (Now Fixed)
 
-The following limitations are documented via `#[ignore]` tests in `kanagawa_hir/tests/lower_test.rs`:
+The following limitations were previously blocking HIR tests but have now been resolved:
 
-| Issue | Affected Test | Impact |
-|-------|---------------|--------|
-| Array dimensions not wrapped in TypeArray node | `test_lower_array_type`, `test_lower_multi_dim_array` | Array dims always empty |
-| Enum base type not parsed as Type node | `test_lower_enum_with_values` | Base type defaults to Void |
-| AssignExpr not created inside AssignStmt | `test_lower_assignment` | Assignment lowering fails |
-| Assignment in class methods fails AST lowering | `test_lower_class` | Class with methods unusable |
-| Default parameter values not captured | `test_lower_function_with_default_param` | Defaults always None |
-| Template parameters not populated | `test_lower_template_function` | Template params empty |
-| Switch cases not lowered | `test_lower_switch_statement` | Cases array empty |
-| Top-level static not fully supported | `test_lower_static_variable` | Static flag not set |
+| Issue | Fix Applied |
+|-------|-------------|
+| Array dimensions not wrapped in TypeArray node | Parser now creates checkpoints before base type and wraps dimensions correctly |
+| Enum base type not parsed as Type node | Parser now calls `parse_type_or_fallback()` for base types |
+| AssignExpr not created inside AssignStmt | AST lowering now uses `descendants()` to find AssignExpr inside Expr wrapper |
+| Assignment in class methods fails AST lowering | Fixed along with assignment extraction |
+| Default parameter values not captured | Parser now calls `parse_expr_node()` and AST lowerer extracts defaults |
+| Template parameters not populated | Added `TemplateParams`/`TemplateParam` SyntaxKinds and full parsing/lowering |
+| Switch cases not lowered | AST lowering now iterates direct children instead of looking for Block |
+| Top-level static not fully supported | Parser now calls `parse_static_var_decl()` and AST lowering handles `StaticVarDecl` |
+| Keywords used as identifiers in expression position | AST lowering now accepts keyword tokens as identifiers (e.g., `mux`, `concat`, `static`) |
 
 ## 13) Language Feature Coverage Summary
 
@@ -329,28 +331,27 @@ Cross-referencing with language requirements from grammar.md:
 ### Fully Supported (CST → AST → HIR)
 
 - Module declarations and imports
-- Function declarations with params and bodies
-- Variable declarations with initializers
-- Struct, union, class definitions with members
-- Enum definitions (simple variants)
+- Function declarations with params, default values, and bodies
+- Variable declarations with initializers (including static variables)
+- Struct, union, class definitions with members and methods
+- Enum definitions with base types and variants
 - Type aliases (using)
-- All statement types (if, switch, loops, return, etc.)
-- All expression types (binary, unary, ternary, calls, etc.)
-- Built-in expressions (mux, concat, fan_out, cast, sizeof, offsetof)
+- Template declarations with params
+- All statement types (if, switch with cases, loops, return, etc.)
+- All expression types (binary, unary, ternary, calls, assignments, etc.)
+- Built-in expressions (mux, concat, fan_out, cast, sizeof, clog2)
 - Lambda expressions with captures
 - Attributes on declarations, statements, expressions
 - Initializer lists and designated initializers
 - Interpolated strings
+- Array types with dimensions
+- Static if/for at all levels
 
-### Partially Supported (parser limitations)
+### Partially Supported
 
-- Templates (item lowered, params not populated)
-- Array types (element type ok, dimensions not captured)
-- Enum base types (not parsed correctly)
-- Default parameter values (not captured)
-- Switch cases (not lowered)
-- Parameterized integer widths (returns Unresolved)
-- Dependent types (typename, decltype)
+- Parameterized integer widths (returns Ty::Unresolved, needs template instantiation)
+- Dependent types (typename, decltype) - returns Ty::Unresolved
+- `bitoffsetof`/`byteoffsetof` - require Type+field name extraction
 
 ### Not Yet Implemented
 
@@ -364,11 +365,11 @@ Cross-referencing with language requirements from grammar.md:
 
 Recommended next steps for the Rust frontend:
 
-1. **Fix parser issues**: Address the documented parser limitations that block HIR tests
-2. **Complete built-in expression lowering**: Recognize `mux()`, `concat()`, `fan_out<>()`, `lutmul()`, etc. calls and lower them to their dedicated AST types
-3. **Implement full type checking**: Build on HIR infrastructure for semantic validation
-4. **Implement AST→ParseTree emission**: Use the existing C ABI seam (`compiler/cpp/parse_tree.h`) to emit ParseTree for the C++ backend
-5. **Integration testing**: End-to-end tests compiling real `.k` files through the Rust frontend
+1. **Implement full type checking**: Build on HIR infrastructure for semantic validation
+2. **Complete `bitoffsetof`/`byteoffsetof` lowering**: Extract Type and field name arguments properly
+3. **Implement AST→ParseTree emission**: Use the existing C ABI seam (`compiler/cpp/parse_tree.h`) to emit ParseTree for the C++ backend
+4. **Integration testing**: End-to-end tests compiling real `.k` files through the Rust frontend
+5. **Cross-module name resolution**: Implement module loading and cross-file symbol resolution
 
 ## 15) Tree-sitter Mismatches
 

@@ -108,6 +108,7 @@ impl Lowerer {
             SyntaxKind::FunctionDef
                 | SyntaxKind::FunctionDecl
                 | SyntaxKind::GlobalVarDecl
+                | SyntaxKind::StaticVarDecl
                 | SyntaxKind::StructDecl
                 | SyntaxKind::EnumDecl
                 | SyntaxKind::ClassDecl
@@ -282,7 +283,9 @@ impl Lowerer {
         match node.kind() {
             SyntaxKind::FunctionDef => Ok(Some(Decl::Function(self.lower_function_def(node)?))),
             SyntaxKind::FunctionDecl => Ok(Some(Decl::Function(self.lower_function_decl(node)?))),
-            SyntaxKind::GlobalVarDecl => Ok(Some(Decl::Variable(self.lower_variable_decl(node)?))),
+            SyntaxKind::GlobalVarDecl | SyntaxKind::StaticVarDecl => {
+                Ok(Some(Decl::Variable(self.lower_variable_decl(node)?)))
+            }
             SyntaxKind::StructDecl => Ok(Some(Decl::Struct(self.lower_struct_decl(node)?))),
             SyntaxKind::EnumDecl => Ok(Some(Decl::Enum(self.lower_enum_decl(node)?))),
             SyntaxKind::ClassDecl => Ok(Some(Decl::Class(self.lower_class_decl(node)?))),
@@ -396,18 +399,29 @@ impl Lowerer {
         let span = self.span(node);
         let mut ty = None;
         let mut name = None;
+        let mut default = None;
 
         for child in node.children() {
-            if child.kind() == SyntaxKind::Type {
-                ty = Some(self.lower_type(&child)?);
+            match child.kind() {
+                SyntaxKind::Type => ty = Some(self.lower_type(&child)?),
+                SyntaxKind::Expr => {
+                    // This is the default value expression (comes after '=')
+                    default = Some(self.lower_expr(&child)?);
+                }
+                _ => {}
             }
         }
 
-        // Find param name (ident after type)
-        for token in node.children_with_tokens().filter_map(|it| it.into_token()) {
-            if token.kind() == SyntaxKind::Ident && ty.is_some() {
-                name = Some(Name::new(self.token_span(&token), token.text().to_string()));
-                break;
+        // Find param name (ident after type but before '=')
+        let mut saw_type = false;
+        for elem in node.children_with_tokens() {
+            match elem {
+                rowan::NodeOrToken::Node(n) if n.kind() == SyntaxKind::Type => saw_type = true,
+                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::Eq => break, // Stop at '='
+                rowan::NodeOrToken::Token(t) if saw_type && t.kind() == SyntaxKind::Ident => {
+                    name = Some(Name::new(self.token_span(&t), t.text().to_string()));
+                }
+                _ => {}
             }
         }
 
@@ -418,7 +432,7 @@ impl Lowerer {
             span,
             ty,
             name,
-            default: None,
+            default,
         })
     }
 
@@ -740,13 +754,18 @@ impl Lowerer {
 
     fn lower_template_decl(&mut self, node: &SyntaxNode) -> Result<TemplateDecl> {
         let span = self.span(node);
-        let params = Vec::new(); // TODO: Parse template params
+        let mut params = Vec::new();
         let mut decl = None;
 
         for child in node.children() {
-            if self.is_decl_kind(child.kind()) {
-                decl = self.lower_decl(&child)?;
-                break;
+            match child.kind() {
+                SyntaxKind::TemplateParams => {
+                    params = self.lower_template_params(&child)?;
+                }
+                _ if self.is_decl_kind(child.kind()) => {
+                    decl = self.lower_decl(&child)?;
+                }
+                _ => {}
             }
         }
 
@@ -757,6 +776,99 @@ impl Lowerer {
             params,
             decl: Box::new(decl),
         })
+    }
+
+    fn lower_template_params(&mut self, node: &SyntaxNode) -> Result<Vec<TemplateParam>> {
+        let mut params = Vec::new();
+
+        for child in node.children() {
+            if child.kind() == SyntaxKind::TemplateParam {
+                params.push(self.lower_template_param(&child)?);
+            }
+        }
+
+        Ok(params)
+    }
+
+    fn lower_template_param(&mut self, node: &SyntaxNode) -> Result<TemplateParam> {
+        let span = self.span(node);
+
+        // Check if this is a type parameter (has typename keyword)
+        let mut is_type_param = false;
+        for token in node.children_with_tokens().filter_map(|it| it.into_token()) {
+            if token.kind() == SyntaxKind::KwTypename {
+                is_type_param = true;
+                break;
+            }
+        }
+
+        let mut ty: Option<Type> = None;
+        let mut name: Option<Name> = None;
+        let mut default_type: Option<Type> = None;
+        let mut default_expr: Option<Expr> = None;
+
+        // Collect Type and Expr children
+        let mut saw_eq = false;
+        for elem in node.children_with_tokens() {
+            match elem {
+                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::Eq => {
+                    saw_eq = true;
+                }
+                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::Ident => {
+                    // This could be the param name
+                    if !saw_eq {
+                        name = Some(Name::new(self.token_span(&t), t.text().to_string()));
+                    }
+                }
+                rowan::NodeOrToken::Node(n) => {
+                    if n.kind() == SyntaxKind::Type {
+                        if saw_eq {
+                            default_type = Some(self.lower_type(&n)?);
+                        } else if ty.is_none() {
+                            ty = Some(self.lower_type(&n)?);
+                        }
+                    } else if n.kind() == SyntaxKind::Expr {
+                        if saw_eq {
+                            default_expr = Some(self.lower_expr(&n)?);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // For type parameters, the Type node contains the parameter name
+        if is_type_param {
+            // If we have a type but no separate name, extract name from type
+            let param_name = if let Some(n) = name {
+                n
+            } else if let Some(Type::Named(named)) = &ty {
+                if let Some(part) = named.path.parts.first() {
+                    part.clone()
+                } else {
+                    Name::new(span, "_")
+                }
+            } else {
+                Name::new(span, "_")
+            };
+
+            Ok(TemplateParam::Type {
+                span,
+                name: param_name,
+                default: default_type,
+            })
+        } else {
+            // Non-type parameter
+            let param_ty = ty.unwrap_or_else(|| self.make_auto_type(span));
+            let param_name = name.unwrap_or_else(|| Name::new(span, "_"));
+
+            Ok(TemplateParam::NonType {
+                span,
+                ty: param_ty,
+                name: param_name,
+                default: default_expr,
+            })
+        }
     }
 
     fn lower_static_if_decl(&mut self, node: &SyntaxNode) -> Result<StaticIfDecl> {
@@ -1062,58 +1174,60 @@ impl Lowerer {
             }
         }
 
-        // Find cases in body
-        for child in node.children() {
-            if child.kind() == SyntaxKind::Block {
-                let mut current_label = None;
-                let mut current_stmts = Vec::new();
-                let mut case_span = self.span(&child);
+        // Find cases - they are direct children of SwitchStmt, not inside a Block
+        let mut current_label: Option<SwitchLabel> = None;
+        let mut current_stmts = Vec::new();
+        let mut case_span = span;
 
-                for item in child.descendants() {
-                    match item.kind() {
-                        SyntaxKind::CaseLabel => {
-                            // Save previous case
-                            if let Some(label) = current_label.take() {
-                                cases.push(SwitchCase {
-                                    span: case_span,
-                                    label,
-                                    stmts: std::mem::take(&mut current_stmts),
-                                });
-                            }
-                            case_span = self.span(&item);
-                            // Parse case value
-                            for inner in item.children() {
-                                if inner.kind() == SyntaxKind::Expr {
-                                    current_label =
-                                        Some(SwitchLabel::Case(self.lower_expr(&inner)?));
-                                    break;
-                                }
-                            }
+        for child in node.children() {
+            match child.kind() {
+                SyntaxKind::CaseLabel => {
+                    // Save previous case
+                    if let Some(label) = current_label.take() {
+                        cases.push(SwitchCase {
+                            span: case_span,
+                            label,
+                            stmts: std::mem::take(&mut current_stmts),
+                        });
+                    }
+                    case_span = self.span(&child);
+                    // Parse case value
+                    for inner in child.children() {
+                        if inner.kind() == SyntaxKind::Expr {
+                            current_label = Some(SwitchLabel::Case(self.lower_expr(&inner)?));
+                            break;
                         }
-                        SyntaxKind::DefaultLabel => {
-                            if let Some(label) = current_label.take() {
-                                cases.push(SwitchCase {
-                                    span: case_span,
-                                    label,
-                                    stmts: std::mem::take(&mut current_stmts),
-                                });
-                            }
-                            case_span = self.span(&item);
-                            current_label = Some(SwitchLabel::Default);
-                        }
-                        _ => {}
                     }
                 }
-
-                // Save last case
-                if let Some(label) = current_label {
-                    cases.push(SwitchCase {
-                        span: case_span,
-                        label,
-                        stmts: current_stmts,
-                    });
+                SyntaxKind::DefaultLabel => {
+                    // Save previous case
+                    if let Some(label) = current_label.take() {
+                        cases.push(SwitchCase {
+                            span: case_span,
+                            label,
+                            stmts: std::mem::take(&mut current_stmts),
+                        });
+                    }
+                    case_span = self.span(&child);
+                    current_label = Some(SwitchLabel::Default);
                 }
+                // Collect statements for current case
+                _ if current_label.is_some() => {
+                    if let Some(stmt) = self.lower_stmt(&child)? {
+                        current_stmts.push(stmt);
+                    }
+                }
+                _ => {}
             }
+        }
+
+        // Save last case
+        if let Some(label) = current_label {
+            cases.push(SwitchCase {
+                span: case_span,
+                label,
+                stmts: current_stmts,
+            });
         }
 
         let expr = expr.ok_or(LowerError::MissingChild("switch expression"))?;
@@ -1346,36 +1460,36 @@ impl Lowerer {
         let mut rhs = None;
         let mut op = AssignOp::Assign;
 
-        // The AssignStmt should contain an AssignExpr or direct child Expr nodes
-        for child in node.children() {
-            if child.kind() == SyntaxKind::AssignExpr {
-                // Binary assignment expression
-                let exprs: Vec<_> = child
-                    .children()
-                    .filter(|c| self.is_expr_kind(c.kind()))
-                    .collect();
-                if exprs.len() >= 2 {
-                    lhs = Some(self.lower_expr(&exprs[0])?);
-                    rhs = Some(self.lower_expr(&exprs[1])?);
-                }
-                // Find operator
-                for token in child.children_with_tokens().filter_map(|it| it.into_token()) {
-                    op = match token.kind() {
-                        SyntaxKind::Eq => AssignOp::Assign,
-                        SyntaxKind::PlusEq => AssignOp::AddAssign,
-                        SyntaxKind::MinusEq => AssignOp::SubAssign,
-                        SyntaxKind::StarEq => AssignOp::MulAssign,
-                        SyntaxKind::SlashEq => AssignOp::DivAssign,
-                        SyntaxKind::PercentEq => AssignOp::ModAssign,
-                        SyntaxKind::ShlEq => AssignOp::ShlAssign,
-                        SyntaxKind::ShrEq => AssignOp::ShrAssign,
-                        SyntaxKind::AmpEq => AssignOp::AndAssign,
-                        SyntaxKind::PipeEq => AssignOp::OrAssign,
-                        SyntaxKind::CaretEq => AssignOp::XorAssign,
-                        _ => continue,
-                    };
-                    break;
-                }
+        // Find the AssignExpr - it may be wrapped inside an Expr node
+        let assign_expr = node.descendants().find(|n| n.kind() == SyntaxKind::AssignExpr);
+
+        if let Some(assign_node) = assign_expr {
+            // Binary assignment expression
+            let exprs: Vec<_> = assign_node
+                .children()
+                .filter(|c| self.is_expr_kind(c.kind()))
+                .collect();
+            if exprs.len() >= 2 {
+                lhs = Some(self.lower_expr(&exprs[0])?);
+                rhs = Some(self.lower_expr(&exprs[1])?);
+            }
+            // Find operator
+            for token in assign_node.children_with_tokens().filter_map(|it| it.into_token()) {
+                op = match token.kind() {
+                    SyntaxKind::Eq => AssignOp::Assign,
+                    SyntaxKind::PlusEq => AssignOp::AddAssign,
+                    SyntaxKind::MinusEq => AssignOp::SubAssign,
+                    SyntaxKind::StarEq => AssignOp::MulAssign,
+                    SyntaxKind::SlashEq => AssignOp::DivAssign,
+                    SyntaxKind::PercentEq => AssignOp::ModAssign,
+                    SyntaxKind::ShlEq => AssignOp::ShlAssign,
+                    SyntaxKind::ShrEq => AssignOp::ShrAssign,
+                    SyntaxKind::AmpEq => AssignOp::AndAssign,
+                    SyntaxKind::PipeEq => AssignOp::OrAssign,
+                    SyntaxKind::CaretEq => AssignOp::XorAssign,
+                    _ => continue,
+                };
+                break;
             }
         }
 
@@ -1564,7 +1678,9 @@ impl Lowerer {
         let mut name = None;
 
         for token in node.children_with_tokens().filter_map(|it| it.into_token()) {
-            if token.kind() == SyntaxKind::Ident {
+            // Accept both Ident tokens and keyword tokens that can be used as identifiers
+            // (e.g., mux, concat, static when used in expression position)
+            if Self::is_ident_like_token(token.kind()) {
                 name = Some(Name::new(self.token_span(&token), token.text().to_string()));
                 break;
             }
@@ -1578,12 +1694,19 @@ impl Lowerer {
         }))
     }
 
+    /// Check if a token kind can be used as an identifier.
+    /// This includes `Ident` and all keyword tokens (KwAs through KwWhile).
+    fn is_ident_like_token(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::Ident || (kind >= SyntaxKind::KwAs && kind <= SyntaxKind::KwWhile)
+    }
+
     fn lower_qualified_ident_expr(&mut self, node: &SyntaxNode) -> Result<Expr> {
         let span = self.span(node);
         let mut parts = Vec::new();
 
         for token in node.children_with_tokens().filter_map(|it| it.into_token()) {
-            if token.kind() == SyntaxKind::Ident {
+            // Accept both Ident tokens and keyword tokens that can be used as identifiers
+            if Self::is_ident_like_token(token.kind()) {
                 parts.push(Name::new(self.token_span(&token), token.text().to_string()));
             }
         }
@@ -1764,12 +1887,114 @@ impl Lowerer {
         }
 
         let callee = callee.ok_or(LowerError::MissingChild("call callee"))?;
+
+        // Check for built-in function calls
+        if let Some(builtin) = self.try_lower_builtin_call(span, &callee, &args) {
+            return Ok(builtin);
+        }
+
         Ok(Expr::Call(CallExpr {
             span,
             attrs: Vec::new(),
             callee: Box::new(callee),
             args,
         }))
+    }
+
+    /// Try to lower a call to a built-in function.
+    fn try_lower_builtin_call(&self, span: Span, callee: &Expr, args: &[Expr]) -> Option<Expr> {
+        // Extract the function name and template args from the callee
+        let (name, template_args) = match callee {
+            Expr::Ident(ident) => (ident.name.text.as_str(), &ident.template_args),
+            _ => return None,
+        };
+
+        match name {
+            "fan_out" => {
+                // fan_out<count>(value)
+                if args.len() != 1 {
+                    return None;
+                }
+                // Extract the count from template args
+                let count = template_args.as_ref().and_then(|ta| ta.first()).cloned();
+                let count_expr = match count {
+                    Some(TemplateArg::Expr(e)) => e,
+                    // Fallback: if no template arg, use a placeholder
+                    _ => Expr::IntLiteral(IntLiteral {
+                        span,
+                        value: 1,
+                        suffix: None,
+                    }),
+                };
+                Some(Expr::FanOut(FanOutExpr {
+                    span,
+                    count: Box::new(count_expr),
+                    value: Box::new(args[0].clone()),
+                }))
+            }
+            "mux" => {
+                // mux(selector, arg1, arg2, ...)
+                if args.is_empty() {
+                    return None;
+                }
+                Some(Expr::Mux(MuxExpr {
+                    span,
+                    selector: Box::new(args[0].clone()),
+                    args: args[1..].to_vec(),
+                }))
+            }
+            "concat" => {
+                // concat(arg1, arg2, ...)
+                Some(Expr::Concat(ConcatExpr {
+                    span,
+                    args: args.to_vec(),
+                }))
+            }
+            "bitsizeof" => {
+                if args.len() != 1 {
+                    return None;
+                }
+                Some(Expr::Sizeof(SizeofExpr {
+                    span,
+                    kind: SizeofKind::Bits,
+                    operand: Box::new(args[0].clone()),
+                }))
+            }
+            "bytesizeof" => {
+                if args.len() != 1 {
+                    return None;
+                }
+                Some(Expr::Sizeof(SizeofExpr {
+                    span,
+                    kind: SizeofKind::Bytes,
+                    operand: Box::new(args[0].clone()),
+                }))
+            }
+            "clog2" => {
+                if args.len() != 1 {
+                    return None;
+                }
+                Some(Expr::Sizeof(SizeofExpr {
+                    span,
+                    kind: SizeofKind::Clog2,
+                    operand: Box::new(args[0].clone()),
+                }))
+            }
+            // Note: bitoffsetof and byteoffsetof require Type and Name arguments,
+            // which can't be easily extracted from expression args. Leave as regular calls.
+            // "bitoffsetof" | "byteoffsetof" => None,
+            "static" => {
+                // static(expr) - compile-time evaluation
+                if args.len() != 1 {
+                    return None;
+                }
+                Some(Expr::Static(StaticExpr {
+                    span,
+                    expr: Box::new(args[0].clone()),
+                }))
+            }
+            _ => None,
+        }
     }
 
     fn lower_member_expr(&mut self, node: &SyntaxNode) -> Result<Expr> {
@@ -2222,7 +2447,11 @@ impl Lowerer {
 
         for child in node.children() {
             match child.kind() {
+                // TypeArray wraps the base type directly (TypePath, TypeConst, etc.)
                 SyntaxKind::Type => element = Some(self.lower_type(&child)?),
+                SyntaxKind::TypePath => element = Some(self.lower_type_path(&child)?),
+                SyntaxKind::TypeConst => element = Some(self.lower_const_type(&child)?),
+                SyntaxKind::TypeFunction => element = Some(self.lower_function_type(&child)?),
                 SyntaxKind::TypeArrayDim => {
                     for inner in child.children() {
                         if inner.kind() == SyntaxKind::Expr {

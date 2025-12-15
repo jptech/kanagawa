@@ -160,6 +160,8 @@ pub enum SyntaxKind {
     AttrBlock,
     AttrItem,
     TemplateDecl,
+    TemplateParams,
+    TemplateParam,
     StructDecl,
     StructBody,
     StructMemberDecl,

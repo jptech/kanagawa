@@ -80,7 +80,6 @@ fn test_lower_function_with_params() {
 }
 
 #[test]
-#[ignore] // Parser doesn't capture default parameter values in AST
 fn test_lower_function_with_default_param() {
     let (hir, _) = parse_and_lower("void greet(uint32 times = 1) {}");
 
@@ -137,7 +136,6 @@ fn test_lower_const_variable() {
 }
 
 #[test]
-#[ignore] // Parser doesn't fully support top-level static declarations yet
 fn test_lower_static_variable() {
     let (hir, _) = parse_and_lower("static uint32 counter = 0;");
 
@@ -209,7 +207,6 @@ fn test_lower_enum() {
 }
 
 #[test]
-#[ignore] // Parser doesn't create Type node for enum base type (just bumps tokens)
 fn test_lower_enum_with_values() {
     let (hir, _) = parse_and_lower("enum Status : uint8 { Off = 0, On = 1, Error = 255 }");
 
@@ -235,7 +232,6 @@ fn test_lower_enum_with_values() {
 // ============================================================================
 
 #[test]
-#[ignore] // Parser/AST issue: assignment inside method body causes MissingChild("assignment lhs")
 fn test_lower_class() {
     let (hir, symbols) = parse_and_lower(
         r#"
@@ -530,7 +526,6 @@ fn test_lower_if_else_statement() {
 }
 
 #[test]
-#[ignore] // Parser doesn't properly create SwitchCase nodes in AST
 fn test_lower_switch_statement() {
     let (hir, _) = parse_and_lower(
         r#"
@@ -609,7 +604,6 @@ fn test_lower_range_for() {
 }
 
 #[test]
-#[ignore] // Parser doesn't create AssignExpr inside AssignStmt
 fn test_lower_assignment() {
     let (hir, _) = parse_and_lower(
         r#"
@@ -641,7 +635,6 @@ fn test_lower_assignment() {
 // ============================================================================
 
 #[test]
-#[ignore] // Parser bug: array dimensions not properly wrapped in TypeArray node
 fn test_lower_array_type() {
     let (hir, _) = parse_and_lower("uint8[16] buffer;");
 
@@ -660,7 +653,6 @@ fn test_lower_array_type() {
 }
 
 #[test]
-#[ignore] // Parser bug: array dimensions not properly wrapped in TypeArray node
 fn test_lower_multi_dim_array() {
     let (hir, _) = parse_and_lower("uint32[4][4] matrix;");
 
@@ -720,7 +712,6 @@ fn test_lower_import() {
 // ============================================================================
 
 #[test]
-#[ignore] // Parser doesn't populate template parameters in AST
 fn test_lower_template_function() {
     let (hir, _) = parse_and_lower(
         r#"

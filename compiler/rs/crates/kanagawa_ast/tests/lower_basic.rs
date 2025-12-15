@@ -430,3 +430,109 @@ fn lowers_real_library_file() {
         }
     }
 }
+
+// ============================================================================
+// Built-in expression tests
+// ============================================================================
+
+#[test]
+fn lowers_mux_expression() {
+    let src = r#"
+        inline void test() {
+            mux(sel, a, b);
+        }
+    "#;
+
+    let file = lower(src).unwrap();
+
+    let Decl::Function(func) = &file.decls[0] else {
+        panic!("expected function");
+    };
+
+    let body = func.body.as_ref().unwrap();
+    let Stmt::Expr(expr_stmt) = &body.stmts[0] else {
+        panic!("expected expression statement");
+    };
+
+    let Expr::Mux(mux) = &expr_stmt.expr else {
+        panic!("expected mux expression, got: {:?}", expr_stmt.expr);
+    };
+
+    assert_eq!(mux.args.len(), 2); // Two alternatives (a, b)
+}
+
+#[test]
+fn lowers_concat_expression() {
+    let src = r#"
+        inline void test() {
+            concat(a, b, c);
+        }
+    "#;
+
+    let file = lower(src).unwrap();
+
+    let Decl::Function(func) = &file.decls[0] else {
+        panic!("expected function");
+    };
+
+    let body = func.body.as_ref().unwrap();
+    let Stmt::Expr(expr_stmt) = &body.stmts[0] else {
+        panic!("expected expression statement");
+    };
+
+    let Expr::Concat(concat) = &expr_stmt.expr else {
+        panic!("expected concat expression, got: {:?}", expr_stmt.expr);
+    };
+
+    assert_eq!(concat.args.len(), 3);
+}
+
+#[test]
+fn lowers_static_expression() {
+    let src = r#"
+        inline void test() {
+            static(42);
+        }
+    "#;
+
+    let file = lower(src).unwrap();
+
+    let Decl::Function(func) = &file.decls[0] else {
+        panic!("expected function");
+    };
+
+    let body = func.body.as_ref().unwrap();
+    let Stmt::Expr(expr_stmt) = &body.stmts[0] else {
+        panic!("expected expression statement");
+    };
+
+    let Expr::Static(_) = &expr_stmt.expr else {
+        panic!("expected static expression, got: {:?}", expr_stmt.expr);
+    };
+}
+
+#[test]
+fn lowers_bitsizeof_expression() {
+    let src = r#"
+        inline void test() {
+            bitsizeof(x);
+        }
+    "#;
+
+    let file = lower(src).unwrap();
+
+    let Decl::Function(func) = &file.decls[0] else {
+        panic!("expected function");
+    };
+
+    let body = func.body.as_ref().unwrap();
+    let Stmt::Expr(expr_stmt) = &body.stmts[0] else {
+        panic!("expected expression statement");
+    };
+
+    let Expr::Sizeof(sizeof) = &expr_stmt.expr else {
+        panic!("expected sizeof expression, got: {:?}", expr_stmt.expr);
+    };
+
+    assert_eq!(sizeof.kind, kanagawa_ast::SizeofKind::Bits);
+}

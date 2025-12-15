@@ -252,9 +252,8 @@ impl<'a> Parser<'a> {
                     } else if self.peek_next_nontrivia_ident_text(1) == Some("assert") {
                         self.parse_static_assert_two_word_decl();
                     } else {
-                        // Not `static if` (could be `static` variable in statement contexts);
-                        // keep permissive at top level.
-                        self.bump();
+                        // Static variable declaration: `static type name = init;`
+                        self.parse_static_var_decl();
                     }
                 }
                 SyntaxKind::Error => self.wrap_error_token(),
@@ -354,8 +353,10 @@ impl<'a> Parser<'a> {
             SyntaxKind::KwStatic => {
                 if self.peek_next_nontrivia_kind(1) == Some(SyntaxKind::KwIf) {
                     self.parse_static_if_decl();
+                } else if self.peek_next_nontrivia_ident_text(1) == Some("assert") {
+                    self.parse_static_assert_two_word_decl();
                 } else {
-                    self.bump();
+                    self.parse_static_var_decl();
                 }
             }
             _ => {
@@ -529,12 +530,13 @@ impl<'a> Parser<'a> {
                 self.eat_trivia();
             }
 
-            // Optional default.
+            // Optional default value.
             if self.at(SyntaxKind::Eq) {
                 self.bump();
                 self.eat_trivia();
-                // Keep permissive until ',' or ')'.
-                self.consume_until_comma_or_rparen_balanced();
+                // Parse default expression properly
+                self.parse_expr_node(ExprMode::Normal, &[SyntaxKind::Comma, SyntaxKind::RParen]);
+                self.eat_trivia();
             }
 
             self.builder.finish_node();
@@ -685,11 +687,13 @@ impl<'a> Parser<'a> {
         }
 
         // Path-ish types: `Foo::Bar<T>`.
+        // Save checkpoint before base type for potential array wrapping.
+        let base_checkpoint = self.builder.checkpoint();
         let _ = self.try_parse_type_path();
 
         // Array suffix: `T[N][M]`.
         if self.at(SyntaxKind::LBracket) {
-            self.parse_array_type_suffixes();
+            self.parse_array_type_suffixes_at(base_checkpoint);
         }
 
         self.builder.finish_node();
@@ -923,16 +927,23 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
     }
 
-    fn parse_array_type_suffixes(&mut self) {
-        // Wrap the base type + suffixes.
-        let checkpoint = self.builder.checkpoint();
+    fn parse_array_type_suffixes_at(&mut self, checkpoint: rowan::Checkpoint) {
+        // Wrap the base type + suffixes using the provided checkpoint.
         self.builder
             .start_node_at(checkpoint, SyntaxKind::TypeArray.into());
 
         while self.at(SyntaxKind::LBracket) {
             self.builder.start_node(SyntaxKind::TypeArrayDim.into());
-            // Dimension expression (permissive).
-            self.consume_balanced_pair(SyntaxKind::LBracket, SyntaxKind::RBracket);
+            self.bump(); // consume '['
+            self.eat_trivia();
+            // Parse dimension expression if present (not empty brackets)
+            if !self.at(SyntaxKind::RBracket) {
+                self.parse_expr_node(ExprMode::Normal, &[SyntaxKind::RBracket]);
+                self.eat_trivia();
+            }
+            if self.at(SyntaxKind::RBracket) {
+                self.bump();
+            }
             self.builder.finish_node();
             self.eat_trivia();
         }
@@ -2833,9 +2844,9 @@ impl<'a> Parser<'a> {
         self.expect(SyntaxKind::KwTemplate);
         self.eat_trivia();
 
-        // Best-effort: consume a balanced `<...>` parameter list if present.
+        // Parse template parameter list if present.
         if self.at(SyntaxKind::Lt) {
-            self.consume_balanced_pair(SyntaxKind::Lt, SyntaxKind::Gt);
+            self.parse_template_params();
             self.eat_trivia();
         }
 
@@ -2857,6 +2868,73 @@ impl<'a> Parser<'a> {
             }
         }
 
+        self.builder.finish_node();
+    }
+
+    fn parse_template_params(&mut self) {
+        self.builder.start_node(SyntaxKind::TemplateParams.into());
+        self.expect(SyntaxKind::Lt);
+        self.eat_trivia();
+
+        loop {
+            if self.at(SyntaxKind::Gt) || self.at(SyntaxKind::Shr) || self.at(SyntaxKind::Eof) {
+                break;
+            }
+
+            self.builder.start_node(SyntaxKind::TemplateParam.into());
+
+            // Template param can be:
+            // - `typename T` or just `T` for type params
+            // - `type name` for value params (e.g., `int N`)
+            // - `type name = default` for params with defaults
+            if self.at(SyntaxKind::KwTypename) {
+                self.bump(); // consume 'typename'
+                self.eat_trivia();
+            }
+
+            // Parse the type (for value params) or name (for type params)
+            if self.looks_like_type_start() && !self.at(SyntaxKind::Gt) {
+                self.parse_type_or_fallback();
+                self.eat_trivia();
+            }
+
+            // Optional parameter name (for value params)
+            if self.at(SyntaxKind::Ident) {
+                self.bump();
+                self.eat_trivia();
+            }
+
+            // Optional default value
+            if self.at(SyntaxKind::Eq) {
+                self.bump();
+                self.eat_trivia();
+                // Parse default - could be type or expression
+                if self.looks_like_type_start() {
+                    self.parse_type_or_fallback();
+                } else {
+                    self.parse_expr_node(ExprMode::TemplateArgRestricted, &[SyntaxKind::Comma, SyntaxKind::Gt, SyntaxKind::Shr]);
+                }
+                self.eat_trivia();
+            }
+
+            self.builder.finish_node();
+
+            self.eat_trivia();
+            if self.at(SyntaxKind::Comma) {
+                self.bump();
+                self.eat_trivia();
+                continue;
+            }
+            break;
+        }
+
+        // Handle `>` or `>>`
+        if self.at(SyntaxKind::Gt) {
+            self.bump();
+        } else if self.at(SyntaxKind::Shr) {
+            // Split `>>` into two `>` tokens - just consume for now
+            self.bump();
+        }
         self.builder.finish_node();
     }
 
@@ -3117,21 +3195,14 @@ impl<'a> Parser<'a> {
         }
 
         // Haskell requires `: <type> { ... }`.
-        // Keep permissive: if `:` exists, consume until `{`/`;`.
+        // Parse the base type properly.
         if self.at(SyntaxKind::Colon) {
             self.bump();
             self.eat_trivia();
-            // Consume enum underlying type (may include templates/brackets/etc).
-            // Stop before body.
-            while !self.at(SyntaxKind::Eof) {
-                if self.current().is_trivia() {
-                    self.bump();
-                    continue;
-                }
-                match self.current() {
-                    SyntaxKind::LBrace | SyntaxKind::Semi => break,
-                    _ => self.bump(),
-                }
+            // Parse enum underlying type
+            if !self.at(SyntaxKind::LBrace) && !self.at(SyntaxKind::Semi) {
+                self.parse_type_or_fallback();
+                self.eat_trivia();
             }
         }
 
