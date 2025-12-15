@@ -1,0 +1,16 @@
+[package]
+name = "kanagawa_driver"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "kanagawa-rs"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+kanagawa_parsetree = { path = "../kanagawa_parsetree" }
+kanagawa_syntax = { path = "../kanagawa_syntax" }
+libloading = "0.8"

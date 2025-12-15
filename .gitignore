@@ -12,3 +12,6 @@ _deps
 CMakeUserPresets.json
 .vscode
 build-ci
+kanagawa-build
+configure_local.sh
+**/target
