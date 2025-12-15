@@ -76,23 +76,32 @@ fn main() -> Result<()> {
 
     if lex_only || parse_only {
         let path = &files[0];
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
 
         if lex_only {
             let (tokens, diags) = syntax::lex(&text);
             println!("lex: {} tokens, {} diagnostics", tokens.len(), diags.len());
             for d in diags.iter().take(10) {
-                println!("{:?}: {} ({}..{})", d.severity, d.message, d.span.start, d.span.end);
+                println!(
+                    "{:?}: {} ({}..{})",
+                    d.severity, d.message, d.span.start, d.span.end
+                );
             }
             return Ok(());
         }
 
         if parse_only {
             let parse = syntax::parse_file(&text);
-            println!("parse: green tree built, {} diagnostics", parse.diagnostics.len());
+            println!(
+                "parse: green tree built, {} diagnostics",
+                parse.diagnostics.len()
+            );
             for d in parse.diagnostics.iter().take(10) {
-                println!("{:?}: {} ({}..{})", d.severity, d.message, d.span.start, d.span.end);
+                println!(
+                    "{:?}: {} ({}..{})",
+                    d.severity, d.message, d.span.start, d.span.end
+                );
             }
             return Ok(());
         }

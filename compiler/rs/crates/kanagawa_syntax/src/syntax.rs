@@ -5,13 +5,24 @@ use rowan::Language;
 pub enum SyntaxKind {
     // Tokens
     Whitespace,
+    DocLineCommentPre,
+    DocLineCommentPost,
     LineComment,
     BlockComment,
 
     Ident,
     IntDec,
     IntHex,
+    IntBin,
+    IntOct,
+    Float,
     String,
+    Char,
+
+    // String subdivision tokens (used by parser for interpolated strings).
+    StringQuote,
+    StringText,
+    StringEscape,
 
     // Punctuation
     LParen,
@@ -24,14 +35,36 @@ pub enum SyntaxKind {
     Semi,
     Colon,
     Dot,
+    DotDot,
+    DotDotDot,
+    Backslash,
+    Question,
+    Scope,
 
-    // Operators (starter set)
+    // Operators
     Plus,
     Minus,
     Star,
     Slash,
     Percent,
+
+    PlusPlus,
+    MinusMinus,
+
     Eq,
+    PlusEq,
+    MinusEq,
+    StarEq,
+    SlashEq,
+    PercentEq,
+    ShlEq,
+    ShrEq,
+    AmpEq,
+    PipeEq,
+    CaretEq,
+    AndAndEq,
+    OrOrEq,
+
     EqEq,
     Not,
     NotEq,
@@ -39,33 +72,201 @@ pub enum SyntaxKind {
     Gt,
     Le,
     Ge,
+
+    Shl,
+    Shr,
+
+    Amp,
+    Pipe,
+    Caret,
+    Tilde,
+
     AndAnd,
     OrOr,
+    XorXor,
 
-    // Keywords (starter set)
-    KwModule,
-    KwImport,
-    KwStruct,
-    KwUnion,
-    KwEnum,
-    KwFn,
-    KwLet,
+    Arrow,
+    FatArrow,
+
+    // Keywords (Haskell lexer reserved list)
+    KwAs,
+    KwAtomic,
+    KwAuto,
+    KwBarrier,
+    KwBitsizeof,
+    KwBitoffsetof,
+    KwBool,
+    KwBreak,
+    KwBytesizeof,
+    KwByteoffsetof,
+    KwCast,
+    KwCase,
+    KwClass,
+    KwClog2,
+    KwConcat,
     KwConst,
-    KwIf,
+    KwDecltype,
+    KwDefault,
+    KwDo,
     KwElse,
+    KwEnum,
+    KwExport,
+    KwExtern,
+    KwFalse,
+    KwFanOut,
+    KwFloat32,
+    KwFor,
+    KwIf,
+    KwImport,
+    KwInline,
+    KwInt,
+    KwLutmul,
+    KwModule,
+    KwMux,
+    KwNoinline,
+    KwPrivate,
+    KwPublic,
+    KwReorder,
     KwReturn,
+    KwStatic,
+    KwStaticAssert,
+    KwString,
+    KwStruct,
+    KwSwitch,
+    KwTemplate,
+    KwTrue,
+    KwTypename,
+    KwUint,
+    KwUnion,
+    KwUnrolledFor,
+    KwUsing,
+    KwVoid,
+    KwWhile,
 
     Error,
     Eof,
 
     // Nodes
     File,
+    ModuleDecl,
+    ImportDecl,
+    ModuleName,
+    ModuleNameSegment,
+    ModuleExports,
+    ExportItem,
+    ModuleReference,
+    ModuleDiff,
+    Attrs,
+    AttrBlock,
+    AttrItem,
+    TemplateDecl,
+    StructDecl,
+    StructBody,
+    StructMemberDecl,
+    EnumDecl,
+    EnumBody,
+    EnumVariant,
+    UnionDecl,
+    UnionBody,
+    UnionMemberDecl,
+    ClassDecl,
+    ClassBody,
+    AccessSpecifier,
+    DefaultInitDecl,
+    ClassVarDecl,
+    UsingDecl,
+    ExternDecl,
+    ExportDecl,
+    StaticAssertDecl,
+    StaticIfDecl,
+    GlobalVarDecl,
+    FunctionDecl,
+    FunctionDef,
+    FuncParams,
+    Block,
+    StmtList,
+    AnnotatedStmt,
+    ReturnStmt,
+    IfStmt,
+    SwitchStmt,
+    CaseLabel,
+    DefaultLabel,
+    BreakStmt,
+    DoWhileStmt,
+    RangeForStmt,
+    UnrolledForStmt,
+    StaticForStmt,
+    StaticIfStmt,
+    BarrierStmt,
+    ReorderStmt,
+    AtomicStmt,
+    IncDecStmt,
+    AssignStmt,
+    StaticDefaultInitStmt,
+    LocalVarDecl,
+    StaticVarDecl,
+    ExprStmt,
+
+    LambdaExpr,
+    LambdaCaptureList,
+    LambdaCapture,
+    LambdaParams,
+    LambdaReturnType,
+
+    // Types
+    Type,
+    TypeConst,
+    TypeTypename,
+    TypeDecltype,
+    TypePath,
+    TypePathSegment,
+    TypeTemplateArgs,
+    TypeTemplateArg,
+    TypeArray,
+    TypeArrayDim,
+    TypeFunction,
+    TypeFunctionParams,
+    TypeFunctionParam,
+
+    // Expressions
+    Expr,
+    IdentExpr,
+    QualifiedIdentExpr,
+    LiteralExpr,
+    ParenExpr,
+    UnaryExpr,
+    BinaryExpr,
+    TernaryExpr,
+    AssignExpr,
+    CallExpr,
+    ArgList,
+    MemberExpr,
+    SubscriptExpr,
+    CastExpr,
+
+    // Initializers
+    InitializerListExpr,
+    DesignatedInitializerListExpr,
+    DesignatedInitializer,
+
+    // Strings
+    StringLiteralExpr,
+    InterpolatedStringExpr,
+    StringInterpolation,
+    StringFormat,
     ErrorNode,
 }
 
 impl SyntaxKind {
     pub fn is_trivia(self) -> bool {
-        matches!(self, SyntaxKind::Whitespace | SyntaxKind::LineComment | SyntaxKind::BlockComment)
+        matches!(
+            self,
+            SyntaxKind::Whitespace
+                | SyntaxKind::DocLineCommentPre
+                | SyntaxKind::DocLineCommentPost
+                | SyntaxKind::LineComment
+                | SyntaxKind::BlockComment
+        )
     }
 }
 
@@ -86,3 +287,5 @@ impl Language for SyntaxLanguage {
 }
 
 pub type SyntaxNode = rowan::SyntaxNode<SyntaxLanguage>;
+
+pub type SyntaxToken = rowan::SyntaxToken<SyntaxLanguage>;
