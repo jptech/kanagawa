@@ -1255,3 +1255,346 @@ ParseDeclare(std::ptr::null_mut(), ty, name, init, flags, namespace)
 1. Implement proper namespace scoping for declarations
 2. Investigate device configuration loading
 3. Address remaining duplicate symbol issues
+
+---
+
+## 2025-12-16 (device configuration and module re-export resolution)
+
+### Import alias and module re-export resolution - FIXED
+
+Fixed the device configuration namespace resolution issue where `device::device_name` couldn't be resolved.
+
+#### Problem description
+
+When compiling `compiler/config.k`, references like `device::device_name` failed with "Unknown symbol":
+1. `device` is an import alias for `compiler.device.config`
+2. `compiler.device.config` re-exports `hardware.config` (where `device_name` is actually defined)
+3. The C++ backend doesn't understand module re-exports - they must be resolved by the frontend
+
+The Haskell frontend resolves all qualified names to their actual locations before emitting to ParseTree. When it sees `device::device_name`, it resolves it through the import chain to `hardware::config::device_name`.
+
+#### Solution implemented
+
+Three key changes were made:
+
+1. **Added import alias tracking** (`emit.rs`):
+   - `import_aliases: HashMap<String, Vec<String>>` - tracks import aliases per file
+   - For `import compiler.device.config as device`, maps `"device"` → `["compiler", "device", "config"]`
+
+2. **Added module re-export tracking** (`emit.rs`):
+   - `module_reexports: HashMap<Vec<String>, Vec<Vec<String>>>` - tracks which modules re-export others
+   - For `module compiler.device.config { module hardware.config }`, records that `compiler.device.config` re-exports `hardware.config`
+
+3. **Made CodeGen persistent across files** (`main.rs`):
+   - Added `codegen: CodeGen` to `CompileContext`
+   - Changed from `kanagawa_codegen::generate(&hir)` to `kanagawa_codegen::generate_with_codegen(&mut self.codegen, &hir)`
+   - This preserves re-export information across files
+
+4. **Implemented re-export resolution** (`emit.rs:resolve_import_alias`):
+   - When resolving `["device", "device_name"]`, first expand the alias to `["compiler", "device", "config", "device_name"]`
+   - Then check if `compiler.device.config` has re-exports
+   - If it re-exports `hardware.config`, resolve to `["hardware", "config", "device_name"]`
+   - Skip self-references from `ModuleDiff { include: self, exclude: other }` syntax
+
+#### Key learnings for future development
+
+1. **CodeGen must be persistent across files**: Module re-exports are recorded when processing module A, but needed when processing module B. A new CodeGen for each file loses this information.
+
+2. **The C++ backend doesn't handle module re-exports**: The Haskell frontend returns `nullPtr` for `ModuleDiff` exports - all symbol resolution happens before ParseTree emission.
+
+3. **Import alias != direct module reference**: When user writes `device::device_name`, we must follow the full chain: import alias → module → re-exports → actual symbol location.
+
+4. **ModuleDiff self-references must be skipped**: The syntax `module A { module A \ B, module B }` creates a ModuleDiff that includes A (itself). When looking for re-exports, skip the self-reference.
+
+### Files modified
+
+- `crates/kanagawa_codegen/src/emit.rs`: Added import_aliases, module_reexports maps, updated resolve_import_alias
+- `crates/kanagawa_codegen/src/lib.rs`: Added generate_with_codegen function
+- `crates/kanagawa_driver/src/main.rs`: Added codegen field to CompileContext, use generate_with_codegen
+
+### Current status
+
+- Device namespace resolution: FIXED
+- Base library parsing: Works (29 files)
+- Backend Codegen: Fails with `decltype` error (separate issue)
+
+### Remaining gaps for end-to-end demo
+
+| Gap | Priority | Description |
+|-----|----------|-------------|
+| `decltype` expression | HIGH | `decltype(x)` used in static if conditions and template params. Backend reports "Undefined function: decltype" |
+| `.options` relative import | MEDIUM | `control/loop.k` and `control/wait.k` import `.options` which isn't found |
+| Template `auto` types | MEDIUM | Many library functions use `auto` params that require inference before codegen |
+| Class method emission | LOW | RTTI workaround skips classes with methods |
+| Function types | LOW | RTTI workaround skips function/closure types |
+| Enum variants | LOW | RTTI workaround skips non-empty enums |
+
+### Next steps
+
+1. ~~**Fix `decltype` expression emission**: The highest priority gap. Used in `debug/print.k` and `control/loop.k`.~~ **DONE** - see section below
+2. **Fix `.options` relative import**: Module-relative imports like `.options` need proper resolution.
+3. Consider if the demo can use a simpler test file that avoids these gaps.
+
+---
+
+## 2025-12-16 (decltype resolution fix)
+
+### decltype expression resolution - FIXED
+
+Fixed the `decltype` expression handling where the backend reported "Undefined function: decltype".
+
+#### Problem description
+
+When compiling files using `decltype(expr)` type syntax, the backend reported "Undefined function: decltype". This occurred because:
+
+1. During HIR lowering, `decltype` was converted to `Ty::Unresolved`
+2. The unresolved type was then emitted to codegen, causing the backend to fail
+
+#### How Haskell frontend handles decltype
+
+Looking at the Haskell frontend:
+- `ParseTree.hs` has `Decltype{} -> undefined` - decltype should NEVER reach ParseTree emission
+- `Type.hs` has `infer (DecltypeF _ a) = TType $ typeOf a` - during type inference, decltype resolves to the type of its expression
+
+This means decltype is resolved BEFORE reaching codegen. The Rust frontend needs to do the same.
+
+#### Solution implemented
+
+Updated `crates/kanagawa_hir/src/lower.rs` to resolve decltype during lowering:
+
+```rust
+ast::Type::Decltype(d) => {
+    // Decltype resolves to the type of its expression.
+    // This matches the Haskell frontend behavior where:
+    // infer (DecltypeF _ a) = TType $ typeOf a
+    let expr = self.lower_expr(&d.expr);
+    expr.ty.clone()
+}
+```
+
+This approach works because:
+1. When lowering `decltype(expr)`, we first lower the expression
+2. The lowered expression has its type computed/inferred
+3. We extract that type and use it directly, eliminating the decltype wrapper
+
+#### Key learnings
+
+1. **Decltype should be resolved early**: Unlike some other constructs that can pass through to the backend, decltype must be resolved before codegen because the C++ backend doesn't have a `Decltype` ParseTree node.
+
+2. **Match Haskell semantics**: The Haskell frontend pattern of resolving decltype during type inference is the correct approach. For the Rust frontend, resolving during lowering achieves the same result since expression types are computed at that point.
+
+3. **No new Ty variant needed**: Initially planned to add a `Ty::Decltype(Box<HirExpr>)` variant, but this was unnecessary. Direct resolution during lowering is simpler and matches the Haskell behavior.
+
+### Files modified
+
+- `crates/kanagawa_hir/src/lower.rs`: Updated `lower_type` to resolve decltype to the type of its expression
+
+### Testing
+
+Verified the fix with multiple test files:
+- `/tmp/claude/simple_demo.k` - basic demo without decltype (baseline)
+- `/tmp/claude/decltype_test.k` - dedicated decltype test cases
+- `test/syntax/type-identifier.k` - contains `decltype(foo)` usage
+- `test/syntax/template.k` - contains decltype in templates
+- `test/syntax/lambdas.k` - contains decltype with lambdas
+- `test/syntax/memory.k` - contains decltype with memory types
+
+All tests compile successfully.
+
+### Updated gaps for end-to-end demo
+
+| Gap | Priority | Status |
+|-----|----------|--------|
+| `decltype` expression | HIGH | **FIXED** |
+| `.options` relative import | MEDIUM | **FIXED** - see below |
+| `auto` return types | MEDIUM | **FIXED** - see below |
+| `auto` parameters (template) | MEDIUM | Pending |
+| Class method emission | LOW | Workaround in place |
+| Function types | LOW | Workaround in place |
+| Enum variants | LOW | Workaround in place |
+
+### Next steps
+
+1. ~~**Fix `.options` relative import**: Module-relative imports like `.options` need proper resolution.~~ **DONE**
+2. **Fix `auto` parameters**: Functions with `auto` parameters need template conversion.
+3. **Test with compiler files**: Try compiling the actual compiler source files to see what gaps remain.
+
+---
+
+## 2025-12-16 (.options synthetic module fix)
+
+### `.options` synthetic module resolution - FIXED
+
+Fixed the `.options` synthetic module import that was being silently skipped.
+
+#### Problem description
+
+Files using `import .options as opt` (like `library/control/wait.k`) were having the import silently skipped because:
+1. `.options` is a **synthetic module** (not a real file)
+2. The Haskell frontend generates this module dynamically with compiler options
+3. The Rust frontend was trying to find it as a file and failing silently
+
+#### How Haskell frontend handles `.options`
+
+In Haskell:
+- `optionsSpecialModule = ".options"` - defined as a special module name
+- `buildOptionsSpecialModule` generates synthetic content that:
+  - Imports `compiler.options`
+  - Defines compiler option values (backend, stall, optimize, etc.)
+
+#### Solution implemented
+
+Two changes were made:
+
+1. **Driver (`main.rs`)**: Added special handling for `.options` imports:
+```rust
+if module_path == ".options" {
+    // Load compiler.options instead
+    if let Some(options_path) = self.resolve_module("compiler.options", file_dir) {
+        let _ = self.parse_file_recursive(&options_path)?;
+    }
+    continue;
+}
+```
+
+2. **Codegen (`emit.rs`)**: Rewrite `.options` import aliases to `compiler.options`:
+```rust
+// Handle synthetic .options module - rewrite to compiler.options
+if ns_parts == vec![".options".to_string()] || import.namespace == "@.options@" {
+    ns_parts = vec!["compiler".to_string(), "options".to_string()];
+}
+```
+
+This ensures that when code references `opt::backend` (via `import .options as opt`), it correctly resolves to `compiler::options::backend`.
+
+### Files modified
+
+- `crates/kanagawa_driver/src/main.rs`: Handle `.options` as synthetic module
+- `crates/kanagawa_codegen/src/emit.rs`: Rewrite `.options` aliases to `compiler.options`
+
+---
+
+## 2025-12-16 (auto return type inference)
+
+### `auto` return type inference - FIXED
+
+Fixed the `auto` return type inference for functions.
+
+#### Problem description
+
+Functions with `auto` return type (e.g., `inline auto add(int32 a, int32 b) { return a + b; }`) were failing with "auto type requires type resolution before emission".
+
+#### How Haskell frontend handles auto return types
+
+In Haskell's `Type.hs`:
+```haskell
+infer FunctionF{..} = funcType funcKind funcAttr (returnType funcReturnType) (params funcParams)
+  where
+    returnType Auto =
+        maybe TVoid typeOf $ find returnExp $ unfix body
+```
+
+The return type is inferred from the return statements in the function body.
+
+#### Solution implemented
+
+Added return type inference during HIR lowering (`lower.rs`):
+
+```rust
+// If return type is Auto, try to infer from return statements in the body
+if matches!(return_ty, Ty::Auto) {
+    if let Some(ref body) = body {
+        if let Some(inferred_ty) = self.infer_return_type_from_body(body) {
+            return_ty = inferred_ty;
+        } else {
+            // No return statements found - default to Void
+            return_ty = Ty::Void;
+        }
+    }
+}
+```
+
+The `infer_return_type_from_body` method recursively searches the function body for return statements and extracts the type of the return expression.
+
+### Files modified
+
+- `crates/kanagawa_hir/src/lower.rs`: Added auto return type inference
+
+### Updated gaps for end-to-end demo
+
+| Gap | Priority | Status |
+|-----|----------|--------|
+| `decltype` expression | HIGH | **FIXED** |
+| `.options` relative import | MEDIUM | **FIXED** |
+| `auto` return types | MEDIUM | **FIXED** |
+| `auto` parameters (template) | MEDIUM | **FIXED** - see below |
+| Class method emission | LOW | Workaround in place |
+| Function types | LOW | Workaround in place |
+| Enum variants | LOW | Workaround in place |
+
+---
+
+## 2025-12-16 (auto parameter template conversion)
+
+### `auto` parameter template conversion - FIXED
+
+Implemented "abbreviated function template" syntax where functions with `auto` parameters are converted to templates.
+
+#### Problem description
+
+Functions with `auto` parameters (e.g., `inline void print(auto x)`) failed with "auto type requires type resolution before emission" because the `Ty::Auto` type was reaching codegen without resolution.
+
+#### How Haskell frontend handles auto parameters
+
+In `Function.hs`, the `abbreviatedFunctionTemplate` function:
+1. Finds all parameters with `auto` type (`isAuto . paramType`)
+2. Creates template type parameters named `{param_name}$T`
+3. Wraps the function in a `TemplateF` node
+4. Replaces `auto` param types with references to the template type params
+
+#### Solution implemented
+
+Added `maybe_wrap_function_in_template` method in `lower.rs`:
+
+```rust
+fn maybe_wrap_function_in_template(&mut self, mut func: HirFunction) -> HirItem {
+    // Find parameters with Ty::Auto
+    let auto_params: Vec<(usize, String)> = func.params
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| matches!(p.ty, Ty::Auto))
+        .map(|(i, p)| (i, p.name.clone()))
+        .collect();
+
+    if auto_params.is_empty() {
+        return HirItem::Function(func);
+    }
+
+    // Create template type parameters for each auto param
+    let mut template_params = Vec::new();
+    for (idx, param_name) in &auto_params {
+        let template_param_name = format!("{}$T", param_name);
+        // ... create HirTemplateParam::Type
+        // Update func.params[idx].ty to Ty::Reference(vec![template_param_name])
+    }
+
+    // Wrap function in HirTemplate
+    HirItem::Template(HirTemplate { ... })
+}
+```
+
+The transformation:
+- `inline void print(auto x)` becomes effectively:
+- `template<typename x$T> inline void print(x$T x)`
+
+#### Files modified
+
+- `crates/kanagawa_hir/src/lower.rs`: Added `maybe_wrap_function_in_template`
+- `crates/kanagawa_hir/src/def.rs`: Added `DefKind::Template` variant
+
+#### Testing
+
+Successfully compiles:
+- `/tmp/claude/test_auto.k` - test file with `auto` params and return types
+- `library/debug/print.k` - uses `inline void print(auto x)`
+- `library/control/wait.k` - uses `inline auto wait(() -> T fn)`

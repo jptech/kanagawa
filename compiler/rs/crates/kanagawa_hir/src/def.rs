@@ -39,6 +39,8 @@ pub enum DefKind {
     Variable,
     /// Type definition (struct, enum, class, union, alias).
     Type,
+    /// Template definition.
+    Template,
     /// Template parameter (type or non-type).
     TemplateParam,
     /// Function parameter.

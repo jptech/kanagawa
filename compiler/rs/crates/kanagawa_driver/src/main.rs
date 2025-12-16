@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use kanagawa_codegen::CodeGen;
 use kanagawa_parsetree::{sys, BackendOptions, build_list};
 use kanagawa_syntax as syntax;
 use std::{
@@ -18,6 +19,8 @@ struct CompileContext {
     parsed_files: HashMap<PathBuf, Vec<sys::ParseTreeNodePtr>>,
     /// Files currently being parsed (for cycle detection).
     in_progress: HashSet<PathBuf>,
+    /// Shared code generator (preserves module re-exports across files).
+    codegen: CodeGen,
 }
 
 impl CompileContext {
@@ -27,16 +30,30 @@ impl CompileContext {
             target_device,
             parsed_files: HashMap::new(),
             in_progress: HashSet::new(),
+            codegen: CodeGen::new(),
         }
     }
 
     /// Resolve a module path to a file path.
     /// Module path like "control.async" -> "control/async.k"
+    /// Relative imports like ".options" are resolved relative to the importing file.
     /// Returns None for synthetic modules like ".cmdargs" which are handled specially.
     fn resolve_module(&self, module_path: &str, from_dir: &Path) -> Option<PathBuf> {
         // Handle synthetic modules - these are generated, not loaded from files
         if module_path == ".cmdargs" {
             // Synthetic module - handled specially in do_parse_file
+            return None;
+        }
+
+        // Handle relative imports (starting with .)
+        // ".options" from "control/loop.k" -> "control/options.k"
+        if module_path.starts_with('.') {
+            let relative_path = module_path.trim_start_matches('.').replace('.', "/") + ".k";
+            let full_path = from_dir.join(&relative_path);
+            if full_path.exists() {
+                return Some(full_path);
+            }
+            // Relative import not found - this might be optional
             return None;
         }
 
@@ -66,6 +83,49 @@ impl CompileContext {
         }
 
         None
+    }
+
+    /// Load device configuration files from the device directory.
+    /// The device directory is library/device/<device-name>/
+    fn load_device_config(&mut self) -> Result<()> {
+        for import_dir in &self.import_dirs.clone() {
+            let device_dir = import_dir.join("device").join(&self.target_device);
+            if !device_dir.exists() {
+                continue;
+            }
+
+            // Load hardware/config.k first (main device configuration)
+            let config_path = device_dir.join("hardware").join("config.k");
+            if config_path.exists() {
+                if std::env::var("KANAGAWA_DEBUG").is_ok() {
+                    eprintln!("Loading device config: {}", config_path.display());
+                }
+                self.parse_file_recursive(&config_path)?;
+            }
+
+            // Load numeric/float32/operator.k (floating point operations)
+            let float_op_path = device_dir.join("numeric").join("float32").join("operator.k");
+            if float_op_path.exists() {
+                if std::env::var("KANAGAWA_DEBUG").is_ok() {
+                    eprintln!("Loading float ops: {}", float_op_path.display());
+                }
+                self.parse_file_recursive(&float_op_path)?;
+            }
+
+            // Load hardware/dsp.k (DSP configuration)
+            let dsp_path = device_dir.join("hardware").join("dsp.k");
+            if dsp_path.exists() {
+                if std::env::var("KANAGAWA_DEBUG").is_ok() {
+                    eprintln!("Loading DSP config: {}", dsp_path.display());
+                }
+                self.parse_file_recursive(&dsp_path)?;
+            }
+
+            // Found and loaded device config
+            return Ok(());
+        }
+
+        Err(anyhow!("Device configuration not found for target: {}", self.target_device))
     }
 
     /// Parse a file and all its imports recursively.
@@ -118,8 +178,9 @@ impl CompileContext {
         let ast = kanagawa_ast::lower_file(&syntax_node)
             .map_err(|e| anyhow!("AST lowering failed for {}: {:?}", path.display(), e))?;
 
-        // Step 3: Parse imports first
-        let mut all_nodes = Vec::new();
+        // Step 3: Parse imports first (to populate the cache)
+        // NOTE: We don't collect import nodes here - they'll be collected from the cache
+        // at the end to avoid duplicates when the same module is imported multiple times.
         for import in &ast.imports {
             let module_path = import.name.segments.iter()
                 .map(|s| s.text.as_str())
@@ -133,9 +194,20 @@ impl CompileContext {
                 continue;
             }
 
+            // Handle .options as a synthetic module that re-exports compiler.options
+            // The Haskell frontend generates this module dynamically with compiler options.
+            // For now, we resolve it to compiler.options directly.
+            if module_path == ".options" {
+                // Load compiler.options instead
+                if let Some(options_path) = self.resolve_module("compiler.options", file_dir) {
+                    let _ = self.parse_file_recursive(&options_path)?;
+                }
+                continue;
+            }
+
             if let Some(import_path) = self.resolve_module(&module_path, file_dir) {
-                let import_nodes = self.parse_file_recursive(&import_path)?;
-                all_nodes.extend(import_nodes);
+                // Parse the import (this populates the cache), but don't collect nodes here
+                let _ = self.parse_file_recursive(&import_path)?;
             } else {
                 eprintln!("  Warning: Could not resolve import '{}' in {}", module_path, path.display());
             }
@@ -167,14 +239,27 @@ impl CompileContext {
         }
 
         // Step 5: Generate ParseTree from HIR
-        let parsetree = kanagawa_codegen::generate(&hir)
+        // Only return this file's ParseTree, not imports
+        // Use the shared codegen to preserve module re-exports across files
+        let parsetree = kanagawa_codegen::generate_with_codegen(&mut self.codegen, &hir)
             .map_err(|e| anyhow!("Code generation failed for {}: {:?}", path.display(), e))?;
 
+        let mut nodes = Vec::new();
         if !parsetree.is_null() {
-            all_nodes.push(parsetree);
+            nodes.push(parsetree);
         }
 
-        Ok(all_nodes)
+        Ok(nodes)
+    }
+
+    /// Get all parsed nodes from the cache. This should be called after all files
+    /// have been parsed to collect unique nodes for codegen.
+    fn collect_all_nodes(&self) -> Vec<sys::ParseTreeNodePtr> {
+        let mut all_nodes = Vec::new();
+        for nodes in self.parsed_files.values() {
+            all_nodes.extend(nodes.iter().cloned());
+        }
+        all_nodes
     }
 }
 
@@ -419,18 +504,15 @@ fn main() -> Result<()> {
         // Create compile context with import directories
         let mut ctx = CompileContext::new(import_dirs.clone(), target_device.clone());
 
-        // Collect all parse tree nodes
-        let mut all_nodes: Vec<sys::ParseTreeNodePtr> = Vec::new();
-
         // Step 1: Parse base.k first (unless --no-implicit-base)
+        // The base library defines core types like compiler.device.schema
         if !no_implicit_base && !import_dirs.is_empty() {
             let base_path = import_dirs[0].join("base.k");
             if base_path.exists() {
                 println!("Parsing base library: {}", base_path.display());
                 match ctx.parse_file_recursive(&base_path) {
-                    Ok(nodes) => {
-                        println!("  Parsed {} nodes from base library", nodes.len());
-                        all_nodes.extend(nodes);
+                    Ok(_) => {
+                        println!("  Base library parsed (nodes cached)");
                     }
                     Err(e) => {
                         eprintln!("Warning: Failed to parse base library: {}", e);
@@ -441,13 +523,26 @@ fn main() -> Result<()> {
             }
         }
 
+        // Step 1.5: Load device configuration (after base library, since device config
+        // imports compiler.device.schema which is defined in the base library)
+        if !no_implicit_base && !import_dirs.is_empty() {
+            println!("Loading device configuration: {}", target_device);
+            match ctx.load_device_config() {
+                Ok(_) => {
+                    println!("  Device configuration loaded");
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to load device configuration: {}", e);
+                }
+            }
+        }
+
         // Step 2: Parse all user files and their imports
         for file in &files {
             println!("Compiling: {}", file.display());
             match ctx.parse_file_recursive(file) {
-                Ok(nodes) => {
-                    println!("  Generated {} nodes", nodes.len());
-                    all_nodes.extend(nodes);
+                Ok(_) => {
+                    println!("  File parsed (nodes cached)");
                 }
                 Err(e) => {
                     return Err(anyhow!("Compilation failed for {}: {}", file.display(), e));
@@ -455,13 +550,17 @@ fn main() -> Result<()> {
             }
         }
 
-        println!("Total nodes collected: {}", all_nodes.len());
+        // Step 3: Collect all unique nodes from the cache
+        let all_nodes = ctx.collect_all_nodes();
+        // Filter out null pointers
+        let non_null_nodes: Vec<_> = all_nodes.iter().filter(|n| !n.is_null()).cloned().collect();
+        println!("Total nodes collected: {} non-null of {} (from {} files)", non_null_nodes.len(), all_nodes.len(), ctx.parsed_files.len());
 
         // Build the final root list from all nodes
         if std::env::var("KANAGAWA_DEBUG").is_ok() {
-            eprintln!("Building root list...");
+            eprintln!("Building root list from {} non-null nodes...", non_null_nodes.len());
         }
-        let root = build_list(&all_nodes);
+        let root = build_list(&non_null_nodes);
         if std::env::var("KANAGAWA_DEBUG").is_ok() {
             eprintln!("Root list built, calling backend codegen...");
         }

@@ -147,7 +147,13 @@ impl Lowerer {
 
     fn lower_decl(&mut self, decl: &ast::Decl) -> Result<HirItem, LowerError> {
         match decl {
-            ast::Decl::Function(f) => Ok(HirItem::Function(self.lower_function(f)?)),
+            ast::Decl::Function(f) => {
+                let func = self.lower_function(f)?;
+                // Check if this function has auto parameters - if so, convert to template
+                // This matches the Haskell frontend's "abbreviated function template" pattern:
+                // inline void print(auto x) -> template<typename x$T> inline void print(x$T x)
+                Ok(self.maybe_wrap_function_in_template(func))
+            }
             ast::Decl::Variable(v) => Ok(HirItem::Variable(self.lower_variable(v)?)),
             ast::Decl::Struct(s) => Ok(HirItem::Struct(self.lower_struct(s)?)),
             ast::Decl::Enum(e) => Ok(HirItem::Enum(self.lower_enum(e)?)),
@@ -177,7 +183,7 @@ impl Lowerer {
 
     fn lower_function(&mut self, func: &ast::FunctionDecl) -> Result<HirFunction, LowerError> {
         let name = func.name.text.clone();
-        let return_ty = self.lower_type(&func.return_type);
+        let mut return_ty = self.lower_type(&func.return_type);
 
         // Create function definition
         let def_id = self.symbols.define(
@@ -210,6 +216,23 @@ impl Lowerer {
 
         let attrs = self.lower_attrs(&func.attrs);
 
+        // Lower body (if present)
+        let body = func.body.as_ref().map(|b| self.lower_block(b));
+
+        // If return type is Auto, try to infer from return statements in the body
+        // This matches the Haskell frontend behavior where:
+        // returnType Auto = maybe TVoid typeOf $ find returnExp $ unfix body
+        if matches!(return_ty, Ty::Auto) {
+            if let Some(ref body) = body {
+                if let Some(inferred_ty) = self.infer_return_type_from_body(body) {
+                    return_ty = inferred_ty;
+                } else {
+                    // No return statements found - default to Void
+                    return_ty = Ty::Void;
+                }
+            }
+        }
+
         let func_ty = Ty::Function {
             kind: FunctionKind::Free,
             attrs: attrs.clone(),
@@ -221,9 +244,6 @@ impl Lowerer {
         if let Some(entry) = self.symbols.get_mut(def_id) {
             entry.ty = func_ty.clone();
         }
-
-        // Lower body (if present)
-        let body = func.body.as_ref().map(|b| self.lower_block(b));
 
         self.symbols.pop_scope();
 
@@ -244,6 +264,133 @@ impl Lowerer {
             params,
             body,
         })
+    }
+
+    /// Check if a function has auto parameters and wrap it in a template if so.
+    /// This implements "abbreviated function template" syntax:
+    /// `inline void print(auto x)` becomes `template<typename x$T> inline void print(x$T x)`
+    fn maybe_wrap_function_in_template(&mut self, mut func: HirFunction) -> HirItem {
+        // Find parameters with Ty::Auto
+        let auto_params: Vec<(usize, String)> = func.params
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| matches!(p.ty, Ty::Auto))
+            .map(|(i, p)| (i, p.name.clone()))
+            .collect();
+
+        if auto_params.is_empty() {
+            // No auto params - return as regular function
+            return HirItem::Function(func);
+        }
+
+        // Create template type parameters for each auto param
+        // Named "{param_name}$T" following Haskell convention
+        let mut template_params = Vec::new();
+        for (idx, param_name) in &auto_params {
+            let template_param_name = format!("{}$T", param_name);
+            let template_def_id = self.symbols.define(
+                &template_param_name,
+                DefKind::TemplateParam,
+                Ty::Template,
+                func.span,
+            );
+            template_params.push(HirTemplateParam::Type {
+                span: func.span,
+                def_id: template_def_id,
+                name: template_param_name.clone(),
+                default: None,
+            });
+
+            // Update the parameter's type to reference the template type parameter
+            // Use Ty::Reference with the template param name
+            func.params[*idx].ty = Ty::Reference(vec![template_param_name]);
+        }
+
+        // Rebuild the function type with updated parameter types
+        let param_tys: Vec<_> = func.params
+            .iter()
+            .map(|p| TyFuncParam {
+                attrs: Vec::new(),
+                ty: p.ty.clone(),
+                name: Some(p.name.clone()),
+            })
+            .collect();
+
+        func.ty = Ty::Function {
+            kind: func.kind.clone(),
+            attrs: func.attrs.clone(),
+            return_ty: Box::new(func.return_ty.clone()),
+            params: param_tys,
+        };
+
+        // Update the symbol table with the new function type
+        if let Some(entry) = self.symbols.get_mut(func.def_id) {
+            entry.ty = func.ty.clone();
+        }
+
+        // Create a template definition wrapping the function
+        let template_def_id = self.symbols.define(
+            &func.name,
+            DefKind::Template,
+            Ty::Template,
+            func.span,
+        );
+
+        HirItem::Template(HirTemplate {
+            span: func.span,
+            def_id: template_def_id,
+            params: template_params,
+            item: Box::new(HirItem::Function(func)),
+        })
+    }
+
+    /// Infer return type from a function body by looking at return statements.
+    /// Returns the type of the first return statement found, or None if no returns.
+    fn infer_return_type_from_body(&self, body: &HirBlock) -> Option<Ty> {
+        self.find_return_type_in_stmts(&body.stmts)
+    }
+
+    fn find_return_type_in_stmts(&self, stmts: &[HirStmt]) -> Option<Ty> {
+        for stmt in stmts {
+            if let Some(ty) = self.find_return_type_in_stmt(stmt) {
+                return Some(ty);
+            }
+        }
+        None
+    }
+
+    fn find_return_type_in_stmt(&self, stmt: &HirStmt) -> Option<Ty> {
+        match stmt {
+            HirStmt::Return(ret) => {
+                // Get type from the return expression
+                ret.value.as_ref().map(|e| e.ty.clone())
+            }
+            HirStmt::Block(block) => {
+                self.find_return_type_in_stmts(&block.stmts)
+            }
+            HirStmt::If(if_stmt) => {
+                // Check both branches
+                if let Some(ty) = self.find_return_type_in_stmt(&if_stmt.then_branch) {
+                    return Some(ty);
+                }
+                if let Some(else_branch) = &if_stmt.else_branch {
+                    return self.find_return_type_in_stmt(else_branch);
+                }
+                None
+            }
+            HirStmt::StaticIf(static_if) => {
+                // Check both branches of static if
+                if let Some(ty) = self.find_return_type_in_stmt(&static_if.then_branch) {
+                    return Some(ty);
+                }
+                if let Some(else_branch) = &static_if.else_branch {
+                    return self.find_return_type_in_stmt(else_branch);
+                }
+                None
+            }
+            // Other statements don't contain return statements directly
+            _ => None,
+        }
     }
 
     fn lower_param(&mut self, param: &ast::FunctionParam) -> Result<HirParam, LowerError> {
@@ -1237,9 +1384,12 @@ impl Lowerer {
                 // Typename is for dependent types - just mark as unresolved
                 Ty::Unresolved
             }
-            ast::Type::Decltype(_) => {
-                // TODO: Evaluate decltype
-                Ty::Unresolved
+            ast::Type::Decltype(d) => {
+                // Decltype resolves to the type of its expression.
+                // This matches the Haskell frontend behavior where:
+                // infer (DecltypeF _ a) = TType $ typeOf a
+                let expr = self.lower_expr(&d.expr);
+                expr.ty.clone()
             }
         }
     }

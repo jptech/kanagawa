@@ -48,7 +48,13 @@ pub(crate) fn emit_variable(cg: &mut CodeGen, var: &HirVariable) -> CodeGenResul
     // Build declaration flags
     let flags = emit_decl_flags(&var.flags);
 
-    let namespace = cg.namespace_scope();
+    // NOTE: We pass null for namespace scope because the file is wrapped in ParseNamespace nodes.
+    // Passing both would apply the namespace twice, causing duplicate symbol errors.
+    let namespace = std::ptr::null();
+
+    if std::env::var("KANAGAWA_DEBUG_DECL").is_ok() {
+        eprintln!("emit_variable: {} in namespace {:?}", var.name, cg.namespace);
+    }
 
     // ParseDeclare signature: (attributeList, type, name, val, flags, namespaceScope)
     Ok(unsafe { sys::ParseDeclare(std::ptr::null_mut(), ty, name, init, flags, namespace) })
@@ -177,7 +183,8 @@ impl CodeGen {
         // The C++ backend expects a NodeList, not null
         let attrs = build_list(&[]);
 
-        let namespace = self.namespace_scope();
+        // Function parameters are inside the function, don't need namespace scope
+        let namespace = std::ptr::null();
 
         // ParseFunctionParam signature: (attributes, type, name, namespace)
         Ok(unsafe { sys::ParseFunctionParam(attrs, ty, name, namespace) })
@@ -259,6 +266,7 @@ impl CodeGen {
             eprintln!("emit_struct: members_list = {:?}", members_list);
         }
 
+        // Structs register themselves during construction, so they need explicit namespace scope.
         let namespace = self.namespace_scope();
         if std::env::var("KANAGAWA_DEBUG").is_ok() {
             eprintln!("emit_struct: namespace = {:?}", namespace);
@@ -293,7 +301,8 @@ impl CodeGen {
             std::ptr::null_mut()
         };
 
-        let namespace = self.namespace_scope();
+        // Struct members are inside the struct, don't need namespace scope
+        let namespace = std::ptr::null();
 
         // ParseDeclare signature: (attributeList, type, name, val, flags, namespaceScope)
         // Struct members don't have attributes or special flags typically
@@ -327,16 +336,21 @@ impl CodeGen {
 
             let variant_name = self.identifier(&variant.name);
             // C++ backend requires a valid IntegerNode or UnaryOpNode for enum constant values.
-            // Always generate the value directly using ParseDecimalLiteral to test if emit_expr is the issue.
+            // Always generate the value directly using ParseDecimalLiteral.
             let val_str = i.to_string();
             let val_ptr = self.intern(&val_str);
             let variant_value = unsafe { sys::ParseDecimalLiteral(val_ptr) };
+
+            // CRITICAL: Set the type on the integer literal. The C++ backend's
+            // IntegerNode::TypeCheck asserts that _frontEndType is set.
+            unsafe { sys::SetNodeType(variant_value, base_ty) };
+
             if std::env::var("KANAGAWA_DEBUG").is_ok() {
                 eprintln!("emit_enum: variant_name={:?}, variant_value={:?}", variant_name, variant_value);
             }
 
-            // Try with simpler scope: just use namespace_scope() like struct members do
-            let namespace = self.namespace_scope();
+            // Enum constants are inside the enum, don't need namespace scope
+            let namespace = std::ptr::null();
             if std::env::var("KANAGAWA_DEBUG").is_ok() {
                 eprintln!("emit_enum: namespace for {} = {:?}", variant.name, namespace);
             }
@@ -356,28 +370,14 @@ impl CodeGen {
             eprintln!("emit_enum: variants_list = {:?}", variants_list);
         }
 
-        // Use namespace_scope() like structs do
+        // Enums register themselves during construction (before TypeCheck), so they
+        // need the explicit namespace scope, not the ParseNamespace wrapper approach.
         let namespace = self.namespace_scope();
 
         if std::env::var("KANAGAWA_DEBUG").is_ok() {
             eprintln!("emit_enum: namespace = {:?}", namespace);
             eprintln!("emit_enum: calling ParseEnum with name={:?}, base_ty={:?}, variants_list={:?}, scope={:?}",
                 name, base_ty, variants_list, namespace);
-        }
-
-        // WORKAROUND: There's a known issue with ParseEnum and non-empty variants
-        // where the C++ backend crashes with a dynamic_cast assertion failure.
-        // For now, skip non-empty enums until this is resolved.
-        // See: https://github.com/your-org/kanagawa/issues/XXX
-        if !e.variants.is_empty() {
-            if std::env::var("KANAGAWA_DEBUG").is_ok() {
-                eprintln!("emit_enum: WARNING - skipping enum with variants due to known ParseEnum crash");
-            }
-            // Return Unsupported error to skip this item gracefully
-            return Err(CodeGenError::Unsupported(format!(
-                "enum {} with {} variants (ParseEnum crash workaround)",
-                e.name, e.variants.len()
-            )));
         }
 
         let result = unsafe { sys::ParseEnum(name, base_ty, variants_list, namespace) };
@@ -434,6 +434,7 @@ impl CodeGen {
             eprintln!("emit_class: members list built");
         }
 
+        // Classes register themselves during construction, so they need explicit namespace scope.
         let namespace = self.namespace_scope();
         if std::env::var("KANAGAWA_DEBUG").is_ok() {
             eprintln!("emit_class: namespace = {:?}", namespace);
@@ -490,6 +491,7 @@ impl CodeGen {
         }
         let members_list = build_list(&member_nodes);
 
+        // Unions register themselves during construction, so they need explicit namespace scope.
         let namespace = self.namespace_scope();
         let scope_str = u.name.clone();
 
@@ -511,6 +513,7 @@ impl CodeGen {
         if std::env::var("KANAGAWA_DEBUG").is_ok() {
             eprintln!("emit_using: ty={:?}", ty);
         }
+        // Typedefs may register during construction, so use explicit namespace scope.
         let namespace = self.namespace_scope();
         let scope_str = u.name.clone();
         let scope_ptr = self.intern(&scope_str);
