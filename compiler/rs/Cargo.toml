@@ -9,6 +9,8 @@ members = [
     "crates/kanagawa_ast",
     "crates/kanagawa_hir",
     "crates/kanagawa_typeck",
+    "crates/kanagawa_resolve",
+    "crates/kanagawa_sema",
 ]
 
 [workspace.package]

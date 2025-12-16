@@ -1,0 +1,12 @@
+[package]
+name = "kanagawa_sema"
+version = "0.1.0"
+edition.workspace = true
+description = "Semantic validation for the Kanagawa compiler"
+
+[dependencies]
+kanagawa_hir = { path = "../kanagawa_hir" }
+
+[dev-dependencies]
+kanagawa_syntax = { path = "../kanagawa_syntax" }
+kanagawa_ast = { path = "../kanagawa_ast" }

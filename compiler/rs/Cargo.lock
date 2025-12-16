@@ -158,6 +158,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "kanagawa_resolve"
+version = "0.1.0"
+dependencies = [
+ "kanagawa_ast",
+ "kanagawa_hir",
+ "kanagawa_syntax",
+ "thiserror",
+]
+
+[[package]]
+name = "kanagawa_sema"
+version = "0.1.0"
+dependencies = [
+ "kanagawa_ast",
+ "kanagawa_hir",
+ "kanagawa_syntax",
+]
+
+[[package]]
 name = "kanagawa_syntax"
 version = "0.1.0"
 dependencies = [
