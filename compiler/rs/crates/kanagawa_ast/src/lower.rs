@@ -539,14 +539,18 @@ impl Lowerer {
             }
         }
 
-        // Find member name
+        // Kanagawa struct members use C-style `Type name;` syntax
+        // The member name is the identifier that comes AFTER the Type node
         let mut saw_type = false;
         for elem in node.children_with_tokens() {
             match elem {
-                rowan::NodeOrToken::Node(n) if n.kind() == SyntaxKind::Type => saw_type = true,
+                rowan::NodeOrToken::Node(n) if n.kind() == SyntaxKind::Type => {
+                    saw_type = true;
+                }
                 rowan::NodeOrToken::Token(t) if saw_type && t.kind() == SyntaxKind::Ident => {
+                    // This is the member name (after the type)
                     name = Some(Name::new(self.token_span(&t), t.text().to_string()));
-                    break;
+                    break; // Found the name, stop looking
                 }
                 _ => {}
             }
@@ -999,7 +1003,9 @@ impl Lowerer {
             }
         }
 
-        let exported_type = exported_type.ok_or(LowerError::MissingChild("export type"))?;
+        let exported_type = exported_type
+            .ok_or(LowerError::MissingChild("export type"))?;
+
         Ok(ExportDecl {
             span,
             attrs,

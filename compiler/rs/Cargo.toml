@@ -11,6 +11,7 @@ members = [
     "crates/kanagawa_typeck",
     "crates/kanagawa_resolve",
     "crates/kanagawa_sema",
+    "crates/kanagawa_codegen",
 ]
 
 [workspace.package]

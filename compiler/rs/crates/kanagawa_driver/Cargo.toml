@@ -11,6 +11,9 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+kanagawa_ast = { path = "../kanagawa_ast" }
+kanagawa_codegen = { path = "../kanagawa_codegen" }
+kanagawa_hir = { path = "../kanagawa_hir" }
 kanagawa_parsetree = { path = "../kanagawa_parsetree" }
 kanagawa_syntax = { path = "../kanagawa_syntax" }
 libloading = "0.8"

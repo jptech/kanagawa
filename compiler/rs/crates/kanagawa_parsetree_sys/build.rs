@@ -4,6 +4,21 @@ fn main() {
     // Regenerate if the headers change.
     println!("cargo:rerun-if-changed=../../../../compiler/cpp/parse_tree.h");
     println!("cargo:rerun-if-changed=../../../../compiler/cpp/options.h");
+    println!("cargo:rerun-if-env-changed=KANAGAWA_BACKEND_LIB");
+
+    // Link against the backend library if KANAGAWA_BACKEND_LIB is set
+    if let Ok(backend_lib) = env::var("KANAGAWA_BACKEND_LIB") {
+        let backend_path = PathBuf::from(&backend_lib);
+        if let Some(lib_dir) = backend_path.parent() {
+            println!("cargo:rustc-link-search=native={}", lib_dir.display());
+        }
+        // Extract library name from path (e.g., libkanagawa-backend.dylib -> kanagawa-backend)
+        if let Some(file_name) = backend_path.file_stem() {
+            let lib_name = file_name.to_string_lossy();
+            let lib_name = lib_name.strip_prefix("lib").unwrap_or(&lib_name);
+            println!("cargo:rustc-link-lib=dylib={}", lib_name);
+        }
+    }
 
     let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));

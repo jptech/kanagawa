@@ -3588,15 +3588,24 @@ impl<'a> Parser<'a> {
         self.expect(SyntaxKind::KwExtern);
         self.eat_trivia();
 
-        // `extern` is followed by a type (possibly with template args), then semicolon.
-        // Examples: `extern Foo;` or `extern Foo<T, N>;`
-        if !self.try_parse_type() {
-            self.error_here("Expected type after 'extern'");
-        }
-
-        self.eat_trivia_excluding_post_doc();
-        if self.at(SyntaxKind::Semi) {
-            self.bump();
+        // `extern` can be followed by:
+        // 1. A full declaration: `extern struct S { ... }`, `extern class C { ... }`, etc.
+        // 2. A type reference: `extern Foo;` or `extern Foo<T, N>;`
+        match self.current() {
+            SyntaxKind::KwStruct => self.parse_struct_item(),
+            SyntaxKind::KwClass => self.parse_class_item(),
+            SyntaxKind::KwUnion => self.parse_union_item(),
+            SyntaxKind::KwEnum => self.parse_enum_item(),
+            _ => {
+                // Parse as type reference: `extern Foo;` or `extern Foo<T, N>;`
+                if !self.try_parse_type() {
+                    self.error_here("Expected type or declaration after 'extern'");
+                }
+                self.eat_trivia_excluding_post_doc();
+                if self.at(SyntaxKind::Semi) {
+                    self.bump();
+                }
+            }
         }
 
         self.builder.finish_node();
@@ -3610,15 +3619,21 @@ impl<'a> Parser<'a> {
         self.expect(SyntaxKind::KwExport);
         self.eat_trivia();
 
-        // `export` is followed by a type (possibly with template args), then semicolon.
-        // Examples: `export Foo;` or `export Foo<T, N>;`
-        if !self.try_parse_type() {
-            self.error_here("Expected type after 'export'");
-        }
-
-        self.eat_trivia_excluding_post_doc();
-        if self.at(SyntaxKind::Semi) {
-            self.bump();
+        // `export` can be followed by:
+        // 1. A using declaration: `export using Foo = uint32;`
+        // 2. A type reference: `export Foo;` or `export Foo<T, N>;`
+        match self.current() {
+            SyntaxKind::KwUsing => self.parse_using_item(),
+            _ => {
+                // Parse as type reference: `export Foo;` or `export Foo<T, N>;`
+                if !self.try_parse_type() {
+                    self.error_here("Expected type or declaration after 'export'");
+                }
+                self.eat_trivia_excluding_post_doc();
+                if self.at(SyntaxKind::Semi) {
+                    self.bump();
+                }
+            }
         }
 
         self.builder.finish_node();

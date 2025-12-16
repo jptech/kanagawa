@@ -320,11 +320,12 @@ pub struct ExternDecl {
     pub extern_type: Type,
 }
 
-/// Export declaration: `export Foo;` or `export Foo<T, N>;`
+/// Export declaration: `export Foo;` or `export class Foo { ... }`
 #[derive(Debug, Clone)]
 pub struct ExportDecl {
     pub span: Span,
     pub attrs: Vec<Attribute>,
+    /// The type being exported, e.g. `Foo` in `export Foo;`
     pub exported_type: Type,
 }
 
