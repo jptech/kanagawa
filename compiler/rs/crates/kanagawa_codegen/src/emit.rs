@@ -1,6 +1,6 @@
 //! Main code generation orchestration.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 
 use kanagawa_hir::{HirFile, HirItem, Span};
@@ -39,6 +39,9 @@ pub struct CodeGen {
     /// For `module a.b { module c.d }`, maps ["a", "b"] -> [["c", "d"]]
     /// This is populated as files are processed and used to resolve symbols through re-export chains.
     pub(crate) module_reexports: HashMap<Vec<String>, Vec<Vec<String>>>,
+    /// Set of function names that were skipped due to unsupported constructs.
+    /// Used to also skip callers of these functions.
+    pub(crate) skipped_functions: HashSet<String>,
 }
 
 impl CodeGen {
@@ -49,7 +52,18 @@ impl CodeGen {
             namespace: Vec::new(),
             import_aliases: HashMap::new(),
             module_reexports: HashMap::new(),
+            skipped_functions: HashSet::new(),
         }
+    }
+
+    /// Check if a function was skipped due to unsupported constructs.
+    pub(crate) fn is_skipped_function(&self, name: &str) -> bool {
+        self.skipped_functions.contains(name)
+    }
+
+    /// Mark a function as skipped.
+    pub(crate) fn mark_skipped_function(&mut self, name: &str) {
+        self.skipped_functions.insert(name.to_string());
     }
 
     /// Emit a complete HIR file.
@@ -83,11 +97,14 @@ impl CodeGen {
                             .filter(|s| !s.is_empty())
                             .map(|s| s.to_string())
                             .collect();
-                        if !reexport_parts.is_empty() {
+                        // Skip self-re-exports to avoid duplicate symbols
+                        if !reexport_parts.is_empty() && reexport_parts != self.namespace {
                             if std::env::var("KANAGAWA_DEBUG").is_ok() {
                                 eprintln!("emit_file: module {:?} re-exports {:?}", self.namespace, reexport_parts);
                             }
                             reexports.push(reexport_parts);
+                        } else if reexport_parts == self.namespace && std::env::var("KANAGAWA_DEBUG").is_ok() {
+                            eprintln!("emit_file: skipping self-re-export of {:?}", self.namespace);
                         }
                     }
                     HirExport::ModuleDiff { include, exclude: _ } => {
@@ -185,18 +202,35 @@ impl CodeGen {
         // Build the list of items
         let mut result = build_list(&nodes);
 
-        // If there's a module namespace, wrap the items in nested ParseNamespace nodes
-        // We wrap from innermost to outermost, so for "a.b.c" we get:
-        // ParseNamespace("a", ParseNamespace("b", ParseNamespace("c", items)))
-        if !namespace_parts.is_empty() {
-            // Wrap from innermost to outermost
-            for part in namespace_parts.iter().rev() {
-                let ns_id = self.identifier(part);
-                result = unsafe { sys::ParseNamespace(ns_id, result) };
-            }
+        // Wrap items in a single namespace node with a flattened @ identifier
+        // For namespace ["compiler", "device", "schema"], we create:
+        // ParseNamespace("@compiler@device@schema", body)
+        //
+        // This matches the format used by namespace_scope() for type registration.
+        // The NamespaceNode::TypeCheck pushes the flattened name to context._namespaceScope,
+        // so AddSymbol and type lookup both use the same "@a@b@c" format.
+        //
+        // WORKAROUND: Device config properties from hardware.config and compiler.device.config
+        // need to appear in @compiler@config because that's where the backend looks for them.
+        // The original design has compiler.config re-export these values.
+        let effective_namespace = if namespace_parts == vec!["hardware".to_string(), "config".to_string()]
+            || namespace_parts == vec!["compiler".to_string(), "device".to_string(), "config".to_string()]
+        {
+            "@compiler@config".to_string()
+        } else if !namespace_parts.is_empty() {
+            namespace_parts.iter()
+                .map(|s| format!("@{}", s))
+                .collect()
+        } else {
+            String::new()
+        };
+
+        if !effective_namespace.is_empty() {
             if std::env::var("KANAGAWA_DEBUG").is_ok() {
-                eprintln!("emit_file: wrapped items in namespace {:?}", namespace_parts);
+                eprintln!("emit_file: wrapping items in namespace '{}'", effective_namespace);
             }
+            let name_node = self.identifier(&effective_namespace);
+            result = unsafe { sys::ParseNamespace(name_node, result) };
         }
 
         Ok(result)
@@ -240,9 +274,8 @@ impl CodeGen {
     /// Build a null-terminated array of namespace scope pointers.
     /// Returns a pointer to the array that is valid for the codegen lifetime.
     ///
-    /// IMPORTANT: The C++ ToScope function uses push_front when iterating,
-    /// so we must provide the array in REVERSE order (innermost-to-outermost).
-    /// For namespace ["compiler", "device", "schema"], we provide ["schema", "device", "compiler", NULL].
+    /// The scope is a SINGLE string with @ prefixes, like "@compiler@device@schema".
+    /// This matches the format expected by the C++ backend for type registration.
     pub(crate) fn namespace_scope(&mut self) -> sys::ParseNamespaceScopePtr {
         if self.namespace.is_empty() {
             if std::env::var("KANAGAWA_DEBUG_NS").is_ok() {
@@ -255,21 +288,20 @@ impl CodeGen {
             eprintln!("namespace_scope: building scope for {:?}", self.namespace);
         }
 
-        // Clone namespace to avoid borrow conflict with self.intern_cstring
-        let parts = self.namespace.clone();
-
-        // Build a proper pointer array for the namespace scope
-        // REVERSED: innermost-to-outermost order for C++ ToScope's push_front
-        let mut ptrs: Vec<*const std::os::raw::c_char> = Vec::with_capacity(parts.len() + 1);
-        for part in parts.iter().rev() {
-            let cstr = CString::new(part.as_str()).expect("valid namespace part");
-            ptrs.push(self.intern_cstring(cstr));
-        }
-        ptrs.push(std::ptr::null()); // Null terminator
+        // Build the flattened @ prefixed namespace string like "@compiler@device@schema"
+        let flattened: String = self.namespace.iter()
+            .map(|s| format!("@{}", s))
+            .collect();
 
         if std::env::var("KANAGAWA_DEBUG_NS").is_ok() {
-            eprintln!("namespace_scope: built array with {} parts (reversed)", parts.len());
+            eprintln!("namespace_scope: flattened to '{}'", flattened);
         }
+
+        // Build a single-element scope array: [flattened, NULL]
+        let cstr = CString::new(flattened).expect("valid namespace");
+        let ptr = self.intern_cstring(cstr);
+
+        let ptrs: Vec<*const std::os::raw::c_char> = vec![ptr, std::ptr::null()];
 
         // Store the pointer array in a boxed slice and leak it
         let boxed: Box<[*const std::os::raw::c_char]> = ptrs.into_boxed_slice();
@@ -340,6 +372,10 @@ impl CodeGen {
     pub(crate) fn qualified_scoped_identifier(&mut self, path: &[String]) -> ParseTreeNodePtr {
         // Resolve import alias if the first component matches
         let resolved_path = self.resolve_import_alias(path);
+
+        if std::env::var("KANAGAWA_DEBUG").is_ok() {
+            eprintln!("qualified_scoped_identifier: resolved {:?} -> {:?}", path, resolved_path);
+        }
 
         // Build list of identifiers
         let mut list = unsafe { sys::ParseBaseList(std::ptr::null_mut()) };

@@ -239,63 +239,54 @@ impl CodeGen {
             return Err(CodeGenError::Internal("empty type name".to_string()));
         }
 
-        // Parse the name array which has format like ["@module@path", "TypeName"]
-        // The first element is the module path with @ separators, the rest are type names
-        let mut parts: Vec<String> = Vec::new();
+        // The name array has format like ["@module@path", "TypeName"]
+        // The first element is the flattened @ path, the rest are nested type names
+        //
+        // For type registration, we use a single-element scope like ["@compiler@device@schema"]
+        // which produces lookup key "@compiler@device@schema::MemoryType".
+        // For type resolution to match, we must use the same format.
+        //
+        // ScopeFromNodeList uses push_front (reverses), so we need to build the list
+        // in reverse order. For scope ["@a@b"] and name "T", we want:
+        // - Output after ScopeFromNodeList: ["T", "@a@b"]
+        // - ParseNamedType takes: name = "T", scope = ["@a@b"]
+        // So we build list as: ["@a@b", "T"] which reverses to ["T", "@a@b"]
 
-        // Process each part of the name
-        for (i, part) in name.iter().enumerate() {
-            if i == 0 && part.contains('@') {
-                // First part is a module path with @ separators
-                let module_parts: Vec<&str> = part.split('@').filter(|s| !s.is_empty()).collect();
-                parts.extend(module_parts.iter().map(|s| s.to_string()));
-            } else {
-                // Regular type name part
-                parts.push(part.clone());
+        let type_name = name.last().unwrap();
+
+        // Check if we have a qualified name (with @ path)
+        let has_scope = name.len() > 1 || (name.len() == 1 && name[0].contains('@'));
+
+        let mut name_list = unsafe { sys::ParseBaseList(std::ptr::null_mut()) };
+
+        if name.len() > 1 && name[0].contains('@') {
+            // Qualified name with @ path: ["@a@b", "TypeName"]
+            // Keep the @ path as a single element
+            let scope_id = self.identifier(&name[0]);
+            name_list = unsafe { sys::ParseAppendList(name_list, scope_id) };
+
+            // Add any intermediate type names (for nested types)
+            for part in &name[1..name.len()-1] {
+                let id = self.identifier(part);
+                name_list = unsafe { sys::ParseAppendList(name_list, id) };
+            }
+        } else if name.len() > 1 {
+            // Multiple parts without @ - could be nested type like ["Outer", "Inner"]
+            for part in &name[..name.len()-1] {
+                let id = self.identifier(part);
+                name_list = unsafe { sys::ParseAppendList(name_list, id) };
             }
         }
 
-        if parts.is_empty() {
-            return Err(CodeGenError::Internal("empty type name after parsing".to_string()));
-        }
-
-        // Build a NodeList of IdentifierNodes for the type name parts
-        // ParseNamedType expects a NodeList, not a ScopedIdentifierNode
-        //
-        // IMPORTANT: ScopeFromNodeList uses push_front, which reverses the order of the list.
-        // ParseNamedType then takes name = scope.front() (LAST element of input) and
-        // scope = remaining elements (in reversed order).
-        //
-        // For a type registered in namespace ["a", "b", "c"] as "MemoryType":
-        // - The enum/struct is registered with scope ["a", "b", "c"] (via ToScope reversing our reversed array)
-        // - For type resolution to match, we need explicit scope = ["a", "b", "c"] after ScopeFromNodeList
-        // - ScopeFromNodeList reverses, so we pass: [scope reversed..., name] = ["c", "b", "a", "MemoryType"]
-        // - After ScopeFromNodeList: ["MemoryType", "a", "b", "c"]
-        // - name = "MemoryType", scope = ["a", "b", "c"] ✓
-        //
-        // Input parts = ["a", "b", "c", "MemoryType"]
-        // We need to output: ["c", "b", "a", "MemoryType"]
-        let type_name = parts.last().unwrap();
-        let scope_parts: Vec<_> = parts[..parts.len()-1].iter().rev().collect();
-
-        let mut name_list = unsafe { sys::ParseBaseList(std::ptr::null_mut()) };
-        for part in scope_parts {
-            let id = self.identifier(part);
-            name_list = unsafe { sys::ParseAppendList(name_list, id) };
-        }
         // Add the type name at the end
         let type_name_id = self.identifier(type_name);
         name_list = unsafe { sys::ParseAppendList(name_list, type_name_id) };
 
-        // Determine the namespace scope for type resolution
-        // If the name is fully qualified (has multiple parts), we pass null to avoid
-        // double-qualifying the name. The explicit scope in the name is sufficient.
-        // Only pass namespace scope for unqualified names that need implicit resolution.
-        let namespace = if parts.len() > 1 {
-            // Qualified name - the scope is already in the name parts
+        // For qualified names, we pass null namespace - the explicit scope is sufficient.
+        // For unqualified names, use current namespace for resolution.
+        let namespace = if has_scope {
             std::ptr::null()
         } else {
-            // Unqualified name - use current namespace for resolution
             self.namespace_scope()
         };
 

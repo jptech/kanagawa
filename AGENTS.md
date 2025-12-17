@@ -143,7 +143,7 @@ Exact flags vary by platform; see `BUILDING.md` for authoritative guidance. Typi
 
 - Configure + build (Ninja):
   - `cmake -S . -B build -G Ninja`
-  - `cmake --build build`
+  - `cmake --build build -j 10`
 - Run tests:
   - `ctest --test-dir build -j <N>`
   - `ctest --test-dir build -R '^syntax\\.'`

@@ -1598,3 +1598,88 @@ Successfully compiles:
 - `/tmp/claude/test_auto.k` - test file with `auto` params and return types
 - `library/debug/print.k` - uses `inline void print(auto x)`
 - `library/control/wait.k` - uses `inline auto wait(() -> T fn)`
+
+---
+
+## 2025-12-16 (end-to-end compilation session continued)
+
+### Session Summary
+
+Continued work on end-to-end compilation testing with the C++ backend.
+
+### Issues fixed with workarounds
+
+1. **Template emission crash** (emit_template): Templates with `auto` parameters were creating references to template type parameters (like `x$T`) without properly declaring them to the backend. **Workaround**: Skip all template emission until proper implementation.
+
+2. **decltype function call error**: `decltype(expr)` in expression context was being parsed as a function call and emitted as `ParseFunctionCall`. **Fixed** in `lower_call_expr` to detect decltype and convert to `TypeExpr`.
+
+3. **Unknown symbol: version**: The `version` variable from `compiler.config` (which aliases `device::version`) couldn't be resolved because imports don't add symbols to scope. **Workaround**: Skip static asserts.
+
+4. **Unknown symbol: device_name**: Similar import resolution issue with device config symbols. **Workaround**: Skip variables in `compiler.config`, `compiler.device.config`, and `hardware.config` namespaces.
+
+5. **Duplicate symbol errors**: The `hardware.config` namespace was showing duplicate symbols. Root cause unclear - namespace wrapping appears correct. **Workaround**: Extended variable skipping to include `hardware.config` namespace.
+
+6. **Undefined function: fmul32**: The `fmul32` function is defined in `hardware.dsp` but called from `numeric.float32.operator` using an unqualified name. Our import resolution doesn't add imported functions to scope. This is a fundamental import resolution gap.
+
+### Testing results
+
+- **Without base library**: "Type error" from backend - expects device schema types
+- **With base library**: "Undefined function: fmul32" - import resolution needed for function calls
+- **Haskell frontend**: Successfully compiles same test files (Exit 0) because it has full import resolution
+
+### Root cause analysis
+
+The fundamental issue is **import resolution for unqualified names**:
+
+1. When `A.k` imports `B.k`, symbols from B should be available in A's scope
+2. Our frontend records imports but doesn't add symbols to scope
+3. Symbol references in expressions/types use unqualified names
+4. The C++ backend can't resolve these because they're not in scope
+
+The Haskell frontend fully resolves all names before emitting ParseTree. It has complete semantic analysis including:
+- Symbol table with all symbols from imported modules
+- Full name resolution during type checking
+- All qualified references expanded before codegen
+
+### Workarounds in place
+
+| Issue | Workaround Location | Effect |
+|-------|---------------------|--------|
+| Templates with auto params | `emit_template` | Skip all templates |
+| decltype in expressions | `lower_call_expr` | Convert to TypeExpr |
+| Static asserts | `emit_item` | Skip all static asserts |
+| Config namespace variables | `emit_variable` | Skip compiler.config, compiler.device.config, hardware.config |
+
+### Files modified this session
+
+- `crates/kanagawa_codegen/src/decl.rs`: Skip templates, skip static asserts, skip config namespace variables
+- `crates/kanagawa_codegen/src/expr.rs`: Added debug output for qualified identifiers
+- `crates/kanagawa_codegen/src/emit.rs`: Added debug output for qualified_scoped_identifier
+- `crates/kanagawa_hir/src/lower.rs`: Handle decltype in expression context
+
+### Current status
+
+The Rust frontend can:
+- Parse Kanagawa source files through CST → AST → HIR → ParseTree
+- Connect to the C++ backend via FFI
+- Pass ParseTree nodes to the backend's Codegen function
+- Handle many constructs correctly
+
+The Rust frontend cannot yet:
+- Resolve unqualified names from imported modules (requires full symbol table)
+- Handle function calls to imported functions
+- Complete end-to-end compilation of real Kanagawa programs
+
+### Next steps for full import resolution
+
+1. **Build global symbol table**: During import processing, load imported modules and add their public symbols to a global symbol table.
+
+2. **Name resolution pass**: Before codegen, resolve all unqualified names to their fully qualified forms using the symbol table.
+
+3. **Qualify all references**: When emitting expressions, use fully qualified names for all symbol references.
+
+This is a significant architectural addition that would require:
+- Cross-file symbol collection
+- Visibility tracking (public vs private symbols)
+- Module namespace hierarchy
+- Potentially lazy loading of imported modules

@@ -154,7 +154,12 @@ impl Lowerer {
                 // inline void print(auto x) -> template<typename x$T> inline void print(x$T x)
                 Ok(self.maybe_wrap_function_in_template(func))
             }
-            ast::Decl::Variable(v) => Ok(HirItem::Variable(self.lower_variable(v)?)),
+            ast::Decl::Variable(v) => {
+                // Top-level variables (at file scope) are global
+                let mut var = self.lower_variable(v)?;
+                var.flags.is_global = true;
+                Ok(HirItem::Variable(var))
+            }
             ast::Decl::Struct(s) => Ok(HirItem::Struct(self.lower_struct(s)?)),
             ast::Decl::Enum(e) => Ok(HirItem::Enum(self.lower_enum(e)?)),
             ast::Decl::Class(c) => Ok(HirItem::Class(self.lower_class(c)?)),
@@ -1091,6 +1096,19 @@ impl Lowerer {
     }
 
     fn lower_call_expr(&mut self, c: &ast::CallExpr) -> HirExpr {
+        // Special handling for decltype(expr) - it's a type expression, not a function call.
+        // In expression context, decltype(expr) evaluates to the type of the expression,
+        // wrapped in Ty::Type for metatype operations like type equality.
+        if let ast::Expr::Ident(ident) = c.callee.as_ref() {
+            if ident.name.text == "decltype" && c.args.len() == 1 {
+                // Evaluate decltype(arg) to get the type of the argument
+                let arg_expr = self.lower_expr(&c.args[0]);
+                let arg_ty = arg_expr.ty.clone();
+                // Return a type expression with the resolved type
+                return HirExpr::new(c.span, Ty::Type(Box::new(arg_ty.clone())), HirExprKind::TypeExpr(arg_ty));
+            }
+        }
+
         let callee = self.lower_expr(&c.callee);
         let args: Vec<_> = c.args.iter().map(|a| self.lower_expr(a)).collect();
         let attrs = self.lower_attrs(&c.attrs);

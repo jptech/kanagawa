@@ -17,15 +17,31 @@ impl CodeGen {
         self.set_location(&expr.span);
 
         match &expr.kind {
-            // Literals
+            // Literals - must also set front-end types for the backend's type checking
             HirExprKind::IntLiteral { value, suffix } => {
                 if std::env::var("KANAGAWA_DEBUG").is_ok() {
                     eprintln!("emit_expr: IntLiteral value={}, suffix={:?}", value, suffix);
                 }
-                self.emit_int_literal(*value, suffix.as_ref())
+                let node = self.emit_int_literal(*value, suffix.as_ref())?;
+                // Set the front-end type for the integer literal
+                let type_node = self.emit_type(&expr.ty)?;
+                unsafe { sys::SetNodeType(node, type_node) };
+                Ok(node)
             }
-            HirExprKind::FloatLiteral(val) => Ok(unsafe { sys::ParseFloatLiteral(*val as f32) }),
-            HirExprKind::BoolLiteral(val) => Ok(unsafe { sys::ParseBoolLiteral(if *val { 1 } else { 0 }) }),
+            HirExprKind::FloatLiteral(val) => {
+                let node = unsafe { sys::ParseFloatLiteral(*val as f32) };
+                // Float type is inferred by the backend, but set it explicitly for safety
+                let type_node = unsafe { sys::ParseFloatType() };
+                unsafe { sys::SetNodeType(node, type_node) };
+                Ok(node)
+            }
+            HirExprKind::BoolLiteral(val) => {
+                let node = unsafe { sys::ParseBoolLiteral(if *val { 1 } else { 0 }) };
+                // Bool type - set explicitly
+                let type_node = unsafe { sys::ParseBoolType() };
+                unsafe { sys::SetNodeType(node, type_node) };
+                Ok(node)
+            }
             HirExprKind::StringLiteral(s) => {
                 let ptr = self.intern(s);
                 Ok(unsafe { sys::ParseStringLiteral(ptr) })
@@ -39,7 +55,13 @@ impl CodeGen {
             }
             HirExprKind::QualifiedIdent { path, .. } => {
                 // For qualified names, build a scoped identifier from the path
+                if std::env::var("KANAGAWA_DEBUG").is_ok() {
+                    eprintln!("emit_expr: QualifiedIdent original path = {:?}", path);
+                }
                 let scoped = self.qualified_scoped_identifier(path);
+                if std::env::var("KANAGAWA_DEBUG").is_ok() {
+                    eprintln!("emit_expr: QualifiedIdent scoped = {:?}", scoped);
+                }
                 Ok(unsafe { sys::ParseNamedVariable(scoped) })
             }
             HirExprKind::This { .. } => {
@@ -102,6 +124,16 @@ impl CodeGen {
                 let specifier = match &callee.kind {
                     // Free function call: specifier = (null, scoped_name)
                     HirExprKind::Ident { name, .. } => {
+                        // Check if this function was skipped - if so, propagate the error
+                        if self.is_skipped_function(name) {
+                            if std::env::var("KANAGAWA_DEBUG").is_ok() {
+                                eprintln!("emit_expr::Call: function '{}' was skipped, propagating error", name);
+                            }
+                            return Err(CodeGenError::Unsupported(format!(
+                                "call to skipped function '{}'",
+                                name
+                            )));
+                        }
                         // Must use scoped identifier, not plain identifier
                         let name_node = self.scoped_identifier(name);
                         if std::env::var("KANAGAWA_DEBUG").is_ok() {

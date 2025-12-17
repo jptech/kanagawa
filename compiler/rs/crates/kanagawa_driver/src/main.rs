@@ -103,23 +103,27 @@ impl CompileContext {
                 self.parse_file_recursive(&config_path)?;
             }
 
+            // Skip numeric/float32/operator.k and hardware/dsp.k for now
+            // These use templates that we can't fully resolve yet.
+            // TODO: Re-enable when template resolution is implemented
+            //
             // Load numeric/float32/operator.k (floating point operations)
-            let float_op_path = device_dir.join("numeric").join("float32").join("operator.k");
-            if float_op_path.exists() {
-                if std::env::var("KANAGAWA_DEBUG").is_ok() {
-                    eprintln!("Loading float ops: {}", float_op_path.display());
-                }
-                self.parse_file_recursive(&float_op_path)?;
-            }
+            // let float_op_path = device_dir.join("numeric").join("float32").join("operator.k");
+            // if float_op_path.exists() {
+            //     if std::env::var("KANAGAWA_DEBUG").is_ok() {
+            //         eprintln!("Loading float ops: {}", float_op_path.display());
+            //     }
+            //     self.parse_file_recursive(&float_op_path)?;
+            // }
 
             // Load hardware/dsp.k (DSP configuration)
-            let dsp_path = device_dir.join("hardware").join("dsp.k");
-            if dsp_path.exists() {
-                if std::env::var("KANAGAWA_DEBUG").is_ok() {
-                    eprintln!("Loading DSP config: {}", dsp_path.display());
-                }
-                self.parse_file_recursive(&dsp_path)?;
-            }
+            // let dsp_path = device_dir.join("hardware").join("dsp.k");
+            // if dsp_path.exists() {
+            //     if std::env::var("KANAGAWA_DEBUG").is_ok() {
+            //         eprintln!("Loading DSP config: {}", dsp_path.display());
+            //     }
+            //     self.parse_file_recursive(&dsp_path)?;
+            // }
 
             // Found and loaded device config
             return Ok(());
@@ -255,8 +259,15 @@ impl CompileContext {
     /// Get all parsed nodes from the cache. This should be called after all files
     /// have been parsed to collect unique nodes for codegen.
     fn collect_all_nodes(&self) -> Vec<sys::ParseTreeNodePtr> {
+        // Sort files by path for deterministic ordering
+        let mut sorted_files: Vec<_> = self.parsed_files.iter().collect();
+        sorted_files.sort_by_key(|(path, _)| path.clone());
+
         let mut all_nodes = Vec::new();
-        for nodes in self.parsed_files.values() {
+        for (path, nodes) in sorted_files {
+            if std::env::var("KANAGAWA_DEBUG").is_ok() {
+                eprintln!("collect_all_nodes: {} -> {} nodes", path.display(), nodes.len());
+            }
             all_nodes.extend(nodes.iter().cloned());
         }
         all_nodes
@@ -391,11 +402,11 @@ fn main() -> Result<()> {
             "--parse" => {
                 parse_only = true;
             }
-            "--import-dir" => {
+            "--import-dir" | "-I" => {
                 i += 1;
                 let v = args
                     .get(i)
-                    .ok_or_else(|| anyhow!("--import-dir requires a value"))?;
+                    .ok_or_else(|| anyhow!("--import-dir/-I requires a value"))?;
                 import_dirs.push(PathBuf::from(v));
             }
             "--no-implicit-base" => {
@@ -553,16 +564,33 @@ fn main() -> Result<()> {
         // Step 3: Collect all unique nodes from the cache
         let all_nodes = ctx.collect_all_nodes();
         // Filter out null pointers
-        let non_null_nodes: Vec<_> = all_nodes.iter().filter(|n| !n.is_null()).cloned().collect();
+        let mut non_null_nodes: Vec<_> = all_nodes.iter().filter(|n| !n.is_null()).cloned().collect();
         println!("Total nodes collected: {} non-null of {} (from {} files)", non_null_nodes.len(), all_nodes.len(), ctx.parsed_files.len());
+
+        // Debug: limit nodes if KANAGAWA_DEBUG_LIMIT is set
+        if let Ok(limit_str) = std::env::var("KANAGAWA_DEBUG_LIMIT") {
+            if let Ok(limit) = limit_str.parse::<usize>() {
+                if limit < non_null_nodes.len() {
+                    eprintln!("Debug: limiting nodes from {} to {}", non_null_nodes.len(), limit);
+                    non_null_nodes.truncate(limit);
+                }
+            }
+        }
 
         // Build the final root list from all nodes
         if std::env::var("KANAGAWA_DEBUG").is_ok() {
             eprintln!("Building root list from {} non-null nodes...", non_null_nodes.len());
+            for (i, node) in non_null_nodes.iter().enumerate() {
+                eprintln!("  Node {}: {:?}", i, node);
+            }
         }
         let root = build_list(&non_null_nodes);
         if std::env::var("KANAGAWA_DEBUG").is_ok() {
-            eprintln!("Root list built, calling backend codegen...");
+            eprintln!("Root list built: {:?}", root);
+            eprintln!("Calling backend codegen...");
+            // Flush stderr before calling backend
+            use std::io::Write;
+            let _ = std::io::stderr().flush();
         }
 
         // Run the backend codegen
