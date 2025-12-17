@@ -4,6 +4,7 @@
 //! and building the symbol table.
 
 use crate::def::{DefId, DefKind, Visibility};
+use crate::global::GlobalTypeRegistry;
 use crate::hir::*;
 use crate::namespace::encode_module_namespace;
 use crate::symbol::{ScopeKind, SymbolTable};
@@ -40,21 +41,36 @@ impl std::error::Error for LowerError {}
 
 /// Lower an AST file to HIR.
 pub fn lower_file(file: &ast::File) -> Result<(HirFile, SymbolTable), Vec<LowerError>> {
-    let mut lowerer = Lowerer::new();
+    let mut lowerer = Lowerer::new(None);
+    let hir = lowerer.lower_file(file)?;
+    Ok((hir, lowerer.symbols))
+}
+
+/// Lower an AST file to HIR with access to a global type registry.
+///
+/// The global registry contains type definitions from imported modules,
+/// allowing cross-module type resolution.
+pub fn lower_file_with_registry<'a>(
+    file: &ast::File,
+    registry: &'a GlobalTypeRegistry,
+) -> Result<(HirFile, SymbolTable), Vec<LowerError>> {
+    let mut lowerer = Lowerer::new(Some(registry));
     let hir = lowerer.lower_file(file)?;
     Ok((hir, lowerer.symbols))
 }
 
 /// The lowering context.
-struct Lowerer {
+struct Lowerer<'a> {
     symbols: SymbolTable,
     errors: Vec<LowerError>,
     /// Current module namespace prefix.
     module_namespace: Option<String>,
+    /// Global type registry for cross-module resolution.
+    global_registry: Option<&'a GlobalTypeRegistry>,
 }
 
-impl Lowerer {
-    fn new() -> Self {
+impl<'a> Lowerer<'a> {
+    fn new(global_registry: Option<&'a GlobalTypeRegistry>) -> Self {
         let mut symbols = SymbolTable::new();
         // Register builtin symbols before processing any user code
         crate::builtin::register_builtins(&mut symbols);
@@ -63,6 +79,7 @@ impl Lowerer {
             symbols,
             errors: Vec::new(),
             module_namespace: None,
+            global_registry,
         }
     }
 
@@ -1021,6 +1038,15 @@ impl Lowerer {
     fn lower_ident_expr(&mut self, id: &ast::IdentExpr) -> HirExpr {
         let name = id.name.text.clone();
 
+        // Handle the `this` keyword specially - it refers to the current class instance
+        if name == "this" {
+            // Get the current scope (class namespace) for the this reference
+            let scope = self.module_namespace.as_ref()
+                .map(|ns| ns.split('@').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect())
+                .unwrap_or_default();
+            return HirExpr::new(id.span, Ty::Unresolved, HirExprKind::This { scope });
+        }
+
         // Try to resolve the name
         let def_id = self.symbols.lookup(&name).unwrap_or(DefId::INVALID);
 
@@ -1340,7 +1366,7 @@ impl Lowerer {
             ast::Type::Named(n) => {
                 let path: Vec<_> = n.path.parts.iter().map(|p| p.text.clone()).collect();
 
-                // Try to resolve the type name
+                // Try to resolve the type name in local symbol table
                 if let Some(def_id) = self.symbols.lookup_qualified(&path) {
                     if let Some(entry) = self.symbols.get(def_id) {
                         if let Ty::Type(inner) = &entry.ty {
@@ -1349,7 +1375,7 @@ impl Lowerer {
                     }
                 }
 
-                // Try simple lookup
+                // Try simple lookup in local symbol table
                 if let Some(last) = path.last() {
                     if let Some(def_id) = self.symbols.lookup(last) {
                         if let Some(entry) = self.symbols.get(def_id) {
@@ -1360,7 +1386,43 @@ impl Lowerer {
                     }
                 }
 
-                Ty::Unresolved
+                // Try global registry if available
+                // We use lookup_*_as_reference to get a Ty::Reference that the backend
+                // can resolve via DeferredType, rather than the full struct/enum type
+                // which can cause issues with ParseArrayType.
+                if let Some(registry) = &self.global_registry {
+                    // First try by path
+                    if let Some(ty) = registry.lookup_path_as_reference(&path) {
+                        return ty;
+                    }
+                    // Then try by simple name if path has one element
+                    if path.len() == 1 {
+                        if let Some(ty) = registry.lookup_as_reference(&path[0]) {
+                            return ty;
+                        }
+                    }
+                }
+
+                // Type not found in local symbol table or global registry.
+                // Preserve the path as a Reference type so codegen
+                // can emit a named type reference that the backend will resolve.
+                //
+                // The backend's TypeCheck pass has access to all types from all files,
+                // so it can resolve these deferred type references.
+                if !path.is_empty() {
+                    // Build qualified name with module namespace if available
+                    let qualified_path = if path.len() == 1 {
+                        // Simple name like "MemoryConfiguration" - could be from imported module
+                        // Just use the name as-is; the backend will resolve it
+                        path
+                    } else {
+                        // Already qualified like "device::MemoryConfiguration"
+                        path
+                    };
+                    Ty::Reference(qualified_path)
+                } else {
+                    Ty::Unresolved
+                }
             }
             ast::Type::Array(a) => {
                 let element = self.lower_type(&a.element);

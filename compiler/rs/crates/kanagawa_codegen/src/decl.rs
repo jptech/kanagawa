@@ -47,39 +47,64 @@ pub(crate) fn emit_variable(cg: &mut CodeGen, var: &HirVariable) -> CodeGenResul
 
     cg.set_location(&var.span);
 
-    // Skip compiler.config variables that have cross-module references (device::x).
-    // These require full import resolution which we don't support yet.
-    // Keep variables with literal initializers (like default_clock_frequency_mhz = 200).
-    if cg.namespace == vec!["compiler".to_string(), "config".to_string()] {
-        // Check if the initializer contains a cross-module reference
-        // This includes direct QualifiedIdent and expressions like (device::x != 0)
-        let has_cross_module_ref = var.init.as_ref().map_or(false, |init| {
-            fn has_qualified_ident(expr: &kanagawa_hir::HirExpr) -> bool {
-                use kanagawa_hir::HirExprKind;
-                match &expr.kind {
-                    HirExprKind::QualifiedIdent { .. } => true,
-                    HirExprKind::Binary { lhs, rhs, .. } => {
-                        has_qualified_ident(lhs) || has_qualified_ident(rhs)
+    // Note: Reference types are now used for cross-module types that were found in the
+    // global registry. The backend resolves them via DeferredType during TypeCheck.
+
+    // Check for enum value references and cross-module references.
+    // The backend doesn't support enum value references as ParseNamedVariable - they need
+    // to be resolved to their integer values at compile time (which requires full type checking).
+    // Also skip cross-module references (device::x) which require full import resolution.
+    let has_enum_value_or_cross_module_ref = var.init.as_ref().map_or(false, |init| {
+        fn check_qualified_ident(
+            expr: &kanagawa_hir::HirExpr,
+            type_namespaces: &std::collections::HashMap<String, Vec<String>>,
+        ) -> bool {
+            use kanagawa_hir::HirExprKind;
+            match &expr.kind {
+                HirExprKind::QualifiedIdent { path, .. } => {
+                    // Check if this looks like an enum value reference (TypeName::MemberName)
+                    // by checking if the first component is a known type name
+                    if path.len() >= 2 {
+                        if type_namespaces.contains_key(&path[0]) {
+                            return true; // Enum value reference
+                        }
                     }
-                    HirExprKind::Unary { operand, .. } => has_qualified_ident(operand),
-                    HirExprKind::Paren(inner) => has_qualified_ident(inner),
-                    HirExprKind::Cast { expr, .. } => has_qualified_ident(expr),
-                    HirExprKind::Call { callee, args, .. } => {
-                        has_qualified_ident(callee) || args.iter().any(has_qualified_ident)
-                    }
-                    _ => false,
+                    // Also flag any qualified ident with 2+ parts as potentially problematic
+                    // since the backend may not be able to resolve it
+                    path.len() >= 2
                 }
+                HirExprKind::Binary { lhs, rhs, .. } => {
+                    check_qualified_ident(lhs, type_namespaces)
+                        || check_qualified_ident(rhs, type_namespaces)
+                }
+                HirExprKind::Unary { operand, .. } => check_qualified_ident(operand, type_namespaces),
+                HirExprKind::Paren(inner) => check_qualified_ident(inner, type_namespaces),
+                HirExprKind::Cast { expr, .. } => check_qualified_ident(expr, type_namespaces),
+                HirExprKind::Call { callee, args, .. } => {
+                    check_qualified_ident(callee, type_namespaces)
+                        || args.iter().any(|a| check_qualified_ident(a, type_namespaces))
+                }
+                HirExprKind::InitializerList(fields) => {
+                    fields.iter().any(|e| check_qualified_ident(e, type_namespaces))
+                }
+                HirExprKind::DesignatedInitializer(fields) => {
+                    fields.iter().any(|(_, e)| check_qualified_ident(e, type_namespaces))
+                }
+                _ => false,
             }
-            has_qualified_ident(init)
-        });
-        if has_cross_module_ref {
-            if std::env::var("KANAGAWA_DEBUG").is_ok() {
-                eprintln!("Skipping variable {} from compiler.config (cross-module refs)", var.name);
-            }
-            return Err(CodeGenError::Unsupported(
-                "compiler.config variables use cross-module refs".to_string()
-            ));
         }
+        check_qualified_ident(init, &cg.type_namespaces)
+    });
+    if has_enum_value_or_cross_module_ref {
+        if std::env::var("KANAGAWA_DEBUG").is_ok() {
+            eprintln!(
+                "Skipping variable {} (enum value or cross-module refs not supported)",
+                var.name
+            );
+        }
+        return Err(CodeGenError::Unsupported(
+            "variable uses enum value or cross-module refs".to_string(),
+        ));
     }
 
     // Handle auto type inference for constants
@@ -712,6 +737,32 @@ impl CodeGen {
 
     /// Emit an extern declaration.
     pub(crate) fn emit_extern(&mut self, ext: &HirExtern) -> CodeGenResult<ParseTreeNodePtr> {
+        use kanagawa_hir::Ty;
+
+        if std::env::var("KANAGAWA_DEBUG").is_ok() {
+            eprintln!("emit_extern: type={:?}", ext.extern_type);
+        }
+
+        // WORKAROUND: Skip extern declarations with unresolved/Reference types.
+        // These are typically for template types which we don't yet support.
+        fn has_unresolved_type(ty: &Ty) -> bool {
+            match ty {
+                Ty::Unresolved | Ty::Reference(_) | Ty::Instance { .. } => true,
+                Ty::Const(inner) => has_unresolved_type(inner),
+                Ty::Array { element, .. } => has_unresolved_type(element),
+                _ => false,
+            }
+        }
+
+        if has_unresolved_type(&ext.extern_type) {
+            if std::env::var("KANAGAWA_DEBUG").is_ok() {
+                eprintln!("emit_extern: skipping extern with unresolved type");
+            }
+            return Err(CodeGenError::Unsupported(
+                "extern with unresolved/template type".to_string()
+            ));
+        }
+
         self.set_location(&ext.span);
 
         let ty = self.emit_type(&ext.extern_type)?;

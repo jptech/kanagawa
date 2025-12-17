@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use kanagawa_codegen::CodeGen;
+use kanagawa_hir::GlobalTypeRegistry;
 use kanagawa_parsetree::{sys, BackendOptions, build_list};
 use kanagawa_syntax as syntax;
 use std::{
@@ -21,6 +22,8 @@ struct CompileContext {
     in_progress: HashSet<PathBuf>,
     /// Shared code generator (preserves module re-exports across files).
     codegen: CodeGen,
+    /// Global type registry for cross-module type resolution.
+    global_registry: GlobalTypeRegistry,
 }
 
 impl CompileContext {
@@ -31,6 +34,7 @@ impl CompileContext {
             parsed_files: HashMap::new(),
             in_progress: HashSet::new(),
             codegen: CodeGen::new(),
+            global_registry: GlobalTypeRegistry::new(),
         }
     }
 
@@ -217,9 +221,20 @@ impl CompileContext {
             }
         }
 
-        // Step 4: Lower AST to HIR
-        let (hir, symbols) = kanagawa_hir::lower_file(&ast)
+        // Step 4: Lower AST to HIR (using global registry for type resolution)
+        let (hir, symbols) = kanagawa_hir::lower_file_with_registry(&ast, &self.global_registry)
             .map_err(|e| anyhow!("HIR lowering failed for {}: {:?}", path.display(), e))?;
+
+        // Get the module namespace for registering types
+        let namespace = hir.module.as_ref()
+            .map(|m| m.namespace.clone())
+            .unwrap_or_default();
+
+        // Step 4.5: Register type definitions in the global registry for cross-module resolution
+        // This allows later files to resolve types from this module
+        for item in &hir.items {
+            self.register_type_from_item(&namespace, item);
+        }
 
         // Debug: print HIR items to trace types
         if std::env::var("KANAGAWA_DEBUG").is_ok() {
@@ -229,7 +244,7 @@ impl CompileContext {
             }
         }
 
-        // Step 4.5: Type check functions
+        // Step 4.6: Type check functions
         for item in &hir.items {
             if let kanagawa_hir::HirItem::Function(func) = item {
                 let mut checker = kanagawa_hir::TypeChecker::new(&symbols);
@@ -254,6 +269,87 @@ impl CompileContext {
         }
 
         Ok(nodes)
+    }
+
+    /// Register a type definition from an HIR item in the global registry.
+    /// Also registers with codegen for qualified identifier resolution.
+    fn register_type_from_item(&mut self, namespace: &str, item: &kanagawa_hir::HirItem) {
+        use kanagawa_hir::HirItem;
+
+        // Parse namespace from @a@b@c format to ["a", "b", "c"]
+        fn namespace_to_parts(ns: &str) -> Vec<String> {
+            ns.split('@')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect()
+        }
+
+        match item {
+            HirItem::Struct(s) => {
+                // Register struct type
+                self.global_registry.register_type(namespace, &s.name, s.ty.clone());
+                // Also register with codegen for qualified identifier resolution
+                self.codegen.register_type_namespace(&s.name, namespace_to_parts(namespace));
+                if std::env::var("KANAGAWA_DEBUG").is_ok() {
+                    eprintln!("  Registered struct type: {}::{}", namespace, s.name);
+                }
+            }
+            HirItem::Enum(e) => {
+                // Register enum type
+                self.global_registry.register_type(namespace, &e.name, e.ty.clone());
+                // Also register with codegen for qualified identifier resolution
+                self.codegen.register_type_namespace(&e.name, namespace_to_parts(namespace));
+                if std::env::var("KANAGAWA_DEBUG").is_ok() {
+                    eprintln!("  Registered enum type: {}::{}", namespace, e.name);
+                }
+            }
+            HirItem::Class(c) => {
+                // Register class type
+                self.global_registry.register_type(namespace, &c.name, c.ty.clone());
+                // Also register with codegen for qualified identifier resolution
+                self.codegen.register_type_namespace(&c.name, namespace_to_parts(namespace));
+                if std::env::var("KANAGAWA_DEBUG").is_ok() {
+                    eprintln!("  Registered class type: {}::{}", namespace, c.name);
+                }
+            }
+            HirItem::Union(u) => {
+                // Register union type
+                self.global_registry.register_type(namespace, &u.name, u.ty.clone());
+                // Also register with codegen for qualified identifier resolution
+                self.codegen.register_type_namespace(&u.name, namespace_to_parts(namespace));
+                if std::env::var("KANAGAWA_DEBUG").is_ok() {
+                    eprintln!("  Registered union type: {}::{}", namespace, u.name);
+                }
+            }
+            HirItem::Using(u) => {
+                // Register type alias
+                self.global_registry.register_type(namespace, &u.name, u.ty.clone());
+                // Also register with codegen for qualified identifier resolution
+                self.codegen.register_type_namespace(&u.name, namespace_to_parts(namespace));
+                if std::env::var("KANAGAWA_DEBUG").is_ok() {
+                    eprintln!("  Registered using type: {}::{}", namespace, u.name);
+                }
+            }
+            HirItem::StaticIf(si) => {
+                // Recursively register types from static if branches
+                self.register_type_from_item(namespace, &si.then_item);
+                if let Some(else_item) = &si.else_item {
+                    self.register_type_from_item(namespace, else_item);
+                }
+            }
+            HirItem::DeclBlock(block) => {
+                // Recursively register types from declaration block
+                for inner_item in &block.items {
+                    self.register_type_from_item(namespace, inner_item);
+                }
+            }
+            HirItem::Template(t) => {
+                // Register types from template inner item
+                self.register_type_from_item(namespace, &t.item);
+            }
+            // Functions, variables, etc. don't define new types
+            _ => {}
+        }
     }
 
     /// Get all parsed nodes from the cache. This should be called after all files

@@ -42,6 +42,10 @@ pub struct CodeGen {
     /// Set of function names that were skipped due to unsupported constructs.
     /// Used to also skip callers of these functions.
     pub(crate) skipped_functions: HashSet<String>,
+    /// Type name to qualified namespace map.
+    /// For `enum MemoryInitFileType` in @compiler@device@schema, maps "MemoryInitFileType" -> ["compiler", "device", "schema"]
+    /// Used to resolve type names in qualified identifiers like `MemoryInitFileType::Mem`.
+    pub(crate) type_namespaces: HashMap<String, Vec<String>>,
 }
 
 impl CodeGen {
@@ -53,7 +57,17 @@ impl CodeGen {
             import_aliases: HashMap::new(),
             module_reexports: HashMap::new(),
             skipped_functions: HashSet::new(),
+            type_namespaces: HashMap::new(),
         }
+    }
+
+    /// Register a type name with its namespace.
+    /// This allows resolving type names in qualified identifiers like `MemoryInitFileType::Mem`.
+    pub fn register_type_namespace(&mut self, type_name: &str, namespace: Vec<String>) {
+        if std::env::var("KANAGAWA_DEBUG").is_ok() {
+            eprintln!("register_type_namespace: {} -> {:?}", type_name, namespace);
+        }
+        self.type_namespaces.insert(type_name.to_string(), namespace);
     }
 
     /// Check if a function was skipped due to unsupported constructs.
@@ -404,10 +418,19 @@ impl CodeGen {
             // path = ["device", "device_name"], alias_target = ["compiler", "device", "config"]
             // module_path = ["compiler", "device", "config"], symbol_parts = ["device_name"]
             (alias_target.clone(), path[1..].to_vec())
+        } else if let Some(type_namespace) = self.type_namespaces.get(first) {
+            // First component is a known type name - expand with its namespace
+            // path = ["MemoryInitFileType", "Mem"], type_namespace = ["compiler", "device", "schema"]
+            // Backend expects namespace as single @-prefixed string: ["@compiler@device@schema", "MemoryInitFileType", "Mem"]
+            let ns_string = type_namespace.iter().map(|s| format!("@{}", s)).collect::<String>();
+            let mut result = vec![ns_string];
+            result.extend(path.to_vec());
+            if std::env::var("KANAGAWA_DEBUG").is_ok() {
+                eprintln!("resolve_import_alias: type expansion {:?} -> {:?}", path, result);
+            }
+            return result;
         } else {
-            // Not an alias - could be a qualified path like ["compiler", "device", "config", "device_name"]
-            // In this case, try to find a module prefix that matches a re-export
-            // For now, just return as-is
+            // Not an alias and not a known type - return as-is
             return path.to_vec();
         };
 
